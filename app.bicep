@@ -9,6 +9,15 @@ param environment string
 @description('Port the application listens on. Overrides the image default of 3000.')
 param appPort int = 35493
 
+// Pinned by digest, not by the :latest tag. A mutable tag means a restart, a
+// scaling event or a node replacement can run a different image with no change
+// here and no review, and this container is handed the Redis credential.
+// Resolve a new one with:
+//   docker buildx imagetools inspect ghcr.io/radius-project/samples/demo:latest \
+//     --format '{{.Manifest.Digest}}'
+@description('Application image, pinned by digest.')
+param image string = 'ghcr.io/radius-project/samples/demo@sha256:0ae87935398b92627ab73bbe2bdf43d777419076804ba1a6e346f5cb06de43ca'
+
 // This file is identical for every environment. If it ever needs a conditional
 // on the environment name, the design has failed.
 //
@@ -28,7 +37,7 @@ resource demo 'Applications.Core/containers@2023-10-01-preview' = {
   properties: {
     application: application
     container: {
-      image: 'ghcr.io/radius-project/samples/demo:latest'
+      image: image
       ports: {
         web: {
           containerPort: appPort
@@ -38,6 +47,23 @@ resource demo 'Applications.Core/containers@2023-10-01-preview' = {
         PORT: {
           value: '${appPort}'
         }
+      }
+      // Readiness only. /healthz opens a Redis connection and issues a PING,
+      // so wiring it to liveness would turn a brief Redis blip into a restart
+      // storm across every replica. Readiness just takes the pod out of the
+      // Service until Redis answers again, which is the behaviour we want.
+      //
+      // The thresholds are set explicitly rather than left to defaults: the
+      // handler opens a fresh connection on every probe, and Kubernetes
+      // defaults probe timeouts to 1 second, which is too short for that.
+      readinessProbe: {
+        kind: 'httpGet'
+        path: '/healthz'
+        containerPort: appPort
+        initialDelaySeconds: 5
+        periodSeconds: 15
+        failureThreshold: 3
+        timeoutSeconds: 5
       }
     }
     // The connection name must stay lowercase 'redis'. Radius uppercases it to

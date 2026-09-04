@@ -33,22 +33,22 @@ wait_ready() {
 }
 
 echo "==> creating a todo: ${TITLE}"
-PF=$(forward); trap 'kill "$PF" 2>/dev/null || true' EXIT
+PF=$(forward); trap '{ kill "$PF" && wait "$PF"; } 2>/dev/null || true' EXIT
 wait_ready
 curl -sf -X POST "http://localhost:${SCRATCH_PORT}/api/todos" \
   -H 'Content-Type: application/json' \
   -d "{\"title\":\"${TITLE}\",\"done\":false}" >/dev/null
-kill "$PF" 2>/dev/null || true; trap - EXIT
+{ kill "$PF" && wait "$PF"; } 2>/dev/null || true; trap - EXIT
 
 echo "==> deleting the pod"
 kubectl --context "$CONTEXT" -n "$NS" delete pod -l radapp.io/resource=demo --wait=true
 kubectl --context "$CONTEXT" -n "$NS" rollout status deploy/demo --timeout=120s
 
 echo "==> reading the todo back from the replacement pod"
-PF=$(forward); trap 'kill "$PF" 2>/dev/null || true' EXIT
+PF=$(forward); trap '{ kill "$PF" && wait "$PF"; } 2>/dev/null || true' EXIT
 wait_ready
 BODY=$(curl -sf "http://localhost:${SCRATCH_PORT}/api/todos")
-kill "$PF" 2>/dev/null || true; trap - EXIT
+{ kill "$PF" && wait "$PF"; } 2>/dev/null || true; trap - EXIT
 
 if grep -qF "$TITLE" <<<"$BODY"; then
   echo "PASS: the todo survived the restart"
