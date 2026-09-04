@@ -14,6 +14,11 @@ resource demo 'Applications.Core/containers@2023-10-01-preview' = {
           containerPort: 35493
         }
       }
+      env: {
+        PORT: {
+          value: '35493'
+        }
+      }
     }
   }
 }
