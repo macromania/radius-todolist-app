@@ -1,0 +1,6 @@
+{
+	"extensions": {
+		"radius": "br:biceptypes.azurecr.io/radius:0.60",
+		"aws": "br:biceptypes.azurecr.io/aws:0.60"
+	}
+}
