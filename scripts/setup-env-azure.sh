@@ -73,7 +73,7 @@ rad group show "$RAD_GROUP" --workspace azure >/dev/null 2>&1 || \
   rad group create "$RAD_GROUP" --workspace azure
 
 echo "==> deploying the azure environment"
-rad deploy environments/azure.bicep --workspace azure --group "$RAD_GROUP" \
+rad deploy infra/radius/environments/azure.bicep --workspace azure --group "$RAD_GROUP" \
   -p azureSubscriptionId="$SUBSCRIPTION" \
   -p azureResourceGroup="$APP_RG" \
   -p redisRecipeRef="$RECIPE_REF" \

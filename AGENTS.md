@@ -1,25 +1,29 @@
 # AGENTS.md
 
 A Radius application deployed to two targets: a local kind cluster and Azure
-Kubernetes Service. `app.bicep` is identical for both. Read `README.md` first.
+Kubernetes Service. `infra/radius/app.bicep` is identical for both.
+Read `README.md` first.
 
 ## The rule that shapes everything
 
-`app.bicep` must never contain a conditional on the environment. If it needs
-one, the design has failed. Environment differences belong in
-`environments/local.bicep` and `environments/azure.bicep`, which map the
+`infra/radius/app.bicep` must never contain a conditional on the environment.
+If it needs one, the design has failed. Environment differences belong in
+`infra/radius/environments/local.bicep` and
+`infra/radius/environments/azure.bicep`, which map the
 `Applications.Datastores/redisCaches` resource type to different Recipes.
 
 ## Where things are
 
-- `app.bicep` — the application. Environment-agnostic.
-- `environments/` — one file per target. Recipe maps live here.
-- `recipes/azure-managed-redis.bicep` — the custom Recipe. Its header comment
-  explains three non-obvious requirements; read it before editing.
+- `infra/radius/app.bicep` — the application. Environment-agnostic.
+- `infra/radius/bicepconfig.json` — extension configuration for the Radius subtree.
+- `infra/radius/environments/` — local and Azure Recipe maps. Local uses a
+  published Radius Recipe; it has no custom Recipe source in this repository.
+- `infra/radius/recipes/azure/managed-redis.bicep` — the custom Recipe. Its header
+  comment explains three non-obvious requirements; read it before editing.
 - `infra/main.bicep` — network, private DNS, Log Analytics, AKS.
 - `infra/registry.bicep` — the registry holding the Recipe. Deployed separately
-  and first, because the Recipe must exist before `environments/azure.bicep`
-  can reference it.
+  and first, because the Recipe must exist before
+  `infra/radius/environments/azure.bicep` can reference it.
 - `scripts/` — setup and the two acceptance tests.
 - `.github/workflows/validate.yml` — compiles every Bicep file and asserts the
   invariants listed below.
@@ -44,9 +48,9 @@ healthy and fails later.
 2. The Recipe wraps the access key in `uriComponent()`. Radius embeds the
    password in a URL unencoded, and base64 keys contain `/` about half the time,
    which throws `TypeError: Invalid URL` in the client.
-3. The connection in `app.bicep` is named `redis`, lowercase. Radius uppercases
-   it into `CONNECTION_REDIS_*`. Any other name and the app silently falls back
-   to in-memory storage.
+3. The connection in `infra/radius/app.bicep` is named `redis`, lowercase.
+   Radius uppercases it into `CONNECTION_REDIS_*`. Any other name and the app
+   silently falls back to in-memory storage.
 4. The Recipe sets `publicNetworkAccess: 'Disabled'`.
 
 ## Things that cost time if you do not know them

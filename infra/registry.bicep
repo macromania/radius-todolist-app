@@ -2,8 +2,8 @@
 //
 // This is deployed separately from infra/main.bicep and before it, because the
 // custom Redis Recipe has to be published and its digest recorded before
-// environments/azure.bicep can reference it, and that reference is needed at
-// the time the Azure Radius environment is created.
+// infra/radius/environments/azure.bicep can reference it. The reference is
+// needed when the Azure Radius environment is created.
 //
 // Anonymous pull is enabled so the Radius control plane can fetch Recipes with
 // no registry credentials, which removes a whole class of failure from the

@@ -4,11 +4,10 @@
 // the private DNS zone that makes the private endpoint resolvable, log storage,
 // and the AKS cluster itself.
 //
-// It deliberately does NOT create the Azure Managed Redis instance. That is
-// created by the Radius Recipe in recipes/azure-managed-redis.bicep, into a
-// separate resource group (rg-todolist-app), because Radius holds Contributor
-// on that group and must not be able to reconfigure or delete the cluster it
-// runs on.
+// It deliberately does NOT create Azure Managed Redis. The Recipe at
+// infra/radius/recipes/azure/managed-redis.bicep creates it in a separate
+// resource group (rg-todolist-app), because Radius holds Contributor on that
+// group and must not be able to reconfigure or delete the cluster it runs on.
 
 targetScope = 'resourceGroup'
 

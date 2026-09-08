@@ -1,10 +1,10 @@
 # radius-todolist-app
 
-One application definition, two environments. `app.bicep` describes a todo app
-that needs a Redis cache. On a local kind cluster that cache is a pod; on Azure
-Kubernetes Service it is Azure Managed Redis behind a private endpoint. The
-application file is byte-identical in both cases — the difference lives entirely
-in `environments/`.
+One application definition, two environments. `infra/radius/app.bicep` describes
+a todo app that needs a Redis cache. On a local kind cluster that cache is a pod;
+on Azure Kubernetes Service it is Azure Managed Redis behind a private endpoint.
+The application file is byte-identical in both cases — the difference lives
+entirely in `infra/radius/environments/`.
 
 The application itself is the public Radius sample, `ghcr.io/radius-project/samples/demo`,
 pinned by digest.
@@ -30,16 +30,44 @@ Azure, from nothing:
 
 `make help` lists every target.
 
+### Publishing the Recipe again
+
+`make publish-recipe` can be rerun. If the tag already exists and matches
+`RECIPE_EXPECTED_DIGEST`, it skips publishing and ensures the tag is locked.
+It refuses an existing tag with a different digest. Registry lookup failures
+stop the command rather than being treated as a missing tag.
+
+Reusing a tag does not publish local source changes. To release a changed Recipe,
+use a new version, for example `make publish-recipe RECIPE_TAG=0.1.1`. Then update
+`RECIPE_TAG` and `RECIPE_EXPECTED_DIGEST` in the Makefile using the printed digest
+before running `make env-azure`. Do not unlock an old tag to overwrite it.
+
+The registry returns HTTP 405 if a push tries to overwrite a locked tag. A
+successful `az acr login` does not bypass that lock.
+
 ## Layout
 
-    app.bicep                          the application; identical for all environments
-    environments/local.bicep           maps redisCaches to an in-cluster Redis pod
-    environments/azure.bicep           maps redisCaches to the custom Azure Recipe
-    recipes/azure-managed-redis.bicep  builds Azure Managed Redis + private endpoint
-    infra/main.bicep                   network, private DNS, Log Analytics, AKS
-    infra/registry.bicep               the container registry that holds the Recipe
-    scripts/                           setup and acceptance tests
-    ports.env                          reserved local port block, 35490-35499
+    infra/
+      main.bicep                 network, private DNS, Log Analytics, AKS
+      main.bicepparam            Azure platform parameters
+      registry.bicep             the registry that holds the Recipe
+      radius/
+        bicepconfig.json         Radius Bicep extension configuration
+        app.bicep                the application; identical for both environments
+        environments/
+          local.bicep            maps redisCaches to an in-cluster Redis pod
+          azure.bicep            maps redisCaches to the custom Azure Recipe
+        recipes/
+          azure/
+            managed-redis.bicep  Azure Managed Redis + private endpoint
+    scripts/                     setup, publishing and tests
+    ports.env                    reserved local port block, 35490-35499
+
+Only custom Recipes live in this repository. Local uses Radius's published
+`local-dev/rediscaches` Recipe, so there is no local Recipe source to maintain.
+The environment files select published Recipes explicitly; the directory names
+are for organization, not automatic discovery. Run the existing Make targets
+from the repository root.
 
 ## Four things that will bite you
 

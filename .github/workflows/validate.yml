@@ -29,7 +29,7 @@ jobs:
       - name: Compile the Azure-only templates
         run: |
           set -euo pipefail
-          for f in infra/main.bicep infra/registry.bicep recipes/azure-managed-redis.bicep; do
+          for f in infra/main.bicep infra/registry.bicep infra/radius/recipes/azure/managed-redis.bicep; do
             echo "==> $f"
             "$HOME/.rad/bin/bicep" build --stdout "$f" > /dev/null
           done
@@ -41,13 +41,13 @@ jobs:
         run: |
           set -euo pipefail
           SCOPE=/planes/radius/local/resourcegroups/ci/providers/Applications.Core
-          rad bicep generate-kubernetes-manifest app.bicep -g ci \
+          rad bicep generate-kubernetes-manifest infra/radius/app.bicep -g ci \
             --parameters application="$SCOPE/applications/todolist" \
             --parameters environment="$SCOPE/environments/local" \
             --destination-file /tmp/app.yaml
-          rad bicep generate-kubernetes-manifest environments/local.bicep -g ci \
+          rad bicep generate-kubernetes-manifest infra/radius/environments/local.bicep -g ci \
             --destination-file /tmp/env-local.yaml
-          rad bicep generate-kubernetes-manifest environments/azure.bicep -g ci \
+          rad bicep generate-kubernetes-manifest infra/radius/environments/azure.bicep -g ci \
             --parameters azureSubscriptionId=00000000-0000-0000-0000-000000000000 \
             --parameters redisRecipeRef=example.azurecr.io/r/x:0.1.0 \
             --parameters privateEndpointSubnetId=/subscriptions/x/resourceGroups/y/providers/Microsoft.Network/virtualNetworks/v/subnets/s \
@@ -65,7 +65,7 @@ jobs:
       # not.
       - name: The Redis Recipe must emit tls true
         run: |
-          grep -q 'tls: true' recipes/azure-managed-redis.bicep || {
+          grep -q 'tls: true' infra/radius/recipes/azure/managed-redis.bicep || {
             echo "The Recipe must emit tls: true. Radius otherwise infers TLS"
             echo "from port == 6380, and Azure Managed Redis uses port 10000,"
             echo "so it would build a plaintext redis:// URL for a TLS endpoint."
@@ -74,7 +74,7 @@ jobs:
 
       - name: The Redis Recipe must percent-encode the access key
         run: |
-          grep -q 'uriComponent(' recipes/azure-managed-redis.bicep || {
+          grep -q 'uriComponent(' infra/radius/recipes/azure/managed-redis.bicep || {
             echo "The Recipe must wrap the key in uriComponent(). Radius embeds"
             echo "the password in a URL without encoding it, and base64 keys"
             echo "contain '/' about half the time, which makes the URL"
@@ -84,7 +84,7 @@ jobs:
 
       - name: The connection must stay named redis in lowercase
         run: |
-          grep -qE '^\s+redis: \{' app.bicep || {
+          grep -qE '^\s+redis: \{' infra/radius/app.bicep || {
             echo "The connection must be named 'redis'. Radius uppercases it to"
             echo "build CONNECTION_REDIS_*, which is what the app reads. Any"
             echo "other name and it silently stores todos in process memory."
@@ -93,10 +93,13 @@ jobs:
 
       - name: Azure Managed Redis must have no public endpoint
         run: |
-          grep -q "publicNetworkAccess: 'Disabled'" recipes/azure-managed-redis.bicep || {
+          grep -q "publicNetworkAccess: 'Disabled'" infra/radius/recipes/azure/managed-redis.bicep || {
             echo "The cache must not be reachable from the internet."
             exit 1
           }
 
       - name: Shell scripts must pass shellcheck
         run: shellcheck scripts/*.sh
+
+      - name: Recipe publishing must preserve immutable tags
+        run: make test-publish-recipe
