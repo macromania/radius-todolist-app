@@ -84,6 +84,7 @@ def run_loop(
         provider.authenticate(workload_required=True)
         provider.connect_management()
         provider.verify_recipes()
+    logger.info("provisioner_ready")
     while not stopped():
         check_session(operations)
         run_once(operations, provider)

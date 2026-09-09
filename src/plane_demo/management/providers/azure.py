@@ -743,8 +743,9 @@ class AzureProvider:
             },
         ]
 
-    def management_permissions(self, namespace: str) -> list:
-        return self.role_binding(
+    @staticmethod
+    def management_permissions(namespace: str) -> list:
+        namespaced = AzureProvider.role_binding(
             "radius-system",
             "plane-provisioner",
             namespace,
@@ -759,6 +760,40 @@ class AzureProvider:
                 {"apiGroups": ["apps"], "resources": ["deployments"], "verbs": ["get", "list"]},
             ],
         )
+        return namespaced + [
+            {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "ClusterRole",
+                "metadata": {
+                    "name": "radplanes-provisioner-radius-api",
+                    "labels": {"project": "radplanes"},
+                },
+                "rules": [
+                    {
+                        "apiGroups": ["api.ucp.dev"],
+                        "resources": ["planes/local"],
+                        "resourceNames": ["radius"],
+                        "verbs": ["get", "list", "create", "update", "delete"],
+                    }
+                ],
+            },
+            {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "ClusterRoleBinding",
+                "metadata": {
+                    "name": "radplanes-provisioner-radius-api",
+                    "labels": {"project": "radplanes"},
+                },
+                "roleRef": {
+                    "apiGroup": "rbac.authorization.k8s.io",
+                    "kind": "ClusterRole",
+                    "name": "radplanes-provisioner-radius-api",
+                },
+                "subjects": [
+                    {"kind": "ServiceAccount", "name": "provisioner", "namespace": namespace}
+                ],
+            },
+        ]
 
     def initialize_database(self, slot: str) -> None:
         self.config.allocation(slot)

@@ -67,6 +67,7 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F038 | 7 | Medium correctness | `operations/clean-azure.py` | role_state | Cleanup absence proof relies on a broad role listing rather than checking every manifest GUID | Exact-GUID lookup verified available; strengthen before final teardown |
 | F039 | 7 | High integration | `harness/export-state.py`, `operations/clean-azure.py` | cleanup handoff | Exporter does not yet generate cleanup-targets.json and its Radius workspace metadata | Wire automatically before final teardown; do not require manual PVC/credential copying |
 | F040 | 7 | Medium correctness | `operations/clean-azure.py` | interrupt handling | KeyboardInterrupt bypasses the explicit incomplete-cleanup result | Add explicit interrupted outcome before final teardown |
+| F041 | 3 | High correctness | `src/plane_demo/management/providers/azure.py` | management_permissions | Worker had namespace pod/port-forward access but lacked cluster-scoped access to Radius's aggregated API | Narrow planes/local, resourceName radius grant added; live 403 became 200 and worker stayed Running without restarts; fix review/unit checks recorded below |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -238,3 +239,16 @@ Parent layout verification also passed `make check` with the same 320 tests,
 extensions. Independent walkthrough and security reviews found no layout
 regression. The inspected obsolete `.pytest-work` scratch directory was removed
 after tests finished; live deployment state and credentials were untouched.
+
+### Live management worker authorization correction
+
+The reorganized management API and operator deployment completed, but the worker
+initially crashed on Radius API authorization. A Job using the worker's actual
+service account reproduced HTTP 403 for `api.ucp.dev` resource `planes/local`,
+name `radius`.
+The added ClusterRole grants only that Radius API plane to that service account;
+it grants no core Secrets access, Kubernetes cluster-admin, or Azure role writes.
+The same request returned HTTP 200 after the change, and the worker remained
+Running with zero restarts. Independent fix reviews found the production grant
+correct; the obsolete test prohibiting every ClusterRoleBinding was narrowed
+to assert this exact grant and subject.

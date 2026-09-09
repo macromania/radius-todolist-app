@@ -1163,7 +1163,16 @@ def test_scoped_data_rbac_and_tokenless_public_accounts(provider, monkeypatch):
     )
     assert public["automountServiceAccountToken"] is False
     assert not public["metadata"].get("annotations")
-    assert not any(resource["kind"] == "ClusterRoleBinding" for resource in resources)
+    bindings = [resource for resource in resources if resource["kind"] == "ClusterRoleBinding"]
+    assert len(bindings) == 1
+    assert bindings[0]["roleRef"]["name"] == "radplanes-provisioner-radius-api"
+    assert bindings[0]["subjects"] == [
+        {
+            "kind": "ServiceAccount",
+            "name": "provisioner",
+            "namespace": "radplanes-management-management",
+        }
+    ]
 
 
 def certificate_wrapper(uri):
@@ -1614,6 +1623,28 @@ def test_runtime_workspace_rejects_malformed_local_configuration(provider, docum
         provider.seed_management_workspace()
     assert provider.radius_config.read_text() == document
     provider.commands.run.assert_not_called()
+
+
+def test_management_worker_gets_only_its_radius_api_plane(provider):
+    resources = provider.management_permissions("radplanes-management-management")
+    role = next(item for item in resources if item["kind"] == "ClusterRole")
+    assert role["rules"] == [
+        {
+            "apiGroups": ["api.ucp.dev"],
+            "resources": ["planes/local"],
+            "resourceNames": ["radius"],
+            "verbs": ["get", "list", "create", "update", "delete"],
+        }
+    ]
+    binding = next(item for item in resources if item["kind"] == "ClusterRoleBinding")
+    assert binding["subjects"] == [
+        {
+            "kind": "ServiceAccount",
+            "name": "provisioner",
+            "namespace": "radplanes-management-management",
+        }
+    ]
+    assert binding["roleRef"]["name"] == role["metadata"]["name"]
 
 
 def test_runtime_workspace_rejects_a_redirected_config_file(provider):
