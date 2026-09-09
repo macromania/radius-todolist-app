@@ -413,3 +413,18 @@ node groups, then recorded temporary harness Reader assignments for those
 groups in protected state. These read-only assignments must be removed after
 the reset; no Azure deletion or role-delegation permission was granted.
 Live reset, state/evidence preservation, and fresh onboarding remain pending.
+
+The failed admission and continuation records are now archived on the host,
+with their original SHA-256 values, alongside token-free exported cleanup
+metadata. The reset executor runs in independent `radplanes-system`, not an
+application namespace being deleted, and mounts no state PVC or human token.
+Its source bundle and six allowed seed files are checked before use. A
+temporary exact-subject federation is recorded with the Reader leases for
+later removal; the executor security review was clean.
+
+The first live read-only reset preview stopped on Azure `Forbidden` before any
+deletion. Cleanup diagnostics now identify the Azure operation and owned
+target rather than only the executable; permission failures remain fatal.
+The direct walkthrough and independent security fix review were clean, and
+48 cleanup tests plus 15 subtests passed. The read-only preview must pass
+before executing the reset; no access failure is treated as absence.

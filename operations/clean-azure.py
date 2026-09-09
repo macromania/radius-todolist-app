@@ -249,7 +249,16 @@ class Cleanup:
                     "Use a reachable approved network and exported project credentials, or "
                     "review the explicit --provider-only emergency path."
                 ) from None
-            raise CleanupError(f"{args[0]} command failed; cleanup is incomplete") from None
+            target = next(
+                (
+                    args[args.index(flag) + 1]
+                    for flag in ("--resource-group", "--scope", "--name")
+                    if flag in args
+                ),
+                None,
+            )
+            operation = " ".join(args[:3]) + (f" ({target})" if target else "")
+            raise CleanupError(f"{operation} command failed; cleanup is incomplete") from None
 
     def az(self, *args: str, mutation: bool = False):
         text = self.call(

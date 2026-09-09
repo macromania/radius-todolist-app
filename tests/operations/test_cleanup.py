@@ -557,6 +557,14 @@ class CleanupTests(unittest.TestCase):
             self.assertEqual(cleanup.main(), 1)
         self.assertFalse(self.commands.calls)
 
+    def test_azure_failure_names_the_operation_and_owned_target(self):
+        self.commands.fail = lambda args: args[:3] == ["az", "group", "exists"]
+        with self.assertRaisesRegex(
+            cleanup.CleanupError, r"az group exists \(rg-radplanes-platform\) command failed"
+        ):
+            self.engine(radius_only=True).clean()
+        self.assertFalse(self.mutations())
+
     def test_every_command_is_explicitly_scoped(self):
         self.engine().clean()
         for args, env in self.commands.calls:
