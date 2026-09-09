@@ -70,12 +70,13 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F041 | 3 | High correctness | `src/plane_demo/management/providers/azure.py` | management_permissions | Worker had namespace pod/port-forward access but lacked cluster-scoped access to Radius's aggregated API | Narrow planes/local, resourceName radius grant added; live 403 became 200 and worker stayed Running without restarts; fix review/unit checks recorded below |
 | F042 | 4 | Deployment blocker | `harness/run-azure.py`, `infra/bootstrap/azure.bicep` | identity selection | Harness reused coordinator identity, which cannot read gateway/subnet metadata | Resolved: dedicated harness identity, both fix reviews, 21 exact live grants verified; exporter ready and first tenant provisioning started |
 | F043 | 4 | High correctness | `harness/export-state.py` | optional AKS lookup | AKS returns NotFound during creation as well as ResourceNotFound; exporter treated the former as fatal | Exact optional-lookup alternative added; run-path regression, rubber-duck pass, and security fix review passed |
-| F044 | 3 | Deployment blocker | `src/plane_demo/management/providers/azure.py` | data prerequisites | Bootstrap ConfigMap Roles collide with Radius's same-name generated container Roles | Distinct -configmaps Role/Binding names preserve exact subjects/verbs; run-path tests and both fix reviews pass; fresh deployment required |
-| F045 | 3 | Deployment blocker | `infra/radius/recipes/azure/redis.bicep` | existing endpointNic | Radius reads the declared existing NIC before the private endpoint creates it | Dependency added to the existing NIC itself, not only its tag extension; emitted-template test and both fix reviews pass; fresh Recipe execution required |
+| F044 | 3 | Deployment blocker | `src/plane_demo/management/providers/azure.py` | data prerequisites | Bootstrap ConfigMap Roles collide with Radius's same-name generated container Roles | Resolved: distinct names, source/fix reviews, actual Role/Binding inspection and successful fresh tenant provisioning |
+| F045 | 3 | Deployment blocker | `infra/radius/recipes/azure/redis.bicep` | existing endpointNic | Radius reads the declared existing NIC before the private endpoint creates it | Resolved: existing-NIC dependency, compiled regression/fix reviews, locked Recipe publication and successful fresh execution |
 | F046 | reset | Correctness/access blocker | `operations/clean-azure.py` | Radius-only group inventory | Partial reset requests Reader permission on node groups whose AKS was never created | Inspect every live AKS node group before deletion; report other node groups as uninspected and untouched; full cleanup unchanged; both fix reviews and regressions pass |
 | F047 | reset | Operational blocker | Failed Redis Recipe outputs | live | Failed Recipe left created cache/endpoint/NIC outside Radius deletion tracking | Normal reset stopped safely; exact ownership and link graph verified, explicit operator removal completed, app group empty; not claimed as normal Radius cleanup proof |
 | F048 | reset | Medium security | `.state/azure/remove-orphaned-redis.py` | 14-68 (initial) | Python optimization removes assert-based deletion safety checks | Unconditional require checks and guarded mutation path replace assertions; normal/optimized run-path cases and final fix reviews pass |
 | F049 | reset | Medium security | `.state/azure/radius-reset-execute.json` | 81 (initial) | Generated executor still references old immutable bootstrap after source guard repair | Original manifest archived; new preview/execute references repaired immutable payload, compared byte-for-byte and checked for unconditional guards; final review clean |
+| F050 | 4 | High correctness | `harness/test-e2e.py` | IDENTITY_PROBE | Attribute-based Redis TLS detection rejects a real verified TLS socket | Resolved: negotiated-socket detection, optimization-safe PING, actual live probe pass, bounded first-verification continuation and both fix reviews pass |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -550,3 +551,43 @@ TLS bypass. These are source findings only; no local resources were created.
 The direct walkthrough and independent security review of this plan correction
 were clean. Docker socket access, generated child credentials, and the actual
 local Recipe run path remain live verification gates, not passing results.
+
+The fresh data deployment now contains both corrected ConfigMap Roles/Bindings
+with their exact intended verbs and subjects, alongside Radius's generated
+container Roles; the original naming collision is absent. Live inspection also
+showed that Radius-generated roles grant namespace Secret `get/list`, so the
+contracts now distinguish minimum ConfigMap needs from effective permissions.
+The security review found no exploitable vulnerability in the reviewed HTTP
+surface; it did not establish container-compromise credential isolation.
+The read-only RBAC snapshot is retained in protected evidence.
+
+### First successful tenant and Redis TLS measurement failure
+
+Fresh operation `43bbaeb1-8250-49db-8d70-15ab73a9da73` actually succeeded and
+reached `available`. Management observed the control record at
+2026-09-09T22:31:55Z, and the data ConfigMap/application read passed at
+22:32:05Z. The first tenant's complete infrastructure and configuration path
+therefore ran successfully, including the two repaired deployment mechanisms.
+
+The acceptance harness then failed in its read-only identity check:
+`hasattr(connection, "ssl_cert_reqs")` is false on the installed Redis client
+even though the connection is TLS. An independent live probe returned PONG,
+`SSLConnection`, a negotiated `SSLSocket` using TLS 1.3, `CERT_REQUIRED`, and
+hostname verification enabled. The false probe did not cause a provisioning
+failure; no second tenant, pause, update, increment, or fault had run.
+
+Failed evidence `acceptance-997de287a5134b7fb6b3adb95e850eb6.json` is retained,
+SHA-256 `72837f4078a2cf6a9d8dc1c57dec7b90450c48ad6d5fd7006fb11c2e8d7c9a1c`.
+The correction will inspect the actual negotiated socket and rerun the first
+tenant's read-only checks before continuing the remaining scenario. It must
+not replay admission, reset the successful operation, or relabel old evidence.
+
+F050 is corrected without changing the runtime Redis client. The exact new
+probe ran in the live data API container and returned the unchanged
+`host/port/peer_address/tls` shape with `tls: true`. PING remains active under
+optimized Python. Continuation accepts only the original first-admission
+boundary or the exact ten-event first read-only verification boundary; all
+first-tenant checks rerun before any later admission, mutation, or fault.
+The failed record remains unchanged and is linked from fresh evidence.
+Independent rubber-duck and security fix reviews were clean. The full harness
+suite passed 165 tests and 155 subtests. Remaining acceptance is not yet passed.

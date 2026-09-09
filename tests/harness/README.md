@@ -31,6 +31,10 @@ and Radius application/type sources. Every checked workload must use its
 configured digest-pinned image reference and expose a running image digest.
 Those references/digests and exact source hashes are recorded separately,
 including the replacement data API pod after restart.
+Redis identity evidence reports `tls: true` only for the connected
+`ssl.SSLSocket` with a negotiated protocol version, not a connection option or
+redis-py attribute. PING runs and must succeed even under optimized Python.
+The Redis output remains limited to host, port, peer address, and TLS status.
 
 ## Operator state contract
 
@@ -59,8 +63,9 @@ requested 10,800-second watch timeout before this Job can pass.
 
 ### Continue only a previously admitted first tenant
 
-If the observer/exporter failed after the first tenant's admission while its
-runtime operation continued, either harness script accepts the explicit option:
+If the observer/exporter failed after the first tenant's admission, or initial
+read-only verification failed before the second tenant, either harness script
+accepts the explicit option:
 
 ```sh
 --continue-first-from .state/azure/evidence/acceptance-<32-lowercase-hex-run-id>.json
@@ -69,20 +74,28 @@ runtime operation continued, either harness script accepts the explicit option:
 This is **not workflow resume or provisioning recovery**. Only `scenario` and
 `all` accept it, and the prior mode must match. The prior protected file must
 belong to this project's Azure state, describe a failed version-1 run with a
-clean, timestamp-verified source commit, and contain exactly these ordered events:
+clean, timestamp-verified source commit, and contain this exact ordered prefix:
 `acceptance_started`, management API `workload_image`, provisioner
 `workload_image`, and one `tenant_accepted` for the configured first tenant.
 That admission must retain its original operation UUID, HTTP 202, and
-`busy_verified: true`. Missing, altered-shape, progressed, foreign, oversized,
-nonprivate, or symlinked evidence is refused.
+`busy_verified: true`. The prefix may stand alone or have exactly six further
+read-only events: `management_ready` for that tenant/shared pair/same operation,
+`data_applied` for that tenant at version 1, then `workload_image` for shared
+control API, control reconciler, data API, and data reconciler in that order.
+Partial tails, other progress (including any reconciler pause, later admission,
+update, or fault), chained continuations, foreign IDs, altered admission shapes,
+oversized/nonprivate files, and symlinked evidence are refused.
 
 The harness requires both remaining tenants to return 404. It reads the first
 tenant, checks the same shared-pair operation is not failed/interrupted, and
 waits for the existing readiness and operation completion checks. It sends
 **no first-tenant onboarding POST**, including duplicate checks or retries.
 The original run ID determines the initial message; version 1 and that exact
-message must still be applied. Changed configuration fails before admitting the
-second tenant. All later admissions, paused-reconciler/inventory checks,
+message must still be applied. Prior read-only events skip nothing: readiness,
+operation completion, applied configuration, and full first-workload source and
+datastore identity checks all run again under the current code. Changed
+configuration fails before admitting the second tenant.
+All later admissions, paused-reconciler/inventory checks,
 configuration/counter checks, provenance, timelines, and selected outages run
 normally. There are no resets or skips of later scenario steps.
 

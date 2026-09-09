@@ -1,6 +1,6 @@
 # Three-plane Radius deployment checkpoint
 
-Status: Validated (fresh management verified; fresh tenant acceptance running).
+Status: Validated (first tenant proved; corrected harness continuation next).
 Full API-driven onboarding, outage acceptance, local deployment, and final
 teardown remain open. A source-layout change is not a new deployment result.
 
@@ -13,7 +13,10 @@ during data deployment. F044/F045 are corrected in `ad031e2`; its rebuilt
 images passed in-cluster source/artifact checks, and the updated Redis Recipe
 is published and locked. The reviewed reset completed after explicit recovery
 of the failed Recipe's orphan resources. Fresh management is verified and the
-fresh tenant acceptance run is active.
+first fresh tenant provisioned and applied its configuration. Acceptance then
+stopped on a false TLS measurement; the corrected probe passed against the
+actual verified Redis TLS connection. Continue the remaining checks without
+reprovisioning that tenant or rewriting its failed harness evidence.
 Deeper SQL/code simplification remains deferred until end-to-end proof.
 
 Use the explicitly scoped subscription

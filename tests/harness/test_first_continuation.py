@@ -82,6 +82,9 @@ class FirstContinuationTests(base.StateCase):
         self.write_prior()
         self.tenants = {"shared-a": self.tenant("shared-a", self.operation, self.old_id)}
         self.calls = []
+        self.probe_calls = []
+        self.pods = {}
+        self.identity_error = None
         self.paused = False
         self.clients = {
             target: module.Client(
@@ -107,7 +110,10 @@ class FirstContinuationTests(base.StateCase):
         self.instances = {
             pair: {
                 "control": {"cluster_uid": pair + "-control", "postgresql": {"host": pair + "-pg"}},
-                "data": {"cluster_uid": pair + "-data", "redis": {"host": pair + "-redis"}},
+                "data": {
+                    "cluster_uid": pair + "-data",
+                    "redis": {"host": pair + "-redis", "tls": True},
+                },
             }
             for pair in ("shared", "isolated-1")
         }
@@ -118,6 +124,36 @@ class FirstContinuationTests(base.StateCase):
             }
             for pair in self.instances
         }
+
+    def kube(self, slot):
+        target = SimpleNamespace(
+            slot=slot, cluster_uid=slot, component=lambda name: {"container": name}
+        )
+        kube = Mock(target=target)
+
+        def pod(component):
+            role = "provisioner" if component == "provisioner" else "api"
+            image = self.values["images"][role]
+            uid = self.pods.setdefault((slot, component), str(uuid4()))
+            return {
+                "metadata": {"uid": uid},
+                "spec": {"containers": [{"name": component, "image": image}]},
+                "status": {"containerStatuses": [{"name": component, "imageID": image}]},
+            }
+
+        def probe(component, script, *_args):
+            self.probe_calls.append((slot, component, script))
+            if script == module.SOURCE_PROBE:
+                return {"files": {"source.py": "c" * 64}, "parent_dsn_present": False}
+            self.assertEqual(script, module.IDENTITY_PROBE)
+            if self.identity_error:
+                raise Error(self.identity_error)
+            pair, role = slot.rsplit("-", 1)
+            return copy.deepcopy(self.instances[pair][role])
+
+        kube.pod.side_effect = pod
+        kube.exec_json.side_effect = probe
+        return kube
 
     def write_prior(self):
         self.previous.write_text(json.dumps(self.prior, indent=2) + "\n")
@@ -231,10 +267,10 @@ class FirstContinuationTests(base.StateCase):
             value.configuration.target = Mock(
                 return_value=SimpleNamespace(cluster_uid="management")
             )
-            value.kube = Mock()
-            value.management_image = Mock()
+            value.kube = Mock(side_effect=self.kube)
+            value.management_image = Mock(wraps=value.management_image)
             value.pair_inventory = Mock(return_value=self.inventory)
-            value.workload_evidence = Mock(side_effect=self.instances.__getitem__)
+            value.workload_evidence = Mock(wraps=value.workload_evidence)
             value.check_updates_and_counters = Mock(wraps=value.check_updates_and_counters)
             value.collect_timelines = Mock(return_value={"unchanged": True})
             value.control_poll_observed = Mock(return_value=True)
@@ -256,6 +292,7 @@ class FirstContinuationTests(base.StateCase):
         with (
             patch.object(module, "Runner", side_effect=build),
             patch.object(module, "paused_reconciler", side_effect=self.pause),
+            patch.object(module, "source_hashes", return_value={"source.py": "c" * 64}),
             patch.object(faults, "command", side_effect=git),
             patch.object(faults, "source_metadata", return_value=self.current_source),
             redirect_stdout(io.StringIO()) as output,
@@ -264,7 +301,7 @@ class FirstContinuationTests(base.StateCase):
         self.summary = json.loads(output.getvalue())
         return code
 
-    def test_matching_all_run_continues_only_first_and_runs_remaining_scenario(self):
+    def assert_completed_scenario(self):
         original = self.previous.read_bytes()
         self.assertEqual(self.exercise(), 0, self.summary)
         self.assertEqual(self.previous.read_bytes(), original)
@@ -275,7 +312,9 @@ class FirstContinuationTests(base.StateCase):
         self.assertEqual(predecessor["sha256"], hashlib.sha256(original).hexdigest())
         self.assertEqual(predecessor["source"], self.source)
         self.assertEqual(predecessor["run_id"], self.old_id)
-        self.assertEqual(predecessor["admission"], self.prior["events"][-1])
+        self.assertEqual(predecessor["admission"], self.prior["events"][3])
+        self.assertEqual(predecessor["started_at"], self.prior["started_at"])
+        self.assertEqual(predecessor["finished_at"], self.prior["finished_at"])
         self.assertEqual(record["source"], self.current_source)
         self.assertNotEqual(record["run_id"], self.old_id)
         accepted = [e for e in record["events"] if e["type"] == "tenant_accepted"]
@@ -300,6 +339,17 @@ class FirstContinuationTests(base.StateCase):
             [call.args[0] for call in self.runner.workload_evidence.call_args_list],
             ["shared", "shared", "isolated-1"],
         )
+        self.assertEqual(
+            self.probe_calls[2:8],
+            [
+                ("shared-control", "control-api", module.SOURCE_PROBE),
+                ("shared-control", "control-reconciler", module.SOURCE_PROBE),
+                ("shared-control", "control-api", module.IDENTITY_PROBE),
+                ("shared-data", "data-api", module.SOURCE_PROBE),
+                ("shared-data", "data-reconciler", module.SOURCE_PROBE),
+                ("shared-data", "data-api", module.IDENTITY_PROBE),
+            ],
+        )
         self.runner.check_updates_and_counters.assert_called_once()
         self.runner.assert_updates_survived_poll.assert_called_once()
         self.assertEqual(self.runner.collect_timelines.call_count, 3)
@@ -316,6 +366,9 @@ class FirstContinuationTests(base.StateCase):
             ),
             str(self.runner.path.relative_to(self.project)),
         )
+
+    def test_matching_all_run_continues_only_first_and_runs_remaining_scenario(self):
+        self.assert_completed_scenario()
 
     def test_scenario_mode_continues_without_claiming_outages(self):
         self.prior["mode"] = "scenario"
@@ -354,6 +407,175 @@ class FirstContinuationTests(base.StateCase):
         self.assertEqual(prior["source"], self.source)
         self.assertEqual(prior["admission"], self.prior["events"][-1])
         self.assertIn(("management", "GET", f"/operations/{self.operation}", None), self.calls)
+
+    def read_only_prior(self):
+        self.old_id = "997de287a5134b7fb6b3adb95e850eb6"
+        self.operation = "43bbaeb1-8250-49db-8d70-15ab73a9da73"
+        self.relative = f".state/azure/evidence/acceptance-{self.old_id}.json"
+        self.previous = self.project / self.relative
+        self.source = {
+            "commit": "058d8784f732c4347a1d66bfbfe289ab6393806b",
+            "committed_at": "2026-09-10T01:33:24+04:00",
+            "worktree_dirty": False,
+        }
+        self.prior.update(
+            run_id=self.old_id,
+            source=self.source,
+            error="azure_redis_tls_not_enabled",
+            started_at="2026-09-09T21:45:26.048583+00:00",
+            finished_at="2026-09-09T22:33:19.764704+00:00",
+        )
+        # Probe payloads and individual event times are synthetic, not copied PVC bytes.
+        events = self.prior["events"]
+        for event in events:
+            event["at"] = self.prior["started_at"]
+        events[3]["operation_id"] = self.operation
+        at = self.prior["finished_at"]
+        events += [
+            {
+                "type": "management_ready",
+                "at": at,
+                "tenant": "shared-a",
+                "pair_id": "shared",
+                "operation_id": self.operation,
+                "elapsed_seconds": 1,
+                "reported_at": at,
+            },
+            {
+                "type": "data_applied",
+                "at": at,
+                "tenant": "shared-a",
+                "version": 1,
+                "elapsed_seconds": 1,
+                "recovery_elapsed_seconds": None,
+                "observed_monotonic": 1,
+            },
+            *[
+                {
+                    **events[1],
+                    "at": at,
+                    "slot": slot,
+                    "component": component,
+                    "pod_uid": str(uuid4()),
+                }
+                for slot, component in (
+                    ("shared-control", "control-api"),
+                    ("shared-control", "control-reconciler"),
+                    ("shared-data", "data-api"),
+                    ("shared-data", "data-reconciler"),
+                )
+            ],
+        ]
+        self.write_prior()
+        self.tenants["shared-a"] = {
+            **self.tenant("shared-a", self.operation, self.old_id),
+            "provisioning_status": "succeeded",
+            "operation_status": "succeeded",
+        }
+
+    def test_reported_read_only_failure_reruns_first_verification_and_all_remaining_steps(self):
+        self.read_only_prior()
+        self.assertEqual(self.tenants["shared-a"]["message"], "acceptance-997de287-shared-a")
+        self.assert_completed_scenario()
+
+    def test_read_only_progress_rejects_changed_order_components_tenant_version_or_ids(self):
+        self.read_only_prior()
+        original = copy.deepcopy(self.prior["events"])
+        for index, field, value in (
+            (4, "tenant", "shared-b"),
+            (4, "pair_id", "isolated-1"),
+            (4, "operation_id", str(uuid4())),
+            (4, "operation_id", None),
+            (5, "tenant", "isolated-c"),
+            (5, "version", 2),
+            (5, "version", True),
+            (6, "slot", "isolated-1-control"),
+            (6, "component", "control-reconciler"),
+            (7, "component", "control-api"),
+            (8, "component", "data-reconciler"),
+            (9, "slot", "shared-control"),
+            (9, "component", "data-api"),
+            (6, "pod_uid", None),
+            (9, "pod_uid", "not-a-uuid"),
+        ):
+            with self.subTest(index=index, field=field, value=value):
+                self.prior["events"] = copy.deepcopy(original)
+                self.prior["events"][index][field] = value
+                self.write_prior()
+                self.assertEqual(self.exercise(), 1)
+                self.assertEqual(self.calls, [])
+                self.assertEqual(self.probe_calls, [])
+
+    def test_only_complete_read_only_boundary_is_allowed_and_continuations_cannot_chain(self):
+        self.read_only_prior()
+        original = copy.deepcopy(self.prior["events"])
+        invalid = [original[:length] for length in range(5, 10)] + [
+            [*original, {"type": name, "at": self.prior["finished_at"]}]
+            for name in (
+                "data_reconciler_paused",
+                "tenant_accepted",
+                "data_applied",
+                "configuration_counter_and_auth_checks",
+                "data_continuity",
+                "management_link_recovered",
+                "control_link_recovered_latest_only",
+            )
+        ]
+        invalid.append([*original[:4], original[5], original[4], *original[6:]])
+        for events in invalid:
+            with self.subTest(types=[event["type"] for event in events]):
+                self.prior["events"] = events
+                self.write_prior()
+                self.assertEqual(self.exercise(), 1)
+                self.assertEqual(self.calls, [])
+        self.prior["events"] = original
+        self.prior["continued_first_from"] = {"path": "an-earlier-run"}
+        self.write_prior()
+        self.assertEqual(self.exercise(), 1)
+        self.assertEqual(self.calls, [])
+
+    def test_read_only_evidence_never_skips_current_first_state_or_identity_failures(self):
+        self.read_only_prior()
+        original = copy.deepcopy(self.tenants["shared-a"])
+        for field, changed in (
+            ("version", 2),
+            ("message", "changed-first"),
+            ("operation_id", str(uuid4())),
+            ("provisioning_status", "failed"),
+            ("operation_status", "interrupted"),
+            ("tls", False),
+            ("identity_error", "current_identity_probe_failed"),
+        ):
+            with self.subTest(field=field):
+                self.tenants["shared-a"] = copy.deepcopy(original)
+                self.instances["shared"]["data"]["redis"]["tls"] = True
+                self.identity_error = None
+                if field == "tls":
+                    self.instances["shared"]["data"]["redis"]["tls"] = changed
+                elif field == "identity_error":
+                    self.identity_error = changed
+                else:
+                    self.tenants["shared-a"][field] = changed
+                self.calls.clear()
+                self.assertEqual(self.exercise(), 1)
+                self.assertFalse(any(method != "GET" for _, method, _, _ in self.calls))
+                self.runner.check_updates_and_counters.assert_not_called()
+                self.runner.management_outage.assert_not_called()
+                self.assertNotIn(
+                    "data_reconciler_paused", [e["type"] for e in self.runner.record["events"]]
+                )
+                if field == "tls":
+                    self.assertEqual(self.summary["error"], "azure_redis_tls_not_enabled")
+
+    def test_read_only_evidence_still_refuses_existing_remaining_tenants(self):
+        self.read_only_prior()
+        for name in ("shared-b", "isolated-c"):
+            with self.subTest(tenant=name):
+                self.tenants[name] = self.tenant(name, str(uuid4()), self.old_id)
+                self.calls.clear()
+                self.assertEqual(self.exercise(), 1)
+                self.assertFalse(any(method != "GET" for _, method, _, _ in self.calls))
+                del self.tenants[name]
 
     def test_existing_first_waits_for_ready_and_operation_completion_without_replay(self):
         request = self.request

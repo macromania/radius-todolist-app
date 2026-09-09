@@ -130,7 +130,7 @@ def source_hashes(component):
 
 
 IDENTITY_PROBE = r"""
-import json,os,sys
+import json,os,ssl,sys
 role=sys.argv[1]
 if role in ("management-api","control-api"):
     import psycopg
@@ -151,12 +151,14 @@ if role in ("management-api","control-api"):
 else:
     from plane_demo.shared.settings import Settings,redis_client
     store=redis_client(Settings.from_env("data_api"))
-    assert store.ping()
+    if not store.ping(): raise RuntimeError("redis_ping_failed")
     connection=store.connection_pool.get_connection()
     try:
+        connected=connection._sock
         result={"redis":{"host":connection.host,"port":connection.port,
-                         "peer_address":connection._sock.getpeername()[0],
-                         "tls":hasattr(connection,"ssl_cert_reqs")}}
+                         "peer_address":connected.getpeername()[0],
+                         "tls":isinstance(connected,ssl.SSLSocket)
+                               and connected.version() is not None}}
     finally:
         store.connection_pool.release(connection)
         store.close()
@@ -517,11 +519,12 @@ class Runner:
             "continuation_source_mismatch",
         )
         events = prior.get("events")
+        prefix = ["acceptance_started", "workload_image", "workload_image", "tenant_accepted"]
         require(
             isinstance(events, list)
             and all(isinstance(event, dict) for event in events)
             and [event.get("type") for event in events]
-            == ["acceptance_started", "workload_image", "workload_image", "tenant_accepted"]
+            in (prefix, prefix + ["management_ready", "data_applied"] + ["workload_image"] * 4)
             and [(event.get("slot"), event.get("component")) for event in events[1:3]]
             == [("management", "management-api"), ("management", "provisioner")],
             "continuation_progress_refused",
@@ -531,7 +534,7 @@ class Runner:
             at = report_time(event.get("at"))
             require(observed <= at <= finished, "continuation_event_timestamp_invalid")
             observed = at
-        admission = events[-1]
+        admission = events[3]
         require(
             set(admission)
             == {"type", "at", "tenant", "http_status", "operation_id", "busy_verified"}
@@ -543,6 +546,29 @@ class Runner:
             and str(UUID(admission["operation_id"])) == admission["operation_id"],
             "continuation_admission_invalid",
         )
+        if len(events) == 10:
+            ready, applied = events[4:6]
+            require(
+                ready.get("tenant") == admission["tenant"]
+                and ready.get("pair_id") == "shared"
+                and ready.get("operation_id") == admission["operation_id"]
+                and applied.get("tenant") == admission["tenant"]
+                and type(applied.get("version")) is int
+                and applied["version"] == 1
+                and [(event.get("slot"), event.get("component")) for event in events[6:]]
+                == [
+                    ("shared-control", "control-api"),
+                    ("shared-control", "control-reconciler"),
+                    ("shared-data", "data-api"),
+                    ("shared-data", "data-reconciler"),
+                ]
+                and all(
+                    isinstance(event.get("pod_uid"), str)
+                    and str(UUID(event["pod_uid"])) == event["pod_uid"]
+                    for event in events[6:]
+                ),
+                "continuation_read_only_progress_invalid",
+            )
         self.record["continued_first_from"] = {
             "path": relative,
             "sha256": hashlib.sha256(raw).hexdigest(),

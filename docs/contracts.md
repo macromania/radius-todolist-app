@@ -299,6 +299,12 @@ Neither gets a parent-cluster kubeconfig. Production uses the in-cluster
 Kubernetes client with explicit connect/read timeouts. Do not give the API the
 reconciler's write Role.
 
+These are the application's required ConfigMap grants, not its exhaustive
+effective permissions. Radius 0.60 also generates namespace Secret `get/list`
+Roles and bindings. On token-bearing data workloads, a compromised container
+could therefore read other runtime Secrets in that namespace. Separate service
+accounts here are not a claim of isolation against container compromise.
+
 `GET /tenants/{tenant_id}` returns `tenant_id`, `onboarding_id`, `message`,
 `applied_version`, and `counter`. `POST /tenants/{tenant_id}/counter` first reads
 the ConfigMap, then uses atomic Redis `INCR` on

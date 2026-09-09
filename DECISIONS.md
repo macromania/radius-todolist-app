@@ -203,12 +203,16 @@ or human credentials.
 An exporter failure stopped the acceptance harness after its first tenant
 request had passed admission, duplicate, and busy-response checks. The runtime
 operation kept running normally. Provide a narrow, opt-in harness continuation
-from that failed evidence only: verify the original admission and current
+from that first-tenant evidence only: verify the original admission and current
 operation identity, observe completion, then execute the remaining scenario.
 Retain the failed record and link it from fresh evidence with both source
 commits. Never retry provisioning, reset tenant state, skip later assertions,
 or describe a continued run as an uninterrupted fresh run. This does not add
 runtime recovery or a general-purpose resumable test workflow.
+
+The allowed boundary also includes the first tenant's read-only verification
+before any second admission, pause, update, increment, or fault. Those checks
+must all rerun; saved observations never substitute for current verification.
 
 ## D025 - Give bootstrap RBAC its own resource names
 
