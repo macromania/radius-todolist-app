@@ -284,7 +284,8 @@ class AzureRunnerTests(unittest.TestCase):
         self.assertEqual(
             invoke.call_args.args,
             (
-                "kubectl apply -f demo-acceptance-test.json",
+                "kubectl apply --server-side --field-manager=radplanes-harness "
+                "-f demo-acceptance-test.json",
                 "--file",
                 str(path),
             ),

@@ -343,7 +343,10 @@ def launch(config, name, mode, inspected, commit):
             }
         ),
     )
-    invoke(f"kubectl apply -f {manifest.name}", "--file", str(manifest))
+    invoke(
+        f"kubectl apply --server-side --field-manager=radplanes-harness -f {manifest.name}",
+        "--file", str(manifest),
+    )
     return {
         "outcome": "submitted_not_completed",
         "namespace": NAMESPACE,

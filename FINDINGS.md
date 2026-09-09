@@ -282,3 +282,8 @@ credentials. The exporter now accepts the launcher's bounded three-hour window.
 Child diagnostics persist in private files rather than being discarded.
 The complete offline harness suite passed 134 tests and 53 subtests, and both
 source reviews were clean. First live scenario execution is still pending.
+
+The source-bundle ConfigMap uses server-side apply: a 344 KiB Git bundle would
+exceed Kubernetes' annotation limit if client-side apply copied the full object
+into `last-applied-configuration`. The 900 KiB object bound remains, and conflicts
+are not forced. Its targeted 28 tests and both fix reviews passed.
