@@ -223,3 +223,15 @@ Radius evaluates declared existing Azure resources during Recipe execution.
 When a private endpoint creates the NIC being referenced, put the endpoint
 dependency on that existing NIC declaration as well as on its tag extension.
 An existing declaration is not merely a compile-time resource ID in this path.
+
+## D027 - Reset a failed demonstration through its Radius owners
+
+Do not add automatic retry or repair a failed onboarding record. Remove the
+failed demo's Radius applications and child clusters in owner order, preserving
+the bootstrap foundation for a fresh run. `clean-azure.py --radius-only` has an
+explicit partial result and keeps credentials/evidence. It never deletes Azure
+groups or role assignments directly, so scoped in-cluster operator access is
+enough. Full teardown keeps its role checks and remains a separate acceptance
+gate. Managed node-resource ownership checks remain mandatory in both modes;
+give a scoped operator explicit read access to those existing groups rather
+than skipping them.

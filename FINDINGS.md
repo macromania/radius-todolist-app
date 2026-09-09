@@ -388,3 +388,28 @@ The coordinator/compiled-infrastructure suite passed 145 tests and 19 subtests.
 Changed worker image and Recipe publication, content inspection, and a fresh
 demo deployment remain required. Do not reset the failed operation to pending
 or reinterpret it as a successful onboarding.
+
+The corrected Redis Recipe is now published under
+`redis:src-79ecb019e75cc095adde`, digest
+`sha256:08ade83642b0482917c58068a41570e3f53217ce7bb93abe18459523bea2ff48`,
+with its tag locked. Both images built from `ad031e2` were inspected in AKS:
+21 API and 51 provisioner source/artifact hashes matched, grouped imports and
+UID 10001 passed, and the API image excludes privileged provider code.
+
+### Radius-only fresh-demo reset preparation
+
+`clean-azure.py --radius-only` reuses normal owner-ordered application/child-AKS
+deletion, then explicitly reports retained foundation rather than full cleanup.
+It preserves live resource and managed-node ownership checks, rejects provider
+fallback and local credential removal, and never directly mutates Azure groups
+or roles. Custom role scans remain on the full cleanup path only, since the
+partial path cannot delete those roles.
+
+The direct rubber-duck pass and independent security review found no remaining
+issue. The focused cleanup/export suite passed 63 tests and 40 subtests.
+Operator access to the AKS endpoint still timed out on a fresh scoped check.
+The operator verified exact tags and resource IDs in all three existing managed
+node groups, then recorded temporary harness Reader assignments for those
+groups in protected state. These read-only assignments must be removed after
+the reset; no Azure deletion or role-delegation permission was granted.
+Live reset, state/evidence preservation, and fresh onboarding remain pending.

@@ -216,6 +216,7 @@ class Cleanup:
         radius_config: Path | None = None,
         execute: bool = False,
         provider_only: bool = False,
+        radius_only: bool = False,
     ):
         require(
             not execute or os.environ.get("CONFIRM_AZURE") == "yes",
@@ -229,6 +230,8 @@ class Cleanup:
         self.radius_config = radius_config
         self.execute = execute
         self.provider_only = provider_only
+        require(not (provider_only and radius_only), "Cleanup modes cannot be combined")
+        self.radius_only = radius_only
         self.steps: list[dict] = []
 
     def call(self, args: list[str], *, env=None, mutation: bool = False) -> str:
@@ -676,8 +679,11 @@ class Cleanup:
     def clean(self) -> dict:
         self.unexpected_resources()
         groups = {name: self.group(name) for name in self.manifest.groups}
-        self.role_state()  # Validate every custom scope before any mutation.
+        if not self.radius_only:
+            self.role_state()  # Validate every custom scope before any mutation.
         clusters = self.clusters(groups)
+        if self.radius_only:
+            require("management" in clusters, "Radius-only cleanup requires management Radius")
         if any(value is not None for value in groups.values()) and not self.provider_only:
             require(
                 "management" in clusters, "Management Radius is unavailable; review --provider-only"
@@ -785,6 +791,12 @@ class Cleanup:
             )
             # Remove the public entrypoint and provisioning database before child infrastructure.
             self.delete_group(self.manifest.allocations["management"]["appResourceGroup"])
+        if self.radius_only:
+            return {
+                "status": "radius_resources_removed" if self.execute else "planned",
+                "foundationRetained": True,
+                "steps": self.steps,
+            }
         for slot in self.manifest.children:
             self.delete_group(self.manifest.allocations[slot]["appResourceGroup"])
             self.delete_aks(slot)
@@ -859,10 +871,20 @@ def main(*, verify_only: bool = False) -> int:
         parser.add_argument("--targets", default="cleanup-targets.json")
         parser.add_argument("--radius-config", default="radius.yaml")
         parser.add_argument("--execute", action="store_true")
-        parser.add_argument("--provider-only", action="store_true")
+        modes = parser.add_mutually_exclusive_group()
+        modes.add_argument("--provider-only", action="store_true")
+        modes.add_argument(
+            "--radius-only",
+            action="store_true",
+            help="Remove Radius-owned apps and child AKS; retain management AKS and foundation",
+        )
         parser.add_argument("--credential-file", action="append", default=[])
     args = parser.parse_args()
     try:
+        require(
+            verify_only or not args.radius_only or not args.credential_file,
+            "Radius-only cleanup retains local credentials and evidence",
+        )
         manifest = Manifest(json.loads(state_file(ROOT, args.manifest).read_text()))
         targets = {}
         if not verify_only and not args.provider_only:
@@ -878,6 +900,7 @@ def main(*, verify_only: bool = False) -> int:
             radius_config=None if verify_only else Path(args.radius_config),
             execute=not verify_only and args.execute,
             provider_only=not verify_only and args.provider_only,
+            radius_only=not verify_only and args.radius_only,
         )
         credentials = []
         if not verify_only:
@@ -894,7 +917,7 @@ def main(*, verify_only: bool = False) -> int:
                 )
                 credentials.append(path)
         result = engine.verify() if verify_only else engine.clean()
-        if not verify_only and args.execute:
+        if not verify_only and args.execute and not args.radius_only:
             require(
                 result.get("status") == "clean", "Credential cleanup requires verified deletion"
             )

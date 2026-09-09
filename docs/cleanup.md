@@ -180,6 +180,41 @@ This is not a transaction or automatic rollback. A failure may follow successful
 deletion of earlier resources. Preserve evidence, inspect the reported phase,
 and use an explicit reviewed recovery path.
 
+### Reset only Radius-owned demo resources
+
+After a terminal failed onboarding, a fresh demonstration can keep the
+bootstrap foundation instead of rebuilding the registry, network, identities,
+and management cluster:
+
+```sh
+uv run python operations/clean-azure.py --radius-only
+CONFIRM_AZURE=yes uv run python operations/clean-azure.py --radius-only --execute
+```
+
+This follows normal deletion steps 1-4 above: child applications and their
+managed datastores/gateways, child AKS through management Radius, then management
+applications and PostgreSQL. It still verifies live ownership, cluster UIDs,
+Radius scopes, terminal resources, empty app groups, and absent child AKS.
+It cannot be combined with `--provider-only`; failures never bypass Radius.
+The result is `radius_resources_removed` with `foundationRetained: true`, **not
+`clean`**. Management Radius, its cluster, Azure groups, identities, roles, the
+registry, network, and certificate vault remain.
+
+This mode makes no direct Azure mutations. It does not inspect custom role
+assignments because it never modifies them; normal full cleanup retains those
+checks. Resource-group ownership checks, including managed node-group contents,
+remain mandatory. A scoped in-cluster operator needs Reader on all owned groups
+(including the existing managed node groups) and AKS cluster access, without
+Azure delete or role-delegation grants. It still needs exported targets for every live
+cluster. The mode neither installs a transport nor copies human tokens into
+Pods.
+
+Local credentials, evidence, and bootstrap-created state PVCs are retained.
+`--credential-file` is rejected before any action in this mode. Preserve failed
+acceptance evidence before explicitly clearing named application-state volumes
+for a fresh management deployment. Never change a failed operation back to
+pending or claim this reset proves whole-environment teardown.
+
 Keyboard interruption exits **130** and reports incomplete cleanup. An Azure
 operation may still be running and resources may remain. If interruption occurs
 after verification, optional local credential removal may already be partial;

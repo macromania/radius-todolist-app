@@ -432,7 +432,7 @@ class CleanupTests(unittest.TestCase):
         output.__enter__()
         self.addCleanup(output.__exit__, None, None, None)
 
-    def engine(self, *, execute=True, provider_only=False):
+    def engine(self, *, execute=True, provider_only=False, radius_only=False):
         return cleanup.Cleanup(
             self.manifest,
             root=self.root,
@@ -440,6 +440,7 @@ class CleanupTests(unittest.TestCase):
             targets=self.commands.targets,
             execute=execute,
             provider_only=provider_only,
+            radius_only=radius_only,
         )
 
     def mutations(self):
@@ -486,6 +487,75 @@ class CleanupTests(unittest.TestCase):
         )
         self.assertEqual(len(self.commands.assignments), 1)  # Unrelated subscription role retained.
         self.assertFalse(any("purge" in a for a in calls))
+
+    def test_radius_only_removes_owners_in_order_but_retains_bootstrap_and_credentials(self):
+        roles, assignments = copy.deepcopy((self.commands.roles, self.commands.assignments))
+        result = self.engine(radius_only=True).clean()
+        self.assertEqual(result["status"], "radius_resources_removed")
+        self.assertTrue(result["foundationRetained"])
+        self.assertEqual(set(self.commands.clusters), {"management"})
+        self.assertIn(self.manifest.platform, self.commands.groups)
+        self.assertTrue(self.commands.resources[self.manifest.platform])
+        self.assertEqual((self.commands.roles, self.commands.assignments), (roles, assignments))
+        self.assertFalse(any(args[0] == "az" for args in self.mutations()))
+        self.assertFalse(any(args[:2] == ["az", "role"] for args, _ in self.commands.calls))
+        for slot, allocation in self.manifest.allocations.items():
+            self.assertEqual(self.commands.resources[allocation["appResourceGroup"]], [])
+            self.assertFalse(self.commands.apps[slot])
+            self.assertTrue((self.root / ".state/azure" / f"{slot}.kubeconfig").exists())
+        calls = self.mutations()
+        cluster_deletes = [
+            i
+            for i, args in enumerate(calls)
+            if args[0] == "rad" and args[3:5] == ["resource", "delete"]
+        ]
+        management = next(
+            i
+            for i, args in enumerate(calls)
+            if args[0] == "rad" and args[3:6] == ["app", "delete", "management"]
+        )
+        self.assertLess(max(cluster_deletes), management)
+
+    def test_radius_only_retains_managed_node_resource_ownership_checks(self):
+        node_group = self.manifest.allocations["shared-data"]["nodeResourceGroup"]
+        self.commands.resources[node_group][0]["tags"]["project"] = "foreign"
+        with self.assertRaisesRegex(cleanup.CleanupError, "lacks verified project tags"):
+            self.engine(radius_only=True).clean()
+        self.assertFalse(self.mutations())
+
+    def test_radius_only_is_not_a_provider_fallback_or_a_full_clean_claim(self):
+        with self.assertRaisesRegex(cleanup.CleanupError, "modes cannot be combined"):
+            self.engine(radius_only=True, provider_only=True)
+        self.commands.leave_cluster = True
+        with self.assertRaisesRegex(cleanup.CleanupError, "Child AKS still exists"):
+            self.engine(radius_only=True).clean()
+        self.assertFalse(any(args[0] == "az" for args in self.mutations()))
+
+    def test_radius_only_preview_and_missing_management_fail_before_mutations(self):
+        self.assertEqual(self.engine(radius_only=True, execute=False).clean()["status"], "planned")
+        self.assertFalse(self.mutations())
+        self.commands.clusters.pop("management")
+        with self.assertRaisesRegex(cleanup.CleanupError, "requires management Radius"):
+            self.engine(radius_only=True).clean()
+        self.assertFalse(self.mutations())
+
+    def test_radius_only_cli_rejects_credential_removal_before_commands(self):
+        with (
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "clean-azure.py",
+                    "--radius-only",
+                    "--execute",
+                    "--credential-file",
+                    "credentials.json",
+                ],
+            ),
+            redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(cleanup.main(), 1)
+        self.assertFalse(self.commands.calls)
 
     def test_every_command_is_explicitly_scoped(self):
         self.engine().clean()
