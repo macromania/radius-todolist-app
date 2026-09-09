@@ -34,6 +34,24 @@ including the replacement data API pod after restart.
 
 ## Operator state contract
 
+For in-cluster execution when the workstation cannot reach the AKS API:
+
+```sh
+CONFIRM_AZURE=yes uv run python harness/run-azure.py --images-inspected --mode all --execute
+```
+
+This submits, but does not await, a `demo-acceptance-*` Job in management through
+AKS Run Command. It requires a clean committed checkout and matching
+`images.json` references with `content_verified: true`. The verified provisioner
+image supplies tools; a checked Git bundle supplies harness source. No harness
+code is added to runtime images. The existing `provisioner` service account
+authenticates through workload federation. Only the separate `harness-state`
+PVC retains exported keys, kubeconfigs, evidence, and `azure/harness/termination.json`.
+The launcher never mounts operator/provisioner state. `--name` accepts a bounded
+`demo-acceptance` suffix; `--config` defaults to `.state/azure/provisioning.json`.
+Modes remain `all`, `scenario`, and `outages`. The exporter must support the
+requested 10,800-second watch timeout before this Job can pass.
+
 Generate state from the existing provisioning configuration; no manual endpoint,
 key, namespace UID, or component-name editing is required:
 
@@ -46,7 +64,8 @@ uv run python harness/export-state.py --watch --timeout 7200
 ```
 
 The default input is `.state/azure/provisioning.json`; `--config` accepts another
-project-state provisioning file. Watch mode sleeps five seconds between passes,
+provisioning file beneath `.state/azure`, including nested directories.
+Watch mode sleeps five seconds between passes,
 stops when all three configured showcase tenants are ready and their planes are
 exported, and fails on timeout. `export-status.json` is the atomic heartbeat:
 wait for `ready_for_onboarding: true` before starting the scenario. Progress
@@ -61,6 +80,12 @@ or modifies Kubernetes resources. It verifies resource IDs/tags, discovers the
 actual HTTPS Application Gateway public-IP DNS output, and performs trusted
 public health GETs. It deliberately uses Azure gateway/PIP reads rather than
 Radius, avoiding Radius's global-HOME/kubeconfig discovery behavior.
+
+An existing bootstrap `management.kubeconfig` is reused at its canonical path,
+without rewriting it, after checking private permissions, current context, and
+the selected server/CA/exec profile against fresh credentials for the owned AKS.
+Only then is it used for the live cluster-UID read. Foreign or altered files are
+refused before use, not overwritten to force the export through.
 
 Only `.data.DEMO_KEY` from each named `ROLE-api-runtime` Secret is exported into
 its private relative key file. No provisioner credentials file, whole Kubernetes
@@ -86,6 +111,36 @@ kubeconfig files may be reused; previous ownership decisions are never reused.
 The exporter also supplies normalized `images.api`/`images.provisioner`
 references and management's `provisioner` component. Rerunning it upgrades an
 older owned snapshot without manual edits or exporting provisioner credentials.
+
+The same run automatically supplies the normal cleanup handoff:
+`cleanup-targets.json` (version 1) maps known, verified clusters to exact ARM IDs,
+cluster UIDs, contexts, private `<slot>.kubeconfig` files, and `cleanup-radius.yaml`.
+The latter contains only cleanup workspace connections, using context names as
+workspace names and Radius group `radplanes`. It does not alter active
+`radius.yaml` or read the provisioner PVC. Management inventory's existing
+clusters receive cleanup access even without a showcase tenant assignment.
+For nested export configurations, acceptance paths remain relative to the
+export directory, but cleanup paths are relative to `.state/azure`. Select the
+nested metadata with cleanup's `--targets operator-export/cleanup-targets.json`
+when exporting under `operator-export/`. Earlier generated basename-only
+cleanup references are repaired on rerun without changing the acceptance
+generation.
+
+Cleanup metadata is published after live AKS/Entra/FQDN/cluster-UID verification,
+before application/gateway readiness. Thus a partial export can support cleanup
+without claiming a completed demo export or onboarding readiness. If management's
+app is unavailable, only its own newly verified access can be discovered on
+that pass; previous child exports remain intact. Cleanup independently checks
+every existing cluster and fails on missing targets or changed ownership.
+
+Generated cleanup files have ownership markers and project/subscription checks;
+manual, foreign, symlinked, or scope-changed files are refused. Unowned
+kubeconfigs are not overwritten. Files are atomically replaced with mode `0600`
+under the required `0700` environment state directory. Missing cleanup metadata
+is repaired on rerun even when `acceptance.json` does not change. No tokens, DSNs,
+full Secrets, or provisioner credential files are added to this handoff.
+See [cleanup checks and execution](../../docs/cleanup.md); the exporter itself
+never runs deletion or scaling commands.
 
 The existing `endpoints.json` and relative `key_file` format is unchanged; see
 `docs/provisioning.md`. Key files and kubeconfigs must be private (`0600`) and

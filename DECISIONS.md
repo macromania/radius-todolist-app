@@ -167,3 +167,20 @@ plane application definitions. Remove the obsolete todo example and update the
 README, Makefile, imports, image build paths, and tests together. Do not change
 SQL authorization, reconciliation semantics, or the agreed Azure/local topology
 as part of this organization pass. Preserve deployment state and credentials.
+
+## D021 - Authorize the actual Radius API transport
+
+Radius 0.60 uses the aggregated Kubernetes API, not just pod port-forwarding.
+The management worker therefore needs cluster-scoped access to `api.ucp.dev`,
+restricted to `planes/local` named `radius`. It does not receive Kubernetes
+cluster-admin or Secret-list permission. The real service-account request
+changed from 403 to 200 after that exact grant.
+
+## D022 - Keep network-dependent demo execution in the harness
+
+When the laptop cannot reach AKS directly, run the existing harness in a
+management-cluster Job using the already assigned coordinator identity and
+verified tool image. Supply committed source through a Git bundle so provenance
+remains real. Keep its state separate from operator and runtime-provisioner
+state. This adds no application plane, VPN, or jump host, and does not change
+the child-initiated reconciliation or outage contract.

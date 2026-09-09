@@ -64,9 +64,9 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F034 | 4 | Medium security/correctness | `scripts/export-state.py` | watch ownership cache | Cached trust decisions could miss changed cluster/gateway ownership | Fresh ownership checks every pass; final fix reviews and offline regressions pass |
 | F035 | 3 | High correctness | `infra/radius/apps/workload.bicep` | worker/base serialization | Workers emitted forbidden livenessProbe:null; paired base Deployment omitted its ServiceAccount name | Optional probe omitted and base ServiceAccount matched; live worker proof, compiled regression, fix and layout reviews passed |
 | F036 | 3 | High correctness | workload and operator Pod security contexts | real PVC remount | Default fsGroup recursion changed private credentials from 0600 to 0660, preventing restart | OnRootMismatch preserves 0600 in a real second mount; strict loader retained; fix and layout reviews passed |
-| F038 | 7 | Medium correctness | `operations/clean-azure.py` | role_state | Cleanup absence proof relies on a broad role listing rather than checking every manifest GUID | Exact-GUID lookup verified available; strengthen before final teardown |
-| F039 | 7 | High integration | `harness/export-state.py`, `operations/clean-azure.py` | cleanup handoff | Exporter does not yet generate cleanup-targets.json and its Radius workspace metadata | Wire automatically before final teardown; do not require manual PVC/credential copying |
-| F040 | 7 | Medium correctness | `operations/clean-azure.py` | interrupt handling | KeyboardInterrupt bypasses the explicit incomplete-cleanup result | Add explicit interrupted outcome before final teardown |
+| F038 | 7 | Medium correctness | `operations/clean-azure.py` | role_state | Cleanup absence proof relies on a broad role listing rather than checking every manifest GUID | Exact manifest-GUID queries added and fix-reviewed; regression prevents false clean result |
+| F039 | 7 | High integration | `harness/export-state.py`, `operations/clean-azure.py` | cleanup handoff | Exporter does not yet generate cleanup-targets.json and its Radius workspace metadata | Automatic protected export implemented; validated bootstrap-file adoption and nested paths; final fix reviews pass |
+| F040 | 7 | Medium correctness | `operations/clean-azure.py` | interrupt handling | KeyboardInterrupt bypasses the explicit incomplete-cleanup result | Explicit 130/incomplete outcome implemented and reviewed; no false rollback claims |
 | F041 | 3 | High correctness | `src/plane_demo/management/providers/azure.py` | management_permissions | Worker had namespace pod/port-forward access but lacked cluster-scoped access to Radius's aggregated API | Narrow planes/local, resourceName radius grant added; live 403 became 200 and worker stayed Running without restarts; fix review/unit checks recorded below |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
@@ -252,3 +252,22 @@ The same request returned HTTP 200 after the change, and the worker remained
 Running with zero restarts. Independent fix reviews found the production grant
 correct; the obsolete test prohibiting every ClusterRoleBinding was narrowed
 to assert this exact grant and subject.
+
+The corrected worker image was rebuilt and 51 actual source/artifact hashes
+were verified in AKS. During its controlled update, management API admission was
+stopped, zero pending/running operations were confirmed, then the idle worker
+and immutable configuration were replaced without reinitializing PostgreSQL.
+The operator Job completed successfully, all three management Deployments
+became ready, and the worker emitted `provisioner_ready`. A real HTTPS probe
+confirmed health 200, missing-key 401, and authenticated unknown-tenant 404.
+No tenant was created by that probe; the clean three-tenant scenario is next.
+
+### Cleanup handoff correction verification
+
+The exporter now generates cleanup target/workspace metadata automatically,
+without copying full provisioning credentials or overwriting active Radius
+configuration. Existing bootstrap kubeconfigs require fresh owned-cluster,
+context, CA and allowed-exec validation before reuse. Nested export paths
+round-trip through the cleanup reader. Exact role-GUID and interruption tests
+also pass. The final focused suite passed 64 tests and 15 subtests, and both
+final fix reviews were clean. Live end-of-demo teardown remains unproven.

@@ -78,6 +78,8 @@ class FakeCommands(cleanup.Commands):
         self.leave_cluster = False
         self.leave_app_resource = False
         self.leave_group = False
+        self.hidden_roles = set()
+        self.leave_role = False
         self.foreign_workspace = False
         self.foreign_server = False
         self.foreign_uid = False
@@ -314,7 +316,13 @@ class FakeCommands(cleanup.Commands):
                 )
             return None
         if args[1:4] == ["role", "definition", "list"]:
-            return list(self.roles.values())
+            if "--name" in args:
+                return [
+                    role
+                    for role in self.roles.values()
+                    if role["id"].rsplit("/", 1)[-1] == require("--name")
+                ]
+            return [role for key, role in self.roles.items() if key not in self.hidden_roles]
         if args[1:4] == ["role", "assignment", "list"]:
             return self.assignments
         if args[1:4] == ["role", "assignment", "delete"]:
@@ -324,7 +332,8 @@ class FakeCommands(cleanup.Commands):
         if args[1:4] == ["role", "definition", "delete"]:
             key = next(k for k, r in self.roles.items() if r["id"].endswith(require("--name")))
             assert not any(a["roleDefinitionId"] == self.roles[key]["id"] for a in self.assignments)
-            del self.roles[key]
+            if not self.leave_role:
+                del self.roles[key]
             return None
         if action == ["keyvault", "list-deleted"]:
             return self.deleted_vaults
@@ -577,6 +586,51 @@ class CleanupTests(unittest.TestCase):
             self.engine(provider_only=True).clean()
         self.assertEqual(self.mutations(), [])
 
+    def test_exact_role_lookup_rejects_foreign_id_before_mutations(self):
+        original = self.commands.azure
+
+        def changed(args):
+            if args[:4] == ["az", "role", "definition", "list"] and "--name" in args:
+                return [self.commands.roles["childClusterRecipe"]]
+            return original(args)
+
+        with patch.object(self.commands, "azure", side_effect=changed):
+            with self.assertRaisesRegex(cleanup.CleanupError, "different role ID"):
+                self.engine(provider_only=True).clean()
+        self.assertEqual(self.mutations(), [])
+
+    def test_exact_role_lookup_errors_are_not_absence(self):
+        self.commands.hidden_roles = set(self.manifest.roles)
+        self.commands.fail = lambda args: (
+            args[:4] == ["az", "role", "definition", "list"] and "--name" in args
+        )
+        with self.assertRaisesRegex(cleanup.CleanupError, "command failed"):
+            self.engine(provider_only=True).clean()
+        self.assertEqual(self.mutations(), [])
+
+    def test_exact_only_roles_still_require_verified_name_type_and_scopes(self):
+        self.commands.hidden_roles.add("certificateImporter")
+        original = copy.deepcopy(self.commands.roles["certificateImporter"])
+        for change in (
+            {"roleName": "foreign"},
+            {"roleType": "BuiltInRole"},
+            {"assignableScopes": ["/"]},
+        ):
+            with self.subTest(change=change):
+                self.commands.roles["certificateImporter"] = {**original, **change}
+                with self.assertRaises(cleanup.CleanupError):
+                    self.engine(provider_only=True).clean()
+                self.assertEqual(self.mutations(), [])
+
+    def test_broad_role_inventory_still_rejects_unmanifested_project_role(self):
+        self.commands.roles["unexpected"] = {
+            "id": cleanup.role_id("certificateImporter") + "-foreign",
+            "roleName": "radplanes unexpected",
+        }
+        with self.assertRaisesRegex(cleanup.CleanupError, "Unmanifested project custom role"):
+            self.engine(provider_only=True).clean()
+        self.assertEqual(self.mutations(), [])
+
     def test_orphaned_builtin_assignment_is_removed_only_at_owned_scope(self):
         scope = cleanup.group_id(self.manifest.platform)
         identifier = (
@@ -717,6 +771,35 @@ class CleanupTests(unittest.TestCase):
             self.engine(execute=False).verify()
         self.assertEqual(self.mutations(), [])
 
+    def test_verifier_finds_role_missing_from_broad_inventory(self):
+        self.commands.groups.clear()
+        self.commands.resources.clear()
+        self.commands.clusters.clear()
+        self.commands.assignments.clear()
+        self.commands.hidden_roles = set(self.manifest.roles)
+        with self.assertRaisesRegex(cleanup.CleanupError, "roles or assignments remain"):
+            self.engine(execute=False).verify()
+        names = {
+            FakeCommands.value(args, "--name")
+            for args, _ in self.commands.calls
+            if args[:4] == ["az", "role", "definition", "list"] and "--name" in args
+        }
+        self.assertEqual(
+            names, {value.rsplit("/", 1)[-1] for value in self.manifest.roles.values()}
+        )
+        self.assertEqual(self.mutations(), [])
+
+    def test_cleanup_cannot_report_clean_when_exact_role_survives_delete(self):
+        self.commands.hidden_roles = set(self.manifest.roles)
+        self.commands.leave_role = True
+        with self.assertRaisesRegex(cleanup.CleanupError, "roles or assignments remain"):
+            self.engine(provider_only=True).clean()
+        self.assertFalse(self.commands.groups)
+        self.assertEqual(
+            sum(args[:4] == ["az", "role", "definition", "delete"] for args in self.mutations()), 4
+        )
+        self.assertEqual(len(self.commands.roles), 4)
+
     def test_credentials_are_removed_only_after_verified_cleanup(self):
         state = self.root / ".state/azure"
         (state / "bootstrap.outputs.json").write_text(json.dumps(bootstrap()))
@@ -766,6 +849,94 @@ class CleanupTests(unittest.TestCase):
         ):
             self.assertEqual(cleanup.main(), 1)
         self.assertTrue(credential.exists())
+
+    def test_interrupt_during_provider_delete_reports_incomplete_and_retains_credentials(self):
+        state = self.root / ".state/azure"
+        (state / "bootstrap.outputs.json").write_text(json.dumps(bootstrap()))
+        credential = state / "credentials.json"
+        credential.write_text("sensitive fixture")
+
+        def interrupted(args):
+            if args[:3] == ["az", "group", "delete"]:
+                raise KeyboardInterrupt
+            return False
+
+        self.commands.fail = interrupted
+        error, output = io.StringIO(), io.StringIO()
+        with (
+            patch.object(cleanup, "ROOT", self.root),
+            patch.object(cleanup, "Commands", return_value=self.commands),
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "clean-azure.py",
+                    "--provider-only",
+                    "--execute",
+                    "--credential-file",
+                    "credentials.json",
+                ],
+            ),
+            redirect_stdout(output),
+            redirect_stderr(error),
+        ):
+            self.assertEqual(cleanup.main(), 130)
+        self.assertIn("Cleanup incomplete: interrupted", error.getvalue())
+        self.assertIn("Azure operation may still be running", error.getvalue())
+        self.assertIn("resources may remain", error.getvalue())
+        self.assertEqual(output.getvalue(), "")
+        self.assertTrue(credential.exists())
+        self.assertTrue(self.commands.groups)
+
+    def test_late_interrupt_does_not_claim_credentials_were_retained(self):
+        state = self.root / ".state/azure"
+        (state / "bootstrap.outputs.json").write_text(json.dumps(bootstrap()))
+        first, second = state / "credentials.json", state / "management.kubeconfig"
+        first.write_text("sensitive fixture")
+        events = []
+        verify, unlink = cleanup.Cleanup.verify, Path.unlink
+
+        def verified(engine):
+            result = verify(engine)
+            events.append("verified")
+            return result
+
+        def interrupted(path, *args, **kwargs):
+            self.assertEqual(events[0], "verified")
+            if path == second:
+                raise KeyboardInterrupt
+            events.append("removed")
+            return unlink(path, *args, **kwargs)
+
+        error, output = io.StringIO(), io.StringIO()
+        with (
+            patch.object(cleanup, "ROOT", self.root),
+            patch.object(cleanup, "Commands", return_value=self.commands),
+            patch.object(cleanup.Cleanup, "verify", verified),
+            patch.object(Path, "unlink", interrupted),
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "clean-azure.py",
+                    "--provider-only",
+                    "--execute",
+                    "--credential-file",
+                    first.name,
+                    "--credential-file",
+                    second.name,
+                ],
+            ),
+            redirect_stdout(output),
+            redirect_stderr(error),
+        ):
+            self.assertEqual(cleanup.main(), 130)
+        self.assertEqual(events, ["verified", "removed"])
+        self.assertFalse(first.exists())
+        self.assertTrue(second.exists())
+        self.assertIn("credential removal may be partial", error.getvalue())
+        self.assertNotIn("no credentials removed", error.getvalue().lower())
+        self.assertEqual(output.getvalue(), "")
 
     def test_evidence_cannot_be_requested_as_a_credential_file(self):
         state = self.root / ".state/azure"

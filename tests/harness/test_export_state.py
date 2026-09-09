@@ -210,6 +210,7 @@ class Platform:
                     }
                 )
             )
+            path.chmod(0o600)
             return ""
         if args[:5] == ["az", "network", "vnet", "subnet", "show"]:
             resource_id = args[args.index("--ids") + 1]
@@ -415,7 +416,7 @@ class Platform:
 
 class ExportTests(unittest.TestCase):
     def setUp(self):
-        self.root = Path(".state") / ("export-unit-" + uuid4().hex)
+        self.root = Path(".state/azure") / ("export-unit-" + uuid4().hex)
         self.root.mkdir(parents=True, mode=0o700)
         self.addCleanup(lambda: shutil.rmtree(self.root))
         self.values = configuration()
@@ -553,10 +554,14 @@ class ExportTests(unittest.TestCase):
         self.assertEqual((self.root / "acceptance.json").read_bytes(), original)
         self.assertEqual((self.root / "endpoints.json").read_bytes(), endpoints)
 
-    def test_rerun_preserves_generation_and_repairs_compatibility_endpoint_file(self):
+    def test_rerun_preserves_generation_and_repairs_missing_exports(self):
         self.exporter().run(watch=False, emit=lambda _: None)
         original = (self.root / "acceptance.json").read_bytes()
-        (self.root / "endpoints.json").unlink()
+        for name in ("endpoints.json", "cleanup-targets.json", "cleanup-radius.yaml"):
+            (self.root / name).unlink()
+        for slot in SLOTS:
+            path = self.root / (slot + ".kubeconfig")
+            path.write_text(json.dumps(export_module.yaml.safe_load(path.read_text())))
         self.exporter().run(watch=False, emit=lambda _: None)
         self.assertEqual((self.root / "acceptance.json").read_bytes(), original)
         acceptance = json.loads(original)
@@ -564,6 +569,10 @@ class ExportTests(unittest.TestCase):
             json.loads((self.root / "endpoints.json").read_text()),
             json.loads((self.root / acceptance["endpoints_file"]).read_text()),
         )
+        self.assertEqual(
+            set(json.loads((self.root / "cleanup-targets.json").read_text())["targets"]), set(SLOTS)
+        )
+        self.assertTrue((self.root / "cleanup-radius.yaml").is_file())
 
     def test_single_writer_lock_prevents_parallel_snapshot_regression(self):
         first = self.exporter()

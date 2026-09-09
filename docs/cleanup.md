@@ -34,47 +34,64 @@ PostgreSQL. The mutable credential store described in
 Do not substitute `credentials.json` or the provisioning configuration's
 dictionary-form allocation map for the bootstrap output.
 
-Before execution, export the current operator kubeconfigs and relevant Radius
-workspace configurations from the management provisioner's protected state.
-Child files on its PVC must be exported **before** management is removed.
-Create a non-secret `.state/azure/cleanup-targets.json`:
-
-```json
-{
-  "version": 1,
-  "targets": {
-    "management": {
-      "clusterId": "COPY managementCluster.id FROM BOOTSTRAP OUTPUT",
-      "clusterUid": "COPY VERIFIED kube-system NAMESPACE UID",
-      "context": "radplanes-management",
-      "workspace": "radplanes-management",
-      "group": "radplanes",
-      "kubeconfig": "kubeconfig",
-      "radiusConfig": "radius.yaml"
-    },
-    "shared-control": {
-      "clusterId": "COPY THE ALLOCATED CHILD AKS RESOURCE ID",
-      "clusterUid": "COPY VERIFIED CHILD kube-system NAMESPACE UID",
-      "context": "radplanes-shared-control",
-      "kubeconfig": "shared-control.kubeconfig"
-    }
-  }
-}
-```
-
-The uppercase strings are placeholders, not working defaults. Include an entry
-for **every existing cluster**. Allocated slots whose AKS was never created do
-not need an entry. `workspace` defaults to the explicit context; `group`
-defaults to `radplanes`. Per-target `radiusConfig` overrides
-`--radius-config radius.yaml`.
-
-Obtain only the non-secret UID from an already verified target:
+Before execution, run the harness exporter while the clusters remain reachable:
 
 ```sh
-kubectl --kubeconfig .state/azure/shared-control.kubeconfig \
-  --context radplanes-shared-control get namespace kube-system \
-  -o jsonpath='{.metadata.uid}'
+uv run python harness/export-state.py --once
+# Or keep exporting as onboarding creates children:
+uv run python harness/export-state.py --watch --timeout 7200
 ```
+
+No provisioner PVC files, credentials store, or manually authored JSON are
+needed. The exporter reads `.state/azure/provisioning.json`, verifies Azure
+ownership and operator Entra access, and checks the live `kube-system` namespace
+UID. It automatically publishes:
+
+* `cleanup-targets.json`: version 1, with a `targets` mapping for known, verified
+  clusters. Each target records the exact `clusterId`, `clusterUid`, `context`,
+  `workspace`, `group`, `kubeconfig`, and `radiusConfig`.
+* `<slot>.kubeconfig`: the same private operator kubeconfig used by the harness,
+  including `management.kubeconfig` for management.
+* `cleanup-radius.yaml`: non-secret, cleanup-only workspace connections.
+  Workspace and context names are `radplanes-<slot>`; each workspace's scope is
+  `/planes/radius/local/resourceGroups/radplanes`. The active `radius.yaml` is
+  never overwritten. Generated targets explicitly select this cleanup config.
+
+The standard bootstrap's existing `management.kubeconfig` needs no exporter
+marker. Before reusing it in place, the exporter checks its private permissions,
+current context, and selected server/CA/exec profile against a fresh kubeconfig
+from the verified, owned AKS, then reads the live cluster UID. A mismatching
+existing file is neither used nor overwritten.
+
+`--config` can select a provisioning file nested under `.state/azure`, such as
+`.state/azure/operator-export/provisioning.json`. Acceptance paths stay relative
+to that export directory; cleanup's kubeconfig and Radius references are always
+relative to `.state/azure`. For that example, select
+`--targets operator-export/cleanup-targets.json` when planning or executing
+cleanup. Existing generated nested metadata with the old basename-only
+references is repaired on export; manual files are not adopted.
+
+Cleanup access is published before application/HTTPS gateway readiness checks.
+Existing cluster IDs in management inventory are included even without a
+showcase tenant assignment. A management app that is not ready can still yield
+its own verified cleanup access, but cannot supply new child inventory.
+`--once` still exits **3**, not 0, when the full demo export is incomplete;
+cleanup metadata is not evidence of application readiness.
+
+Rerunning the exporter creates or repairs missing cleanup metadata even when
+the acceptance generation is unchanged. Files carry generated ownership
+markers and project/subscription metadata; foreign, manual, symlinked, or
+scope-changed cleanup files are refused, not overwritten. Review and preserve
+conflicting operator files before rerunning; do not add a generated marker to
+adopt them. Writes are atomic `0600` replacements under a required `0700` state
+directory, with kubeconfig/workspace dependencies written before target metadata.
+
+Normal cleanup requires an entry for **every existing cluster**. Allocated slots
+whose AKS was never created do not need one. Previous exports are retained when
+a cluster is temporarily unavailable; they are not cached authorization.
+Each exporter watch pass refreshes live trust checks, and cleanup independently
+rechecks ownership, UID, FQDN, and Radius scope before any mutation. A missing
+target is an explicit blocker, never permission to skip a cluster.
 
 These are trusted operator configuration files: kubeconfig exec plugins can run
 local commands. Use exports from the approved clusters, not another project's
@@ -83,8 +100,10 @@ credential files mode `0600`. Source files and evidence must not contain tokens,
 DSNs, passwords, PFX data, or complete Secrets.
 
 `--targets NAME` selects a different target metadata file within `.state/azure`.
-All supplied kubeconfig/Radius files must stay inside project state and must
-not be symlinks. Context names must be `radplanes-<slot>`.
+All supplied kubeconfig/Radius files must stay inside `.state/azure` and must
+not be symlinks. Context names must be `radplanes-<slot>`. For explicitly supplied
+targets, `workspace` defaults to the context and `group` to `radplanes`.
+Per-target `radiusConfig` overrides `--radius-config radius.yaml`.
 
 The tool applies the existing project `HOME` workaround from the command
 runner: each context gets `.state/azure/homes/<context>`, whose `.kube/config`
@@ -105,7 +124,10 @@ The tool requires:
   and full IDs. A matching name prefix alone never authorizes deletion.
 * The four deterministic bootstrap role-definition GUIDs, matching custom role
   names, and exact project assignable scopes. Built-in role definitions cannot
-  be selected through the manifest.
+  be selected through the manifest. The broad custom-role inventory is augmented
+  with an exact GUID lookup for every manifest role; matching entries are
+  deduplicated only after validation. An exact lookup returning another role
+  ID, or any authorization/command failure, stops cleanup.
 * Live group/resource/AKS tags and IDs. The saved vault, registry, and VNet must
   match the corresponding live platform resources. Recognized non-taggable
   child types inherit the checked group boundary only when their tags are
@@ -158,6 +180,12 @@ This is not a transaction or automatic rollback. A failure may follow successful
 deletion of earlier resources. Preserve evidence, inspect the reported phase,
 and use an explicit reviewed recovery path.
 
+Keyboard interruption exits **130** and reports incomplete cleanup. An Azure
+operation may still be running and resources may remain. If interruption occurs
+after verification, optional local credential removal may already be partial;
+the message does not promise that all credentials were retained. Inspect state
+and run read-only verification before deciding how to resume.
+
 ## Emergency provider-only path
 
 If Radius is unavailable, first inspect the ownership plan:
@@ -190,7 +218,9 @@ and assignment using a project custom role to be absent, all four custom role
 definitions to be deleted, and no active project-tagged resources/groups.
 An unrelated subscription-level role assignment is neither deleted nor
 mistaken for a project leftover. Role assignment reads disable principal-name
-lookup, so they do not require Microsoft Graph.
+lookup, so they do not require Microsoft Graph. Absence of custom roles requires
+both the broad inventory and `az role definition list --name <GUID>` for each
+manifest GUID; a role omitted from the broad list still blocks a clean result.
 
 The matching soft-deleted Key Vault record is reported separately, including
 its scheduled purge date when returned. It is **not purged**. Purge protection
@@ -204,7 +234,7 @@ verification**, for individually named top-level files:
 ```sh
 CONFIRM_AZURE=yes uv run python operations/clean-azure.py --execute \
   --credential-file credentials.json \
-  --credential-file kubeconfig \
+  --credential-file management.kubeconfig \
   --credential-file shared-control.kubeconfig \
   --credential-file shared-control.key
 ```
@@ -222,17 +252,21 @@ Run only mocked tests during ordinary development:
 ```sh
 mkdir -p .state/check/tmp
 TMPDIR="$PWD/.state/check/tmp" PYTHONDONTWRITEBYTECODE=1 \
-  uv run --no-sync pytest tests/operations/test_cleanup.py -q
+  uv run --no-sync pytest tests/operations/test_cleanup.py tests/harness -q
 uv run --no-sync ruff check operations/clean-azure.py operations/verify-clean.py \
-  tests/operations/test_cleanup.py
+  harness/export-state.py tests/operations/test_cleanup.py \
+  tests/harness/test_export_state.py tests/harness/test_cleanup_export.py
 ```
 
 The test command runner is an in-memory model; real subprocess creation is
 blocked. Test scratch stays under the project. These tests cover ownership
 tampering, explicit contexts, deletion order, failed/partial operations,
 provider-only intent, read-only verification, and post-verification credential
-removal. No real Azure/Radius mutation is part of source validation.
+removal. They also cover exact-role inventory gaps, early/late interruption,
+automatic cleanup handoff, partial exports, ownership refusal, and interrupted
+atomic publication. No real Azure/Radius mutation is part of source validation.
 
-Validated on **2026-09-09T13:26:37Z**: **34 tests and 12 subtests passed**;
-Ruff checks, formatting checks, and both CLI help entrypoints passed. Actual
-cleanup and post-cleanup cloud verification remain parent-owned live actions.
+Validated on **2026-09-09T16:37:07Z**: **171 tests and 63 subtests passed**;
+Ruff checks, formatting checks, and all three CLI help entrypoints passed.
+Actual cleanup and post-cleanup cloud verification remain parent-owned live
+actions.

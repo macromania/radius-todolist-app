@@ -299,6 +299,15 @@ class Cleanup:
 
     def role_state(self) -> tuple[dict, list]:
         definitions = array(self.az("role", "definition", "list", "--custom-role-only", "true"))
+        for identifier in self.manifest.roles.values():
+            exact = array(
+                self.az("role", "definition", "list", "--name", identifier.rsplit("/", 1)[-1])
+            )
+            require(
+                all(same_id(definition.get("id"), identifier) for definition in exact),
+                "Exact custom role lookup returned a different role ID",
+            )
+            definitions.extend(exact)
         found = {}
         for definition in definitions:
             key = next(
@@ -329,7 +338,6 @@ class Cleanup:
                 {scope.lower() for scope in definition["assignableScopes"]} == expected,
                 "Custom role has foreign assignable scopes",
             )
-            require(key not in found, "Duplicate role definition response")
             found[key] = definition
         assignments = []
         for assignment in array(
@@ -898,6 +906,14 @@ def main(*, verify_only: bool = False) -> int:
             result["credentialFiles"] = [str(path.relative_to(ROOT)) for path in credentials]
         print(json.dumps(result, indent=2))
         return 0
+    except KeyboardInterrupt:
+        print(
+            "Cleanup incomplete: interrupted. An Azure operation may still be running and "
+            "resources may remain. Local credential removal may be partial; inspect state "
+            "and verify cleanup before retrying.",
+            file=sys.stderr,
+        )
+        return 130
     except (
         CleanupError,
         ProvisioningError,
