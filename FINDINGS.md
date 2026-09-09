@@ -525,3 +525,28 @@ A read-only query confirmed zero tenants and zero operations before acceptance.
 `058d878`, without continuation flags. Its first real operation,
 `43bbaeb1-8250-49db-8d70-15ab73a9da73`, entered `control-cluster` at
 2026-09-09T21:45:54Z. Tenant completion and outage results are not yet claimed.
+
+### Local execution contract research (not a deployment)
+
+Read-only research against Radius 0.60.2 confirmed that custom Terraform
+Recipes execute inside
+[`dynamic-rp`](https://github.com/radius-project/radius/blob/v0.60.2/pkg/dynamicrp/options.go),
+with no separate executor Job. The
+[chart](https://github.com/radius-project/radius/blob/v0.60.2/deploy/Chart/templates/dynamic-rp/deployment.yaml)
+has image overrides but no arbitrary volume/security-context override; the
+approved local overlay must patch that specific management Deployment.
+
+The kind provider 0.11.0
+[schema](https://github.com/tehcyx/terraform-provider-kind/blob/v0.11.0/kind/schema_kind_config.go)
+supports explicit API ports and node mounts. Its
+[implementation](https://github.com/tehcyx/terraform-provider-kind/blob/v0.11.0/kind/resource_cluster.go)
+returns host-facing kubeconfigs and ignores accepted `timeouts` overrides:
+legacy CRUD calls do not consume the configured timeout, and readiness uses a
+hard-coded wait when enabled. Do not mistake that for an overall deadline.
+The initial research claim that timeout blocks were unavailable was corrected.
+Use supported HTTP module delivery, not an assumed `file://` loophole, and
+verify sibling-node TLS with the real CA rather than copying upstream CI's
+TLS bypass. These are source findings only; no local resources were created.
+The direct walkthrough and independent security review of this plan correction
+were clean. Docker socket access, generated child credentials, and the actual
+local Recipe run path remain live verification gates, not passing results.

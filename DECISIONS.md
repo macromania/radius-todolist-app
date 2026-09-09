@@ -246,3 +246,17 @@ operator scripts. Route mutations through the existing guarded command helpers.
 When code is embedded in an immutable ConfigMap, regenerate and verify the
 actual upcoming execution reference after a fix. Keep old failed manifests as
 historical evidence rather than treating a repaired source file as a deployed fix.
+
+## D029 - Target the actual local Terraform runtime
+
+Radius 0.60.2 executes a custom cluster's Terraform Recipe inside `dynamic-rp`,
+not a separate Job. The local image/socket overlay therefore targets only
+management's `dynamic-rp`, preserving its entrypoint and Terraform layout.
+The chart has image overrides but no generic volume/security-context knobs:
+make the version-pinned installation patch explicit, not an invented Helm value.
+Use a supported in-cluster HTTP module archive rather than a local-path
+validation gap or human Git credentials. Serve only immutable static Recipe
+content, never Terraform state or credential directories. Keep a Radius installation per child,
+CA-verified child API access, and no automatic interrupted-provisioning recovery.
+Socket permissions, sibling API SANs, and actual execution remain live gates;
+local implementation still waits for Azure acceptance.
