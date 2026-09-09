@@ -166,8 +166,9 @@ Bootstrap binds management Radius's `applications-rp`, `bicep-de`, `ucp`, and
 creates the same four bindings using the new child OIDC issuer and preallocated
 Radius identity. It also binds that child's issuer identity. There are no role
 assignments inside any Recipe, including its inlined modules.
-The shared federation module uses `@batchSize(1)`: its four writes against one
-identity must be serialized to avoid Azure HTTP 409 conflicts (F004).
+The management federation module and flat child Recipe both use
+`@batchSize(1)`: four writes against one Radius identity must be serialized to
+avoid Azure HTTP 409 conflicts (F004). The child issuer has one separate binding.
 
 ### Per-slot certificates in the one project vault (F005)
 
@@ -272,13 +273,72 @@ owning Radius application, not a different provider model.
 | `postgreSqlDatabases` | `databaseName` | `host`, `port`, `database`, `username`, `tlsRequired`, `serverId`, `setupSecretName` |
 | `gateways` | `apiService`, `apiPort`, `challengeService`, `challengePort`, `phase`, optional `hostname`, optional `certificateSecretUri` | `host`, `url`, `gatewayId`, `apiBackendService`, `challengeBackendService`, `apiBackendIp`, `challengeBackendIp` |
 
-`cluster.bicep` takes `allocations` as a dictionary keyed by slot, plus
-`location`, `kubernetesVersion`, `nodeVmSize`, `nodeCount`, `authorizedIpRanges`,
-and optional `tags`. Only validated placement chooses the slot. The coordinator
+`cluster.bicep` takes `allocations` as a **one-entry** dictionary keyed by slot,
+plus `location`, `tenantId`, `kubernetesVersion`, `nodeVmSize`, `nodeCount`,
+`authorizedIpRanges`, and optional `tags`. Only validated placement chooses the slot. The coordinator
 must not accept arbitrary allocation dictionaries, resource groups, subnet IDs,
 or identity IDs from the public request. `bootstrapAccessRef` is the AKS ID;
-the authorized coordinator obtains user credentials separately. The Recipe
-inlines `infra/bootstrap/aks.bicep` and `federation.bicep` when published.
+the authorized coordinator obtains user credentials separately.
+
+### Per-slot management-Radius provisioning environment (F017)
+
+The child cluster Recipe is now **flat**: one native AKS resource, four
+serialized Radius federated credentials, and one issuer federated credential.
+It creates no identities or Azure role grants and emits no nested
+`Microsoft.Resources/deployments` resource or reference. The AKS settings remain
+aligned with the management bootstrap helper; a compiled regression test
+compares their authentication, networking, node-pool, and workload-identity
+configuration. Do not reintroduce Bicep module calls for sharing that body.
+
+The live F017 failure was an Azure-ID reference to
+`Microsoft.Resources/deployments/radius-cluster-...` that the Radius deployment
+engine could not find. The pinned Bicep driver initializes the **deployments**
+provider scope to `/planes/radius/local/resourceGroups/<Radius group>`, then
+sets the **Azure** provider scope separately from the environment. Our former
+cross-resource-group module compiled references to deployments under an Azure
+subscription/resource-group ID instead. This scope mismatch explains the
+observed lookup failure; it is not a claim that all Radius nested modules are
+unsupported.
+
+For each allocated child slot, the parent driver must register a separate
+provisioning environment **in the existing management Radius installation and
+Radius resource group**:
+
+| Setting | Exact contract for the default allocation |
+| --- | --- |
+| Environment name | `provision-<slot>` |
+| Kubernetes compute resource | `self` — still the management cluster |
+| Environment Kubernetes namespace | `radplanes-p-<slot>` |
+| Radius application name | `cluster-<slot>` |
+| Azure provider scope | `/subscriptions/<foundation.subscriptionId>/resourceGroups/<allocation.clusterResourceGroup>` |
+| Recipe type | `Demo.Platform/clusters`, mapped to the new immutable flat-cluster Recipe reference |
+| Recipe parameter `allocations` | `{ "<slot>": <that slot's bootstrap allocation> }`, not the complete allocation map |
+| Other Recipe parameters | Explicit foundation `location`, `tenantId`, `kubernetesVersion`, `nodeVmSize`, `nodeCount`, `authorizedIpRanges`, and required tags |
+| Private registry authentication | Copy the already working `recipeConfig.bicep.authentication` registry entry, using `RadiusSecretStore` with `azureWorkloadIdentity`, into **every** provisioning environment |
+
+Validate the provider scope exactly against the selected allocation before
+submitting the resource. Keep stable, unique Radius resource names from the
+existing child-cluster application declaration. The default names above keep
+the resulting `<environment namespace>-<application>` namespace within 63
+characters; validate that bound when extending the operator allocation.
+Do not repeatedly mutate the management application's environment to point it
+at different cluster groups.
+
+Deploy the **unchanged** child-cluster application Bicep against that slot's
+provisioning environment and application name. Azure resource placement now
+comes entirely from `providers.azure.scope`, not a cross-group module scope
+inside the Recipe. Management's application environment stays scoped to its
+management app group; each child's later application environment stays scoped
+to that child's app group. Cluster creation still runs only through management
+Radius using the preallocated management-Radius identity.
+
+The new environment must retain the proven private ACR authentication entry:
+the original environment's successful pull does not configure another
+environment automatically. Publish this changed Recipe under a new locked tag
+and verify its digest; do not reuse the failed artifact reference. The parent
+owns cleanup of the failed Radius gate record and the new live create/delete
+test. No direct AKS creation, source fork, extra controller, or service-principal
+fallback is introduced.
 
 `postgresql.bicep` takes `delegatedSubnetId`, `privateDnsZoneId`, optional
 `location`, `skuName` (`Standard_D2ds_v5`), `skuTier` (`GeneralPurpose`), setup
@@ -498,6 +558,23 @@ parameter/result, and a non-secret `setupSecretName` output. These are local
 source/serialization checks; no mixed-provider deployment or initialization
 Job execution is claimed.
 
+### Flat cluster Recipe validation (F017)
+
+The flat Recipe compiled with Bicep 0.42.1 at
+**2026-09-09T09:45:10Z**, template hash **`11784538854577107589`**.
+Its only resource types are native AKS and managed-identity federated
+credentials; the compiled JSON contains no `Microsoft.Resources/deployments`
+declaration or reference, no identity creation, and no role assignment.
+All eight existing non-secret result values are preserved.
+
+The regression suite now includes a flat-template guard and comparison against
+the working management AKS authentication/network/node settings. All **11 tests**,
+Ruff checks, formatting validation, and a fresh flat-Recipe compile passed at
+**2026-09-09T09:49:09Z**; the template hash was unchanged. The parent
+must still publish the new artifact, create the per-slot environment with
+private-registry authentication, and repeat the actual Radius-owned
+create/delete gate. These source checks do not claim the live gate passed.
+
 Azure MCP schema lookup for PostgreSQL returned an unsupported-schema error;
 the official `2024-08-01` ARM reference and the pinned compiler supplied the
 schema validation instead. MCP's subscription-policy lookup used a principal
@@ -541,6 +618,9 @@ resource.
 * [Radius 0.60.2 renderer labels](https://github.com/radius-project/radius/blob/v0.60.2/pkg/kubernetes/labels.go)
 * [Radius 0.60 Kubernetes Bicep Recipe](https://github.com/radius-project/docs/blob/v0.60/docs/content/tutorials/create-recipe/recipes/bicep/kubernetes-postgresql.bicep)
 * [Radius 0.60.2 sensitive custom schemas](https://github.com/radius-project/radius/blob/v0.60.2/test/functional-portable/dynamicrp/noncloud/resources/testdata/testresourcetypes.yaml)
+* [Radius 0.60.2 Recipe provider-scope construction](https://github.com/radius-project/radius/blob/v0.60.2/pkg/recipes/driver/bicep/bicep.go)
+* [Radius 0.60.2 default deployment scope](https://github.com/radius-project/radius/blob/v0.60.2/pkg/sdk/clients/providerconfig.go)
+* [Radius deployment-engine scope architecture](https://github.com/radius-project/radius/blob/v0.60.2/docs/architecture/deployment-engine.md)
 * [AKS precreated kubelet identity](https://learn.microsoft.com/azure/aks/pre-created-kubelet-managed-identity)
 * [Current AKS system-pool sizing](https://learn.microsoft.com/azure/aks/use-system-pools)
 * [AKS tagging and propagation](https://learn.microsoft.com/azure/aks/use-tags)

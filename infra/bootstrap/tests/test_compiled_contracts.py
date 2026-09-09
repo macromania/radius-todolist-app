@@ -123,8 +123,64 @@ class CompiledInfrastructureTests(unittest.TestCase):
             ]
             self.assertGreater(len(credentials), 0)
             for credential in credentials:
-                self.assertEqual(credential["copy"]["mode"], "serial")
-                self.assertEqual(credential["copy"]["batchSize"], 1)
+                if "copy" in credential:
+                    self.assertEqual(credential["copy"]["mode"], "serial")
+                    self.assertEqual(credential["copy"]["batchSize"], 1)
+                else:
+                    self.assertIn("'certificate-issuer'", credential["name"])
+
+    def test_cluster_recipe_is_flat_and_retains_bootstrap_aks_security(self):
+        template = self.cluster_recipe
+        self.assertNotIn("Microsoft.Resources/deployments", json.dumps(template))
+        self.assertFalse(
+            any(
+                item["type"] == "Microsoft.Authorization/roleAssignments"
+                for item in resources(template)
+            )
+        )
+        cluster_type = "Microsoft.ContainerService/managedClusters"
+        child = next(item for item in resources(template) if item["type"] == cluster_type)
+        management = next(
+            item for item in nested_resources(self.bootstrap) if item["type"] == cluster_type
+        )
+        self.assertEqual(child["apiVersion"], management["apiVersion"])
+        self.assertEqual(child["identity"]["type"], "UserAssigned")
+        for field in (
+            "enableRBAC",
+            "disableLocalAccounts",
+            "aadProfile",
+            "apiServerAccessProfile",
+            "oidcIssuerProfile",
+            "securityProfile",
+            "networkProfile",
+            "autoUpgradeProfile",
+        ):
+            with self.subTest(field=field):
+                self.assertEqual(child["properties"][field], management["properties"][field])
+        child_pool = child["properties"]["agentPoolProfiles"][0]
+        management_pool = management["properties"]["agentPoolProfiles"][0]
+        for field, expected in management_pool.items():
+            if field not in {"vnetSubnetID", "tags"}:
+                self.assertEqual(child_pool[field], expected)
+        kubelet = child["properties"]["identityProfile"]["kubeletidentity"]
+        self.assertEqual(set(kubelet), {"resourceId", "clientId", "objectId"})
+        self.assertIn("allocation", kubelet["resourceId"])
+        self.assertIn(".identities.kubelet.id", kubelet["resourceId"])
+        self.assertEqual(template["parameters"]["nodeCount"]["defaultValue"], 2)
+        self.assertEqual(template["parameters"]["nodeVmSize"]["defaultValue"], "Standard_D4s_v5")
+        self.assertEqual(
+            set(template["outputs"]["result"]["value"]["values"]),
+            {
+                "clusterId",
+                "clusterName",
+                "resourceGroup",
+                "fqdn",
+                "oidcIssuer",
+                "bootstrapAccessRef",
+                "radiusIdentityId",
+                "radiusClientId",
+            },
+        )
 
     def test_allocation_exposes_deterministic_certificate_and_state_names(self):
         allocation = self.network["outputs"]["allocations"]["copy"]["input"]

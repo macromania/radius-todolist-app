@@ -111,3 +111,31 @@ The local package CDN failed TLS handshakes repeatedly with multiple clients.
 Build in the project ACR with the same pinned Dockerfiles, preserving complete
 build/push output. Pull the resulting image and compare its actual source
 contents before deployment. Never disable TLS verification to make a build pass.
+
+## D015 - Bootstrap Jobs use known Radius configuration, not extra Secret access
+
+The in-cluster bootstrap identity can use Radius but cannot list its Helm release
+Secrets. `rad workspace create` therefore reports "not installed". Generate
+the protected workspace configuration from already verified cluster metadata
+and verify a real Radius API read instead of granting more Secret permissions.
+An ephemeral operator Job can be launched through authenticated AKS Run Command
+when the laptop's direct Kubernetes connection is unreliable. Tenant cluster
+creation still happens through Radius, never through a direct AKS create call.
+
+## D016 - Application Gateway's trusted-service certificate path
+
+Keep Key Vault `publicNetworkAccess=Disabled`, its private endpoint, and exact
+per-plane certificate RBAC. Enable the documented `AzureServices` network
+exception for Application Gateway's certificate-validation path. A valid
+certificate and correct object-scoped identity were insufficient with
+`bypass=None`. This does not grant other identities access to certificate data
+or enable arbitrary public clients.
+
+## D017 - Flat cluster Recipes with per-slot Azure scopes
+
+Radius's deployment engine rejected references to nested cross-resource-group
+Azure deployment modules. Keep the cluster Recipe flat and register one
+management-Radius environment per allocated child slot, scoped to that slot's
+cluster resource group. The child-cluster application definition remains
+unchanged. Real Azure Activity Log evidence confirms Radius creates the cluster;
+the coordinator only bootstraps its Radius installation and workloads afterward.

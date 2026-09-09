@@ -1,7 +1,10 @@
+targetScope = 'resourceGroup'
+
 param context object
-@description('Operator-owned dictionary keyed by slot. Build it from bootstrap allocations; never accept cloud IDs from the public API.')
+@description('One-entry operator-owned dictionary keyed by slot. The environment Azure provider scope must be that allocation clusterResourceGroup.')
 param allocations object
 param location string = resourceGroup().location
+param tenantId string = subscription().tenantId
 param kubernetesVersion string = '1.35.7'
 param nodeVmSize string = 'Standard_D4s_v5'
 @minValue(2)
@@ -27,61 +30,129 @@ var radiusAccounts = [
   'dynamic-rp'
 ]
 
-module cluster '../../../bootstrap/aks.bicep' = {
-  name: 'radius-cluster-${uniqueString(context.resource.id)}'
-  scope: resourceGroup(allocation.clusterResourceGroup)
-  params: {
-    clusterName: allocation.clusterName
-    location: location
+// Keep this native resource aligned with bootstrap/aks.bicep. Cross-RG modules
+// compile to Azure deployment references, but Radius 0.60.2 scopes modules to its own plane.
+resource cluster 'Microsoft.ContainerService/managedClusters@2025-05-01' = {
+  name: allocation.clusterName
+  location: location
+  tags: requiredTags
+  sku: {
+    name: 'Base'
+    tier: 'Free'
+  }
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${allocation.identities.controlPlane.id}': {}
+    }
+  }
+  properties: {
     kubernetesVersion: kubernetesVersion
-    nodeVmSize: nodeVmSize
-    nodeCount: nodeCount
-    nodeSubnetId: allocation.nodeSubnetId
+    dnsPrefix: allocation.clusterName
     nodeResourceGroup: allocation.nodeResourceGroup
-    controlPlaneIdentityId: allocation.identities.controlPlane.id
-    kubeletIdentity: allocation.identities.kubelet
-    authorizedIpRanges: authorizedIpRanges
-    tags: requiredTags
+    enableRBAC: true
+    disableLocalAccounts: true
+    aadProfile: {
+      managed: true
+      enableAzureRBAC: true
+      tenantID: tenantId
+    }
+    apiServerAccessProfile: {
+      authorizedIPRanges: authorizedIpRanges
+      enablePrivateCluster: false
+    }
+    identityProfile: {
+      kubeletidentity: {
+        resourceId: allocation.identities.kubelet.id
+        clientId: allocation.identities.kubelet.clientId
+        objectId: allocation.identities.kubelet.principalId
+      }
+    }
+    oidcIssuerProfile: {
+      enabled: true
+    }
+    securityProfile: {
+      workloadIdentity: {
+        enabled: true
+      }
+    }
+    networkProfile: {
+      networkPlugin: 'azure'
+      networkPluginMode: 'overlay'
+      networkDataplane: 'cilium'
+      networkPolicy: 'cilium'
+      loadBalancerSku: 'standard'
+      outboundType: 'userAssignedNATGateway'
+      podCidr: '192.168.0.0/16'
+      serviceCidr: '172.20.0.0/16'
+      dnsServiceIP: '172.20.0.10'
+    }
+    agentPoolProfiles: [
+      {
+        name: 'system'
+        mode: 'System'
+        type: 'VirtualMachineScaleSets'
+        osType: 'Linux'
+        osSKU: 'AzureLinux3'
+        vmSize: nodeVmSize
+        count: nodeCount
+        maxPods: 110
+        osDiskSizeGB: 64
+        enableNodePublicIP: false
+        vnetSubnetID: allocation.nodeSubnetId
+        tags: requiredTags
+      }
+    ]
+    autoUpgradeProfile: {
+      upgradeChannel: 'none'
+      nodeOSUpgradeChannel: 'NodeImage'
+    }
   }
 }
 
-// Identities and role assignments already exist. These bindings grant no new Azure roles.
-module radiusFederation '../../../bootstrap/federation.bicep' = {
-  name: 'radius-federation-${uniqueString(context.resource.id)}'
-  scope: resourceGroup(allocation.clusterResourceGroup)
-  params: {
-    identityName: last(split(allocation.identities.radius.id, '/'))
-    issuer: cluster.outputs.oidcIssuer
-    bindings: [for account in radiusAccounts: {
-      name: 'radius-${account}'
-      subject: 'system:serviceaccount:radius-system:${account}'
-    }]
-  }
+resource radiusIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' existing = {
+  name: last(split(allocation.identities.radius.id, '/'))
 }
-module issuerFederation '../../../bootstrap/federation.bicep' = {
-  name: 'issuer-federation-${uniqueString(context.resource.id)}'
-  scope: resourceGroup(allocation.clusterResourceGroup)
-  params: {
-    identityName: last(split(allocation.identities.certificateIssuer.id, '/'))
-    issuer: cluster.outputs.oidcIssuer
-    bindings: [
-      {
-        name: 'certificate-issuer'
-        subject: allocation.certificateIssuerSubject
-      }
+resource issuerIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' existing = {
+  name: last(split(allocation.identities.certificateIssuer.id, '/'))
+}
+
+// The identities and grants are bootstrap-owned. Only their bindings belong to this Recipe.
+@batchSize(1)
+resource radiusFederation 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2024-11-30' = [for account in radiusAccounts: {
+  parent: radiusIdentity
+  name: 'radius-${account}'
+  properties: {
+    issuer: cluster.properties.oidcIssuerProfile.issuerURL
+    subject: 'system:serviceaccount:radius-system:${account}'
+    audiences: [
+      'api://AzureADTokenExchange'
+    ]
+  }
+}]
+resource issuerFederation 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials@2024-11-30' = {
+  parent: issuerIdentity
+  name: 'certificate-issuer'
+  properties: {
+    issuer: cluster.properties.oidcIssuerProfile.issuerURL
+    subject: allocation.certificateIssuerSubject
+    audiences: [
+      'api://AzureADTokenExchange'
     ]
   }
 }
 
+var radiusFederationIds = [for (account, i) in radiusAccounts: radiusFederation[i].id]
+
 output result object = {
-  resources: concat([cluster.outputs.clusterId], radiusFederation.outputs.resourceIds, issuerFederation.outputs.resourceIds)
+  resources: concat([cluster.id], radiusFederationIds, [issuerFederation.id])
   values: {
-    clusterId: cluster.outputs.clusterId
-    clusterName: cluster.outputs.clusterName
+    clusterId: cluster.id
+    clusterName: cluster.name
     resourceGroup: allocation.clusterResourceGroup
-    fqdn: cluster.outputs.fqdn
-    oidcIssuer: cluster.outputs.oidcIssuer
-    bootstrapAccessRef: cluster.outputs.clusterId
+    fqdn: cluster.properties.fqdn
+    oidcIssuer: cluster.properties.oidcIssuerProfile.issuerURL
+    bootstrapAccessRef: cluster.id
     radiusIdentityId: allocation.identities.radius.id
     radiusClientId: allocation.identities.radius.clientId
   }
