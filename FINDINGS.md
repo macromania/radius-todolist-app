@@ -69,6 +69,7 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F040 | 7 | Medium correctness | `operations/clean-azure.py` | interrupt handling | KeyboardInterrupt bypasses the explicit incomplete-cleanup result | Explicit 130/incomplete outcome implemented and reviewed; no false rollback claims |
 | F041 | 3 | High correctness | `src/plane_demo/management/providers/azure.py` | management_permissions | Worker had namespace pod/port-forward access but lacked cluster-scoped access to Radius's aggregated API | Narrow planes/local, resourceName radius grant added; live 403 became 200 and worker stayed Running without restarts; fix review/unit checks recorded below |
 | F042 | 4 | Deployment blocker | `harness/run-azure.py`, `infra/bootstrap/azure.bicep` | identity selection | Harness reused coordinator identity, which cannot read gateway/subnet metadata | Resolved: dedicated harness identity, both fix reviews, 21 exact live grants verified; exporter ready and first tenant provisioning started |
+| F043 | 4 | High correctness | `harness/export-state.py` | optional AKS lookup | AKS returns NotFound during creation as well as ResourceNotFound; exporter treated the former as fatal | Exact optional-lookup alternative added; run-path regression, rubber-duck pass, and security fix review passed |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -322,3 +323,20 @@ and management state export, and became ready for onboarding. The first real
 tenant request started operation `036be342-eb25-459c-97a9-1b6af2229a15`; the worker
 reported `stage=control-cluster` at 2026-09-09T17:53:06Z. This is the start of
 actual API-driven provisioning, not a completed tenant or acceptance result.
+
+### AKS creation absence-code correction
+
+The third acceptance Job stopped at 2026-09-09T17:58:14Z when the exporter
+received `ERROR: (NotFound) Could not find managed cluster resource` from
+`az aks show` for shared-data. The persisted CLI log confirms exit 3 and this
+exact service error; it was not an authorization failure. The exporter accepted
+only `ResourceNotFound`. Both codes now mean pending for an explicitly optional
+child lookup, never for required resources or an authorization error containing
+those words elsewhere.
+
+The direct rubber-duck pass checked that boundary and the actual exporter run
+path. The independent security fix review found no vulnerabilities. The focused
+suite passed 72 tests and 35 subtests. Both shared AKS clusters subsequently
+passed real harness credential/Kubernetes access probes. Their original tenant
+operation continued into child Radius installation without restart or replay.
+The failed acceptance run remains failed; it is not relabeled as a pass.

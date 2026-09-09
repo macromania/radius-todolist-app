@@ -433,7 +433,9 @@ class Exporter:
         except (OSError, subprocess.TimeoutExpired):
             raise ExportError("operator_command_unavailable_or_timeout") from None
         if result.returncode:
-            if missing and re.match(r"^\s*ERROR:\s*\(ResourceNotFound\)", result.stderr or ""):
+            if missing and re.match(
+                r"^\s*ERROR:\s*\((?:ResourceNotFound|NotFound)\)", result.stderr or ""
+            ):
                 raise Pending("cluster_not_created")
             raise ExportError("operator_command_failed")
         return result.stdout

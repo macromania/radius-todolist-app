@@ -550,6 +550,32 @@ class ExportTests(unittest.TestCase):
         with self.assertRaises(export_module.ExportError):
             exporter.run_command(["az", "aks", "show"], missing=True)
 
+    def test_aks_not_found_during_creation_is_pending_only_for_optional_child_lookup(self):
+        exporter = self.exporter()
+        original = exporter.execute
+
+        def not_found(args, **kwargs):
+            if args[:3] == ["az", "aks", "show"] and "aks-radplanes-shared-data" in args:
+                return subprocess.CompletedProcess(
+                    args,
+                    3,
+                    "",
+                    "ERROR: (NotFound) Could not find managed cluster resource: "
+                    "aks-radplanes-shared-data in subscription: example.\n"
+                    "Exception Details: (Unspecified) rpc error: code = NotFound",
+                )
+            return original(args, **kwargs)
+
+        exporter.execute = not_found
+        self.assertEqual(exporter.run(watch=False, emit=lambda _: None), 3)
+        status = json.loads((self.root / "export-status.json").read_text())
+        self.assertTrue(status["ready_for_onboarding"])
+        self.assertEqual(status["pending_slots"]["shared-data"], "cluster_not_created")
+        with self.assertRaisesRegex(export_module.ExportError, "operator_command_failed"):
+            exporter.run_command(
+                ["az", "aks", "show", "--name", "aks-radplanes-shared-data"], missing=False
+            )
+
     def test_missing_child_preserves_previous_published_generation(self):
         exporter = self.exporter()
         exporter.sample()
