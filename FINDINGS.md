@@ -515,3 +515,13 @@ reported 8/100 regional and DSv5 vCPUs used, leaving capacity for the required
 32 additional vCPUs. `deploy-management-fresh` was submitted with new state and
 is running. No old provisioning operation or failed evidence was replayed.
 Fresh onboarding and outage acceptance remain pending.
+
+Fresh management deployment completed. Management API, provisioner, and
+challenge responder each have one available replica; the worker emitted
+`provisioner_ready` at 2026-09-09T21:32:23Z. Real certificate-verified HTTPS
+returned health 200, missing-key 401, and authenticated unknown-tenant 404.
+A read-only query confirmed zero tenants and zero operations before acceptance.
+`demo-acceptance-fresh` now runs the full fresh scenario from committed source
+`058d878`, without continuation flags. Its first real operation,
+`43bbaeb1-8250-49db-8d70-15ab73a9da73`, entered `control-cluster` at
+2026-09-09T21:45:54Z. Tenant completion and outage results are not yet claimed.
