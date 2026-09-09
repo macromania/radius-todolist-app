@@ -3,7 +3,7 @@ from uuid import uuid4
 import psycopg
 import pytest
 
-from plane_demo.db import ProvisionerAlreadyRunning, provisioner_session
+from plane_demo.shared.db import ProvisionerAlreadyRunning, provisioner_session
 
 pytestmark = pytest.mark.integration
 

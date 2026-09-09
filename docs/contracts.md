@@ -6,13 +6,17 @@ One API/reconciler image runs any of these commands:
 
 | Command (`python -m plane_demo.…`) | Required configuration |
 | --- | --- |
-| `management_api` | `MANAGEMENT_DSN`, management-only `DEMO_KEY` |
-| `control_api` | `CONTROL_DSN`, control-only `DEMO_KEY` |
-| `control_reconciler` | `MANAGEMENT_DSN`, `CONTROL_DSN`, `PAIR_ID` |
-| `data_reconciler` | `CONTROL_DSN`, `PAIR_ID`, `PROJECT_ID`, `KUBE_NAMESPACE` |
-| `data_api` | `PAIR_ID`, `PROJECT_ID`, `KUBE_NAMESPACE`, data-only `DEMO_KEY`, Redis configuration |
-| `acme_responder` | mounted `CHALLENGE_DIRECTORY` (default `/challenges`) |
-| `bootstrap` | initialization inputs described below; never a runtime entrypoint |
+| `management.api` | `MANAGEMENT_DSN`, management-only `DEMO_KEY` |
+| `control.api` | `CONTROL_DSN`, control-only `DEMO_KEY` |
+| `control.reconciler` | `MANAGEMENT_DSN`, `CONTROL_DSN`, `PAIR_ID` |
+| `data.reconciler` | `CONTROL_DSN`, `PAIR_ID`, `PROJECT_ID`, `KUBE_NAMESPACE` |
+| `data.api` | `PAIR_ID`, `PROJECT_ID`, `KUBE_NAMESPACE`, data-only `DEMO_KEY`, Redis configuration |
+| `setup.acme_responder` | mounted `CHALLENGE_DIRECTORY` (default `/challenges`) |
+| `setup.bootstrap` | initialization inputs described below; never a steady-state runtime entrypoint |
+
+These module paths do not change the logical `Settings.from_env()` role IDs
+(`management_api`, `control_reconciler`, and so on), Kubernetes workload names,
+or environment-variable contracts.
 
 `DEMO_KEY` must have at least 32 characters; deployment generates independent,
 high-entropy keys. Keys belong in Kubernetes Secrets. All tenant, configuration,
@@ -55,7 +59,7 @@ Run it once per **fresh PostgreSQL 16+ project database** in a short-lived
 in-cluster Job before starting runtime workloads:
 
 ```text
-python -m plane_demo.bootstrap
+python -m plane_demo.setup.bootstrap
 ```
 
 Mount only that Job's setup credentials as `BOOTSTRAP_DSN`. The setup login needs
@@ -180,8 +184,9 @@ event-append privileges. For **each** observation it must lock the tenant with
 database-generated; never supply either. The parent coordinator implementation
 owns this handoff, infrastructure orchestration, and crash policy.
 
-The coordinator can use the database-only interface in `plane_demo.db`; neither
-`provisioner.py` nor `provisioning.py` is implemented by this layer:
+The coordinator uses the database-only interface in `plane_demo.shared.db`.
+Its loop and administrative sequence live separately in
+`plane_demo.management.provisioner` and `plane_demo.management.provisioning`:
 
 ```python
 with provisioner_session(management_dsn) as operations:
@@ -310,8 +315,11 @@ within the mount work; symlinks escaping it do not.
 
 ## Validation
 
-`uv sync --locked`, `uv run ruff check src/plane_demo tests/unit tests/integration`,
-and `uv run pytest tests/unit` require no infrastructure.
+`uv sync --locked` installs the pinned project dependencies. `make check` checks
+runtime, operator, harness, and infrastructure source without live dependencies.
+It generates the Radius type extensions before the compile-dependent tests and
+uses normal pytest temporary directories under a project-local `TMPDIR`.
+`make test-integration` runs only the explicitly configured dependency tests.
 
 Real database tests require `TEST_POSTGRES_DSN` pointing to a **disposable**
 PostgreSQL administrator connection and `TEST_ALLOW_DATABASE_CREATE=yes`.

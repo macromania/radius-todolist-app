@@ -10,96 +10,31 @@ permissions:
   contents: read
 
 jobs:
-  bicep:
-    name: Compile every Bicep file
+  source:
+    name: Cloud-free source and infrastructure checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      # The Bicep compiler bundled with rad is the only one that builds all of
-      # these. The az CLI's bicep is older: it lacks the redisEnterprise types
-      # and rejects @secure() outputs with BCP129. Radius files additionally
-      # need the `radius` extension, which plain bicep cannot resolve at all.
-      - name: Install the rad CLI
-        run: |
-          curl -fsSL https://raw.githubusercontent.com/radius-project/radius/main/deploy/install.sh \
-            | /bin/bash -s 0.60.2
-          rad version
-
-      - name: Compile the Azure-only templates
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          version: "0.11.7"
+          python-version: "3.13"
+      - name: Install pinned Radius and its Bicep compiler
+        shell: bash
         run: |
           set -euo pipefail
-          for f in infra/main.bicep infra/registry.bicep infra/radius/recipes/azure/managed-redis.bicep; do
-            echo "==> $f"
-            "$HOME/.rad/bin/bicep" build --stdout "$f" > /dev/null
-          done
-
-      # Radius templates are compiled through the rad CLI, which supplies the
-      # extension types. The parameter values are placeholders: this proves the
-      # templates compile, not that they deploy.
-      - name: Compile the Radius templates
-        run: |
-          set -euo pipefail
-          SCOPE=/planes/radius/local/resourcegroups/ci/providers/Applications.Core
-          rad bicep generate-kubernetes-manifest infra/radius/app.bicep -g ci \
-            --parameters application="$SCOPE/applications/todolist" \
-            --parameters environment="$SCOPE/environments/local" \
-            --destination-file /tmp/app.yaml
-          rad bicep generate-kubernetes-manifest infra/radius/environments/local.bicep -g ci \
-            --destination-file /tmp/env-local.yaml
-          rad bicep generate-kubernetes-manifest infra/radius/environments/azure.bicep -g ci \
-            --parameters azureSubscriptionId=00000000-0000-0000-0000-000000000000 \
-            --parameters redisRecipeRef=example.azurecr.io/r/x:0.1.0 \
-            --parameters privateEndpointSubnetId=/subscriptions/x/resourceGroups/y/providers/Microsoft.Network/virtualNetworks/v/subnets/s \
-            --parameters privateDnsZoneId=/subscriptions/x/resourceGroups/y/providers/Microsoft.Network/privateDnsZones/z \
-            --destination-file /tmp/env-azure.yaml
-
-  invariants:
-    name: Check the invariants that fail quietly
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      # Each of these guards a mistake that produces a deployment which looks
-      # healthy and fails later. They are cheap; the failures they prevent are
-      # not.
-      - name: The Redis Recipe must emit tls true
-        run: |
-          grep -q 'tls: true' infra/radius/recipes/azure/managed-redis.bicep || {
-            echo "The Recipe must emit tls: true. Radius otherwise infers TLS"
-            echo "from port == 6380, and Azure Managed Redis uses port 10000,"
-            echo "so it would build a plaintext redis:// URL for a TLS endpoint."
-            exit 1
-          }
-
-      - name: The Redis Recipe must percent-encode the access key
-        run: |
-          grep -q 'uriComponent(' infra/radius/recipes/azure/managed-redis.bicep || {
-            echo "The Recipe must wrap the key in uriComponent(). Radius embeds"
-            echo "the password in a URL without encoding it, and base64 keys"
-            echo "contain '/' about half the time, which makes the URL"
-            echo "unparseable and throws TypeError: Invalid URL in the client."
-            exit 1
-          }
-
-      - name: The connection must stay named redis in lowercase
-        run: |
-          grep -qE '^\s+redis: \{' infra/radius/app.bicep || {
-            echo "The connection must be named 'redis'. Radius uppercases it to"
-            echo "build CONNECTION_REDIS_*, which is what the app reads. Any"
-            echo "other name and it silently stores todos in process memory."
-            exit 1
-          }
-
-      - name: Azure Managed Redis must have no public endpoint
-        run: |
-          grep -q "publicNetworkAccess: 'Disabled'" infra/radius/recipes/azure/managed-redis.bicep || {
-            echo "The cache must not be reachable from the internet."
-            exit 1
-          }
-
-      - name: Shell scripts must pass shellcheck
-        run: shellcheck scripts/*.sh
-
-      - name: Recipe publishing must preserve immutable tags
-        run: make test-publish-recipe
+          mkdir -p .state/check/bin "$HOME/.rad/bin"
+          curl -fL --retry 3 \
+            https://github.com/radius-project/radius/releases/download/v0.60.2/rad_linux_amd64 \
+            -o .state/check/bin/rad
+          echo "941daf7f646e93351a690f7327875e86adba761cf72d6e8238f1b6741798a745  .state/check/bin/rad" | sha256sum -c -
+          curl -fL --retry 3 \
+            https://github.com/Azure/bicep/releases/download/v0.42.1/bicep-linux-x64 \
+            -o "$HOME/.rad/bin/bicep"
+          echo "aed90eb2c69a6ee2bd70dc0d4354408ac4d04fd9911d3ec8e0cd74ad173e7139  $HOME/.rad/bin/bicep" | sha256sum -c -
+          chmod +x .state/check/bin/rad "$HOME/.rad/bin/bicep"
+          echo "$PWD/.state/check/bin" >> "$GITHUB_PATH"
+      - name: Install project dependencies
+        run: uv sync --locked
+      - name: Validate runtime, harness, images, and Bicep contracts
+        run: make check

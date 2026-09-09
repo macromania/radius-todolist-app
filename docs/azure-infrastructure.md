@@ -459,6 +459,17 @@ bundled with the pinned Radius 0.60.2 Bicep 0.42.1 compiler, not a guessed OCI t
 
 ## Compilation and evidence
 
+The current folder map is in [README.md](../README.md). Only the three plane
+declarations live in `infra/radius/apps/`; reusable deployment templates live
+in `infra/radius/modules/`. Types define APIs, Recipes implement them, and
+`infra/radius/environments/azure.bicep` selects the implementations. The local
+three-plane environment is not implemented. Historical evidence below retains
+the paths and source counts from its original run.
+
+Run `make check-bicep` for the complete current compile set, including generated
+extensions, applications, modules, and environment. This is source validation,
+not a cloud deployment or a rerun of the historical integration gates.
+
 On 2026-09-09, the source was validated with:
 
 ```text

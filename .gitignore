@@ -15,6 +15,7 @@ dist/
 infra/**/*.json
 !infra/**/bicepconfig.json
 infra/radius/apps/*.yaml
+infra/radius/modules/*.yaml
 **/.terraform/
 *.tfstate
 *.tfstate.*

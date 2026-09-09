@@ -2,16 +2,14 @@ from unittest.mock import Mock
 
 import pytest
 
-from plane_demo import (
-    acme_responder,
-    control_api,
-    control_reconciler,
-    data_api,
-    data_reconciler,
-    management_api,
-)
-from plane_demo.models import ReconcileResult
-from plane_demo.settings import Settings
+from plane_demo.control import api as control_api
+from plane_demo.control import reconciler as control_reconciler
+from plane_demo.data import api as data_api
+from plane_demo.data import reconciler as data_reconciler
+from plane_demo.management import api as management_api
+from plane_demo.setup import acme_responder
+from plane_demo.shared.models import ReconcileResult
+from plane_demo.shared.settings import Settings
 
 
 class StopLoop(Exception):

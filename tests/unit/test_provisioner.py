@@ -16,11 +16,11 @@ import psycopg
 import pytest
 from psycopg.conninfo import conninfo_to_dict
 
-from plane_demo import provisioner
-from plane_demo.providers.azure import AzureProvider
-from plane_demo.providers.commands import Commands
-from plane_demo.providers.credentials import Credentials, database_dsn
-from plane_demo.provisioning import (
+from plane_demo.management import provisioner
+from plane_demo.management.providers.azure import AzureProvider
+from plane_demo.management.providers.commands import Commands
+from plane_demo.management.providers.credentials import Credentials, database_dsn
+from plane_demo.management.provisioning import (
     OperatorConfig,
     PairResult,
     ProvisioningError,
@@ -153,6 +153,34 @@ def provider(tmp_path, config):
     return AzureProvider(
         config, tmp_path, credentials(tmp_path / ".state/azure/credentials.json", config), commands
     )
+
+
+@pytest.mark.parametrize(
+    ("template", "directory"),
+    [
+        ("management", "apps"),
+        ("control", "apps"),
+        ("data", "apps"),
+        ("child-cluster", "modules"),
+        ("database", "modules"),
+        ("gateway", "modules"),
+        ("challenge", "modules"),
+        ("workload", "modules"),
+    ],
+)
+def test_deploy_run_path_selects_the_moved_template_group(
+    provider, monkeypatch, template, directory
+):
+    provider._verified = True
+    command = MagicMock()
+    monkeypatch.setattr(provider, "rad", command)
+    provider.deploy("management", template, "layout-test", {})
+    assert command.call_args.args[:3] == (
+        "management",
+        "deploy",
+        str(provider.root / "infra/radius" / directory / f"{template}.bicep"),
+    )
+    assert (provider.state / f"management-{template}.parameters.json").is_file()
 
 
 def operation(pair_id="shared"):
@@ -336,7 +364,7 @@ def test_child_creation_uses_radius_and_exact_allocation(provider, monkeypatch):
     monkeypatch.setattr(provider, "get_access", access)
     assert provider.ensure_child_cluster("shared-control") == "access"
     calls = [call.args[0] for call in provider.commands.run.call_args_list]
-    assert calls[0][0] == "rad" and "project-azure.bicep" in " ".join(calls[0])
+    assert calls[0][0] == "rad" and "environments/azure.bicep" in " ".join(calls[0])
     assert calls[1][0] == "rad" and "child-cluster.bicep" in " ".join(calls[1])
     assert "--workspace" in calls[1] and "radplanes-management" in calls[1]
     assert calls[1][calls[1].index("--environment") + 1] == "provision-shared-control"
@@ -740,6 +768,126 @@ def test_rad_run_path_uses_scoped_home_even_when_kubeconfig_environment_is_ignor
     assert os.environ["HOME"] == commands.environment["HOME"] == str(setup.home)
 
 
+def test_radius_scoped_environment_preserves_inherited_pod_and_workload_identity_environment(
+    radius_command_setup,
+    config,
+    monkeypatch,
+):
+    setup = radius_command_setup
+    inherited = {
+        "KUBERNETES_SERVICE_HOST": "172.20.0.1",
+        "KUBERNETES_SERVICE_PORT": "443",
+        "AZURE_CLIENT_ID": CLIENT,
+        "AZURE_TENANT_ID": TENANT,
+        "AZURE_FEDERATED_TOKEN_FILE": str(setup.state / "projected-azure-token"),
+        "AZURE_AUTHORITY_HOST": "https://login.microsoftonline.com/",
+    }
+    for key, value in inherited.items():
+        monkeypatch.setenv(key, value)
+    commands = Commands(setup.root)
+    driver = AzureProvider(
+        config,
+        setup.root,
+        credentials(setup.state / "credentials.json", config),
+        commands,
+    )
+    kubeconfig = setup.state / "shared-control.kubeconfig"
+    selected_home = setup.state / "homes/radplanes-shared-control"
+    copied = commands.radius_environment(kubeconfig, "radplanes-shared-control")
+    assert copied["KUBERNETES_SERVICE_HOST"] == inherited["KUBERNETES_SERVICE_HOST"]
+    assert copied["KUBERNETES_SERVICE_PORT"] == inherited["KUBERNETES_SERVICE_PORT"]
+    actual_popen = subprocess.Popen
+    environments = []
+
+    def capture(*args, **kwargs):
+        environments.append(dict(kwargs["env"]))
+        return actual_popen(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", capture)
+    output = json.loads(
+        driver.rad(
+            "shared-control",
+            "workspace",
+            "create",
+            "kubernetes",
+            "radplanes-shared-control",
+            "--context",
+            "radplanes-shared-control",
+            "--force",
+            workspace=False,
+        )
+    )
+    assert output["context"] == "radplanes-shared-control"
+    assert output["home"] == str(selected_home)
+    assert output["kubeconfig"] == str(kubeconfig)
+    assert len(environments) == 1
+    child = environments[0]
+    assert child["HOME"] == str(selected_home)
+    assert child["KUBECONFIG"] == str(kubeconfig)
+    for key, value in inherited.items():
+        assert child[key] == copied[key] == value
+        assert os.environ[key] == commands.environment[key] == value
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "environment",
+        "argument",
+        "joined-argument",
+        "credential-file",
+        "untargeted",
+    ],
+)
+def test_kubeconfig_subprocesses_preserve_inherited_environment_without_speculative_filtering(
+    radius_command_setup,
+    monkeypatch,
+    target,
+):
+    setup = radius_command_setup
+    inherited = {
+        "KUBERNETES_SERVICE_HOST": "172.20.0.1",
+        "KUBERNETES_SERVICE_PORT": "443",
+        "AZURE_CLIENT_ID": CLIENT,
+        "AZURE_TENANT_ID": TENANT,
+        "AZURE_FEDERATED_TOKEN_FILE": str(setup.state / "projected-azure-token"),
+    }
+    for key, value in inherited.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("KUBECONFIG", raising=False)
+    keys = [*inherited, "HOME", "KUBECONFIG"]
+    program = (
+        f"#!{sys.executable}\n"
+        "import json, os\n"
+        f"print(json.dumps({{key: os.environ.get(key) for key in {keys!r}}}))\n"
+    )
+    script = setup.root / "echo-command-environment.py"
+    script.write_text(program)
+    kubeconfig = setup.state / "shared-control.kubeconfig"
+    selected_home = setup.state / "homes/radplanes-shared-control"
+    overrides = {"HOME": str(selected_home)}
+    args = [sys.executable, str(script)]
+    if target == "environment":
+        overrides["KUBECONFIG"] = str(kubeconfig)
+    elif target == "argument":
+        args += ["--kubeconfig", str(kubeconfig)]
+    elif target == "joined-argument":
+        args.append(f"--kubeconfig={kubeconfig}")
+    elif target == "credential-file":
+        executable = Path(os.environ["PATH"].split(os.pathsep)[0]) / "az"
+        executable.write_text(program)
+        executable.chmod(0o700)
+        args = ["az", "aks", "get-credentials", "--file", str(kubeconfig)]
+    commands = Commands(setup.root)
+    result = commands.json(args, env=overrides)
+    assert result["HOME"] == str(selected_home)
+    for key, value in inherited.items():
+        assert result[key] == value
+        assert os.environ[key] == commands.environment[key] == value
+    if target == "environment":
+        assert result["KUBECONFIG"] == str(kubeconfig)
+
+
 @pytest.mark.parametrize("context", ["../management", "radplanes-management/other", "other"])
 def test_radius_home_rejects_invalid_context_before_writing(radius_command_setup, context):
     setup = radius_command_setup
@@ -841,7 +989,7 @@ def test_database_initialization_uses_secret_stdin_and_a_short_lived_job(provide
     assert SECRET in conninfo_to_dict(secret["stringData"]["BOOTSTRAP_DSN"])["password"]
     assert job["spec"]["backoffLimit"] == 0
     container = job["spec"]["template"]["spec"]["containers"][0]
-    assert container["command"] == ["python", "-m", "plane_demo.bootstrap"]
+    assert container["command"] == ["python", "-m", "plane_demo.setup.bootstrap"]
     assert container["envFrom"] == [{"secretRef": {"name": "database-init"}}]
     assert marker["metadata"]["name"] == "database-initialized"
     calls = [call.args[0] for call in provider.commands.run.call_args_list]
@@ -1025,7 +1173,7 @@ def certificate_wrapper(uri):
     )
 
     def run_command(args, **kwargs):
-        if len(args) > 1 and args[1].endswith("/scripts/run-certificate-job.py"):
+        if len(args) > 1 and args[1].endswith("/operations/run-certificate-job.py"):
             return state.message
         if args[0] == "kubectl" and "get" in args and "job" in args:
             return '{"metadata":{"uid":"existing-job"}}' if state.existing else ""
@@ -1043,7 +1191,7 @@ def test_certificate_uses_parent_wrapper_with_exact_operator_arguments(provider)
     calls = [call.args[0] for call in provider.commands.run.call_args_list]
     assert calls[1] == [
         sys.executable,
-        str(provider.root / "scripts/run-certificate-job.py"),
+        str(provider.root / "operations/run-certificate-job.py"),
         "--slot",
         "shared-control",
         "--context",
@@ -1071,12 +1219,12 @@ def test_certificate_uses_portable_container_default(provider):
     provider.certificate("shared-control", "control.centralus.cloudapp.azure.com")
     assert provider.commands.run.call_args.args[0][:2] == [
         "python",
-        "/app/scripts/run-certificate-job.py",
+        "/app/operations/run-certificate-job.py",
     ]
 
 
 def test_certificate_command_override_is_an_immutable_argument_vector(provider, raw_config):
-    raw_config["certificateCommand"] = ["custom-python", "/app/scripts/run-certificate-job.py"]
+    raw_config["certificateCommand"] = ["custom-python", "/app/operations/run-certificate-job.py"]
     provider.config = OperatorConfig.from_dict(raw_config)
     issuer = certificate_wrapper(
         "https://demo-vault.vault.azure.net/secrets/gateway-shared-control"
@@ -1084,7 +1232,7 @@ def test_certificate_command_override_is_an_immutable_argument_vector(provider, 
     provider.commands.run.side_effect = issuer.run
     provider.certificate("shared-control", "control.centralus.cloudapp.azure.com")
     assert provider.commands.run.call_args.args[0][:2] == raw_config["certificateCommand"]
-    raw_config["certificateCommand"] = "python scripts/run-certificate-job.py"
+    raw_config["certificateCommand"] = "python operations/run-certificate-job.py"
     with pytest.raises(ValueError, match="argument vector"):
         OperatorConfig.from_dict(raw_config)
 
@@ -1193,7 +1341,7 @@ def test_full_data_deploy_calls_certificate_then_https_and_preserves_it_on_reapp
     certificate_call = next(
         index
         for index, args in enumerate(calls)
-        if len(args) > 1 and args[1].endswith("/scripts/run-certificate-job.py")
+        if len(args) > 1 and args[1].endswith("/operations/run-certificate-job.py")
     )
     assert deploys[0] < certificate_call < deploys[1]
     assert calls[-1] == [
@@ -1282,7 +1430,7 @@ def test_management_deploy_preserves_coordinator_identity_and_certificate_comman
     runtime_config = json.loads(settings["data"]["provisioning.json"])
     assert runtime_config["certificateCommand"] == [
         "python",
-        "/app/scripts/run-certificate-job.py",
+        "/app/operations/run-certificate-job.py",
     ]
     assert provider.config.certificate_command == ()
     provisioner_account = next(
@@ -1349,6 +1497,7 @@ def test_main_acquires_one_session_and_runs_the_actual_polling_loop(tmp_path, co
 @pytest.fixture
 def management_service_account(monkeypatch):
     monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "172.20.0.1")
+    monkeypatch.setenv("KUBERNETES_SERVICE_PORT", "443")
     monkeypatch.setenv("KUBERNETES_SERVICE_PORT_HTTPS", "443")
     original_is_file = Path.is_file
     monkeypatch.setattr(
@@ -1392,6 +1541,8 @@ def test_management_radius_uses_scoped_rotating_service_account_credentials(
     }
     assert config["workspaces"]["default"] == "radplanes-management"
     assert provider.radius_config.stat().st_mode & 0o777 == 0o600
+    assert os.environ["KUBERNETES_SERVICE_HOST"] == "172.20.0.1"
+    assert os.environ["KUBERNETES_SERVICE_PORT"] == "443"
 
 
 def test_runtime_loop_seeds_workspace_without_helm_and_preserves_child_entries(
@@ -1524,7 +1675,7 @@ def test_entrypoints_are_cloud_free_for_help():
     root = Path(__file__).resolve().parents[2]
     for script in ("deploy-plane.py", "register-radius.py", "run-certificate-job.py"):
         result = subprocess.run(
-            [sys.executable, str(root / "scripts" / script), "--help"],
+            [sys.executable, str(root / "operations" / script), "--help"],
             text=True,
             capture_output=True,
             check=False,

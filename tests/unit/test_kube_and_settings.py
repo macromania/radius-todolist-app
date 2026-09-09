@@ -7,10 +7,10 @@ from fastapi.testclient import TestClient
 from kubernetes import client
 from kubernetes.client.exceptions import ApiException
 
-from plane_demo.acme_responder import create_app
-from plane_demo.kube import ConfigMaps, ConfigurationInvalid
-from plane_demo.models import AppliedConfiguration
-from plane_demo.settings import Settings, redis_client
+from plane_demo.setup.acme_responder import create_app
+from plane_demo.shared.kube import ConfigMaps, ConfigurationInvalid
+from plane_demo.shared.models import AppliedConfiguration
+from plane_demo.shared.settings import Settings, redis_client
 
 
 def record(desired):

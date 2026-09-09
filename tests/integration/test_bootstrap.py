@@ -7,7 +7,7 @@ import pytest
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
-from plane_demo.bootstrap import OWNERS, initialize
+from plane_demo.setup.bootstrap import OWNERS, initialize
 
 pytestmark = pytest.mark.integration
 

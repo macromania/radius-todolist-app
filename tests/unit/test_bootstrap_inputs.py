@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from plane_demo.bootstrap import initialize
+from plane_demo.setup.bootstrap import initialize
 
 
 def test_management_reporting_login_cannot_alias_privileged_runtime_role():

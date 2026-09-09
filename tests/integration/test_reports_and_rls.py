@@ -4,7 +4,7 @@ from uuid import uuid4
 import psycopg
 import pytest
 
-from plane_demo.control_reconciler import run_once
+from plane_demo.control.reconciler import run_once
 
 pytestmark = pytest.mark.integration
 

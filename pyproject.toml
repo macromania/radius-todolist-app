@@ -20,8 +20,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.pytest.ini_options]
-testpaths = ["tests/unit", "tests/integration"]
-addopts = "--basetemp=.pytest-work"
+testpaths = ["tests/unit", "tests/operations", "tests/harness", "tests/integration"]
 markers = ["integration: requires explicit disposable dependency DSNs"]
 
 [tool.ruff]

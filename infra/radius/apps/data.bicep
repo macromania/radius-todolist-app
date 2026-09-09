@@ -14,14 +14,14 @@ resource redis 'Applications.Datastores/redisCaches@2023-10-01-preview' = {
   }
 }
 
-module api './workload.bicep' = {
+module api '../modules/workload.bicep' = {
   name: 'data-api'
   params: {
     application: application
     environment: environment
     name: 'data-api'
     image: image
-    entrypoint: 'plane_demo.data_api'
+    entrypoint: 'plane_demo.data.api'
     serviceAccount: 'data-api'
     runtimeSecretName: 'data-api-runtime'
     api: true
@@ -34,21 +34,21 @@ module api './workload.bicep' = {
   }
 }
 
-module reconciler './workload.bicep' = {
+module reconciler '../modules/workload.bicep' = {
   name: 'data-reconciler'
   params: {
     application: application
     environment: environment
     name: 'data-reconciler'
     image: image
-    entrypoint: 'plane_demo.data_reconciler'
+    entrypoint: 'plane_demo.data.reconciler'
     serviceAccount: 'data-reconciler'
     runtimeSecretName: 'data-reconciler-runtime'
     automountToken: true
   }
 }
 
-module challenge './challenge.bicep' = {
+module challenge '../modules/challenge.bicep' = {
   name: 'data-challenge'
   params: {
     application: application
@@ -57,7 +57,7 @@ module challenge './challenge.bicep' = {
   }
 }
 
-module gateway './gateway.bicep' = {
+module gateway '../modules/gateway.bicep' = {
   name: 'data-gateway'
   params: {
     application: application

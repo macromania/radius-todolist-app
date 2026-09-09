@@ -1,139 +1,158 @@
-# radius-todolist-app
+# Radius three-plane tenant demo
 
-One application definition, two environments. `infra/radius/app.bicep` describes
-a todo app that needs a Redis cache. On a local kind cluster that cache is a pod;
-on Azure Kubernetes Service it is Azure Managed Redis behind a private endpoint.
-The application file is byte-identical in both cases — the difference lives
-entirely in `infra/radius/environments/`.
+Management, control, and data run in separate Kubernetes clusters. Radius
+provisions the child clusters and their applications. **This is an implementation
+in progress:** Azure integration gates passed; full tenant onboarding, outage
+acceptance, and the local environment are not yet proven.
 
-The application itself is the public Radius sample, `ghcr.io/radius-project/samples/demo`,
-pinned by digest.
+This pass organizes the repository, not the application design. SQL,
+authentication, provisioning, and reconciliation simplification are deferred
+until the agreed scenario works end to end. The obsolete todo example is
+preserved in Git history, not as a second deployment path.
 
-## Quick start
+## How the demo works
 
-Local, against a kind cluster with Radius already installed:
+Management accepts a tenant request. Its separate, non-public provisioner asks
+management Radius to create missing control/data clusters, installs child
+Radius, and deploys their applications. Shared tenants reuse one pair; an
+isolated tenant receives a dedicated pair.
 
-    make up-local     # create the environment and deploy
-    make test-local   # prove a todo survives deleting the pod
+The steady-state configuration path is child-initiated:
 
-Azure, from nothing:
+```text
+Operator -> Management API -> management PostgreSQL
+                                  ^
+                                  | control reconciler pulls and reports
+                                  |
+Operator -> Control API    -> control PostgreSQL
+                                  ^
+                                  | data reconciler pulls and reports
+                                  |
+Operator -> Data API       -> local tenant ConfigMap + Redis counter
+```
 
-    make registry-azure   # resource groups and the Recipe registry
-    make publish-recipe   # publish the custom Recipe, lock the tag
-    make infra-azure      # network, private DNS zone, AKS cluster
-    make radius-azure     # Radius control plane and its Azure identity
-    make env-azure        # the Azure Radius environment
-    make up-azure         # deploy the same app.bicep
-    make test-azure       # read a todo back out of Azure Managed Redis
+Management's `ready` means control created its tenant record. Control's `applied`
+means data wrote its ConfigMap. Neither is a transitive application-health
+assertion. Control owns subsequent configuration changes. Data must keep serving
+its last applied configuration while its parent is unreachable, then catch up
+to the latest version. Live outage proof is still pending.
 
-    make clean-azure      # delete everything (do this; it is not cheap)
+## Repository map
 
-`make help` lists every target.
+| Group | Purpose |
+|---|---|
+| [`src/plane_demo/management/`](src/plane_demo/management/) | Management API, singleton provisioner, provisioning sequence, provider helpers |
+| [`src/plane_demo/control/`](src/plane_demo/control/) | Control API and management-to-control polling process |
+| [`src/plane_demo/data/`](src/plane_demo/data/) | Data API and control-to-ConfigMap polling process |
+| [`src/plane_demo/shared/`](src/plane_demo/shared/) | Authentication, database, HTTP, Kubernetes, models, and settings helpers |
+| [`src/plane_demo/setup/`](src/plane_demo/setup/) | Database initialization and ACME challenge responder |
+| [`sql/`](sql/) | Management/control desired records, reports, timelines, and existing access rules—not fixtures |
+| [`infra/bootstrap/`](infra/bootstrap/) | Operator-owned management AKS, networking, identities, and Azure foundation |
+| [`infra/radius/apps/`](infra/radius/apps/) | Exactly three environment-independent application declarations |
+| [`infra/radius/modules/`](infra/radius/modules/) | Reusable workload, challenge, gateway, database, and child-cluster templates |
+| [`infra/radius/types/`](infra/radius/types/) | Custom Radius resource API contracts; YAML source, ignored generated `.tgz` extensions |
+| [`infra/radius/recipes/`](infra/radius/recipes/) | Infrastructure implementations of those contracts |
+| [`infra/radius/environments/`](infra/radius/environments/) | Recipe selection and environment configuration; Azure only so far |
+| [`images/`](images/) | API and privileged provisioner image packaging |
+| [`operations/`](operations/) | Platform bootstrap, deployment, image/Recipe publication, certificates, and cleanup |
+| [`harness/`](harness/) | Demo-driving API client, state export, acceptance runner, and fault injection |
+| [`tests/`](tests/) | Unit, operator, harness, and opt-in dependency integration tests |
+| [`docs/`](docs/) | Runtime, provisioning, infrastructure, and cleanup contracts |
 
-### Publishing the Recipe again
+**Demo code** is the runtime, SQL, and infrastructure implementing the planes.
+**Operations** administer the platform. **Harness code** sends example requests
+and checks the result; it is not another plane or a dependency of data requests.
 
-`make publish-recipe` can be rerun. If the tag already exists and matches
-`RECIPE_EXPECTED_DIGEST`, it skips publishing and ensures the tag is locked.
-It refuses an existing tag with a different digest. Registry lookup failures
-stop the command rather than being treated as a missing tag.
+The API image explicitly copies only APIs, reconcilers, shared helpers, setup
+support, and SQL. The provisioner image adds administrative code and pinned
+tools. Do not replace the API allowlist with a copy of the entire source tree.
 
-Reusing a tag does not publish local source changes. To release a changed Recipe,
-use a new version, for example `make publish-recipe RECIPE_TAG=0.1.1`. Then update
-`RECIPE_TAG` and `RECIPE_EXPECTED_DIGEST` in the Makefile using the printed digest
-before running `make env-azure`. Do not unlock an old tag to overwrite it.
+Runtime commands use `python -m plane_demo.management.api`,
+`plane_demo.management.provisioner`, `plane_demo.control.api`,
+`plane_demo.control.reconciler`, `plane_demo.data.api`, and
+`plane_demo.data.reconciler`. Logical role IDs, service accounts, and labels have
+not changed. See [configuration contracts](docs/contracts.md).
 
-The registry returns HTTP 405 if a push tries to overwrite a locked tag. A
-successful `az acr login` does not bypass that lock.
+## Commands that exist today
 
-## Layout
+Install the pinned project dependencies and use the cloud-free checks:
 
-    infra/
-      main.bicep                 network, private DNS, Log Analytics, AKS
-      main.bicepparam            Azure platform parameters
-      registry.bicep             the registry that holds the Recipe
-      radius/
-        bicepconfig.json         Radius Bicep extension configuration
-        app.bicep                the application; identical for both environments
-        environments/
-          local.bicep            maps redisCaches to an in-cluster Redis pod
-          azure.bicep            maps redisCaches to the custom Azure Recipe
-        recipes/
-          azure/
-            managed-redis.bicep  Azure Managed Redis + private endpoint
-    scripts/                     setup, publishing and tests
-    ports.env                    reserved local port block, 35490-35499
+```sh
+uv sync --locked
+make help
+make check
+```
 
-Only custom Recipes live in this repository. Local uses Radius's published
-`local-dev/rediscaches` Recipe, so there is no local Recipe source to maintain.
-The environment files select published Recipes explicitly; the directory names
-are for organization, not automatic discovery. Run the existing Make targets
-from the repository root.
+`make check` runs Ruff, offline tests, all Bicep compiles, generated Radius
+extensions, and ShellCheck. It does not build/push images, create resources, or
+use deployed databases. Real PostgreSQL/Redis tests require explicitly disposable
+dependencies; see [test inputs](docs/contracts.md#validation).
 
-## Four things that will bite you
+For Azure, use the existing protected `.state/azure/` configuration and follow
+the [provisioning prerequisites](docs/provisioning.md). These commands are
+separate stages, not a one-command fresh deployment:
 
-Each of these produces a deployment that looks healthy and fails later, so each
-is guarded by a check in `.github/workflows/validate.yml`.
+```sh
+make preflight ENV=azure
+make bootstrap-preview ENV=azure
+make validate-azure ENV=azure
+make bootstrap ENV=azure CONFIRM_AZURE=yes
+make install-radius ENV=azure CONFIRM_AZURE=yes
+```
 
-**The Recipe must emit `tls: true`.** Radius infers TLS from `port == 6380`.
-Azure Managed Redis uses port 10000, so without an explicit value Radius builds
-a plaintext `redis://` URL against a TLS endpoint. Measured against the real
-service: `rediss://` gives `/healthz` 200, `redis://` gives 500.
+Reviewed Recipes, verified image contents, and the validated operator
+configuration are required before `make deploy-management CONFIRM_AZURE=yes`.
+That target **submits** the operator Job; verify its completion separately.
+There is no implemented local deployment target or automatic certificate-renewal
+target. The [Azure contract](docs/azure-infrastructure.md) describes the
+integration gates; [FINDINGS.md](FINDINGS.md) records what actually ran.
 
-**The Recipe must percent-encode the access key.** Radius concatenates the
-password into a URL without encoding it. Azure keys are 44 characters of base64,
-which contains `/` roughly half the time, and an unencoded `/` terminates the
-URL authority. The Redis client then throws `TypeError: Invalid URL` — so the
-deployment works or fails depending on which key Azure happened to generate.
-`uriComponent()` fixes it, and the client decodes it back exactly.
+The harness remains explicit:
 
-A consequence worth knowing: `CONNECTION_REDIS_PASSWORD` and
-`CONNECTION_REDIS_CONNECTIONSTRING` therefore arrive percent-encoded. Nothing
-here reads them, but a future consumer would need to decode.
+```sh
+make export-state
+./harness/api.sh azure management POST /tenants \
+  '{"tenant_id":"shared-a","isolation":"shared","initial_message":"alpha"}'
+./harness/api.sh azure control:shared PUT /tenants/shared-a/configuration \
+  '{"message":"alpha-updated"}'
+./harness/api.sh azure data:shared POST /tenants/shared-a/counter
+```
 
-**The connection must stay named `redis`, lowercase.** Radius uppercases the
-connection name to build `CONNECTION_REDIS_*`, which is what the app reads.
-Rename it to `cache` and you get `CONNECTION_CACHE_*`, and the app silently
-stores todos in process memory instead.
+State export must be repeated as child endpoints become available. See the
+[harness contract](tests/harness/README.md) before running acceptance or faults.
+Each isolated tenant creates another two clusters, two gateways, PostgreSQL,
+and Redis. Synthetic data and trusted operators only: demo keys are not
+production tenant authentication or spending controls.
 
-**`rad workspace create` validates that the Radius resource group and the
-environment already exist.** So the workspace has to be created twice: once with
-only a Kubernetes context, and again once both exist. The Makefile does this.
+## State and cleanup
 
-## Security posture
+`.state/azure/` is essential deployment state: ownership records, protected
+credentials/kubeconfigs, operator configuration, and evidence. Do not move or
+bulk-delete it. `operator-state` and `provisioner-state` are distinct cluster
+volumes. Preserve their names and credential permission checks.
 
-Azure Managed Redis has no public endpoint. It is created with
-`publicNetworkAccess: 'Disabled'` and reached through a private endpoint in
-`snet-privatelink`, resolved by the `privatelink.redis.azure.net` private DNS
-zone. From a laptop the hostname resolves but the connection times out; from
-inside the cluster it resolves to a private address.
+Generated `.tgz` files and `.state/check/` compiler/test scratch are disposable
+after their commands finish. Pytest uses its normal per-run temporary
+directories; `make` places those under project-local `TMPDIR`. `.azure/plan.md`
+is short deployment-workflow metadata, not another architecture document.
+Generated credentials, caches, and evidence are not source or image inputs.
 
-Radius holds Contributor on `rg-todolist-app` only, never on
-`rg-todolist-platform` which holds the cluster, so a compromise of the Radius
-control plane cannot reconfigure or delete the cluster it runs on. It also holds
-Network Contributor on one subnet and Private DNS Zone Contributor on one zone.
+The layout changed Python entrypoints and container helper paths. Existing
+images and evidence prove their original source, not this layout. Before a new
+deployment, rebuild/inspect images and regenerate any explicit
+`certificateCommand` override to use `/app/operations/run-certificate-job.py`.
+This layout pass does not rewrite live state or update running workloads.
 
-The AKS cluster uses Entra ID with Azure RBAC and has local accounts disabled,
-so `kubelogin` and an explicit role assignment are required to reach it.
+```sh
+make clean-plan
+make clean-azure CONFIRM_AZURE=yes
+make verify-clean
+```
 
-Radius v0.60 rejects digest references for Recipes and requires a tag, even
-though `rad bicep publish` prints a digest URL and calls it the way to pin the
-artifact immutably. Immutability is enforced two other ways instead: the tag is
-locked in the registry (`writeEnabled=false`, `deleteEnabled=false`), and
-`scripts/setup-env-azure.sh` refuses to deploy unless the tag still resolves to
-the digest recorded in the Makefile.
+Read [cleanup ownership and verification](docs/cleanup.md) first. Keep the new
+`rg-radplanes-*` deployment separate from legacy `rg-todolist-*` resources.
+Do not claim teardown until the actual resources are verified gone.
 
-**There is deliberately no public URL for the application.** The sample image
-serves `GET /api/container-info`, which returns its entire process environment —
-including the Redis password in three forms — and its landing page renders it.
-Exposing it would publish the credential. Adding a gateway requires first
-building a patched image with that endpoint removed.
-
-## Costs
-
-The AKS cluster dominates: four `Standard_D2s_v5` nodes, a Standard load
-balancer and Log Analytics ingestion, roughly $280-350 a month. Azure Managed
-Redis `Balanced_B0` is about $12. The registry is about $20. This is a spike;
-run `make clean-azure` when you are done.
-
-Note that `make clean-azure` does not delete a fallback service principal, if
-one was created.
+Further reading: [decisions](DECISIONS.md), [findings](FINDINGS.md),
+[application contracts](docs/contracts.md), and
+[provisioning sequence](docs/provisioning.md).

@@ -6,12 +6,12 @@ prove the Azure integration gates or authorize a deployment.
 
 ## Entrypoints and ownership
 
-* `python -m plane_demo.provisioner` runs only in management. It holds
+* `python -m plane_demo.management.provisioner` runs only in management. It holds
   `provisioner_session()` for its lifetime, marks old running operations
   interrupted once, and claims pending work every five seconds.
-* `uv run python scripts/register-radius.py --slot SLOT --config FILE`
+* `uv run python operations/register-radius.py --slot SLOT --config FILE`
   registers types, credentials, and the environment in an **existing** cluster.
-* `uv run python scripts/deploy-plane.py --slot management --config FILE`
+* `uv run python operations/deploy-plane.py --slot management --config FILE`
   initializes management PostgreSQL and deploys management workloads/gateway.
   Child slots are accepted for explicit administrative deployment, not creation.
 
@@ -75,9 +75,20 @@ the correct environment variable. Scoped `HOME` addresses that loader, not a
 global-context workaround. `Commands` captures the original Azure CLI cache
 before overriding any command's `HOME`; an explicit `AZURE_CONFIG_DIR` is
 retained, and runtime authentication replaces it with the protected project
-cache. The installer uses the matching `scripts/project.py` helper. The command
+cache. The installer uses the matching `operations/project.py` helper. The command
 runner never changes its own process's `HOME`, and each slot gets a distinct
 home.
+
+The actual Radius 0.60.2 CLI path calls
+`pkg/cli/kubernetes.NewCLIClientConfig` → `kubeutil.NewClientConfigFromLocal`.
+The generic in-cluster-first helper is not this call path. The earlier F032
+child-targeting warning was withdrawn after tracing those callers; its proposed
+environment filtering was removed. The runner preserves inherited
+`KUBERNETES_SERVICE_HOST`/`KUBERNETES_SERVICE_PORT` and Azure workload-identity
+variables. The separately reproduced scoped-HOME requirement (F015) and
+restricted-account workspace seeding (F031) remain in place. Offline environment
+tests check our command construction, not proof of the vendor CLI's internal
+dispatch or a deployed cluster's identity.
 
 ## Non-secret immutable operator configuration
 
@@ -297,7 +308,7 @@ service accounts do not receive that identity.
    submit a dedicated `database-init` Secret through kubectl stdin. No password
    or DSN enters a command argument, parameter file, inventory, or log.
 6. Create a tokenless Job using the API image and
-   `python -m plane_demo.bootstrap`, `BOOTSTRAP_KIND`, `ROLE_PASSWORDS_JSON`, and
+   `python -m plane_demo.setup.bootstrap`, `BOOTSTRAP_KIND`, `ROLE_PASSWORDS_JSON`, and
    management `PAIR_SLOTS_JSON` or control `PAIR_ID`. It has zero retries and a
    deadline. Follow [contracts.md](contracts.md) for the actual SQL contract.
 7. Only after Job success, create the marker with server/database/setup-Secret
@@ -315,17 +326,17 @@ state; deleting only its intent file is not a safe retry procedure.
 
 ## In-cluster certificate issuance
 
-The driver calls the parent-owned `scripts/run-certificate-job.py` coordinator.
+The driver calls the parent-owned `operations/run-certificate-job.py` coordinator.
 Only that wrapper creates issuance Jobs; the provider has no duplicate Job
-implementation. The in-cluster `scripts/issue-certificate.py` is never run
+implementation. The in-cluster `operations/issue-certificate.py` is never run
 directly on the laptop.
 
 The optional `certificateCommand` configuration is an argument-vector array.
 Omit it or use `[]` for portable defaults:
 
-* Inside `/app`: `["python", "/app/scripts/run-certificate-job.py"]`.
+* Inside `/app`: `["python", "/app/operations/run-certificate-job.py"]`.
 * On the operator machine: the current Python executable and the absolute
-  project path to `scripts/run-certificate-job.py`.
+  project path to `operations/run-certificate-job.py`.
 
 When constructing management's ConfigMap, deployment fills an omitted/empty
 `certificateCommand` with the explicit container command shown above. The
@@ -333,7 +344,11 @@ operator-side configuration remains unchanged.
 
 An explicit override is trusted operator configuration, never a shell fragment
 or tenant input. Avoid putting a workstation-only executable path into the
-ConfigMap mounted inside the provisioner. The driver appends:
+ConfigMap mounted inside the provisioner. The layout change does not rewrite
+saved operator configuration or live ConfigMaps: before deploying the new image,
+regenerate any override that still names `/app/scripts/run-certificate-job.py`
+to use `/app/operations/run-certificate-job.py`. Existing image evidence applies
+to the original layout, not the rebuilt image. The driver appends:
 
 ```text
 --slot SLOT --context radplanes-SLOT --namespace APPLICATION_NAMESPACE
@@ -352,7 +367,7 @@ ConfigMap create/list permission, no Secret permission, and no Azure role grants
 Its command is:
 
 ```text
-python /app/scripts/issue-certificate.py
+python /app/operations/issue-certificate.py
   --slot SLOT --domain ACTUAL_PROVIDER_HOST --namespace APPLICATION_NAMESPACE
   --vault-name ALLOCATED_VAULT --certificate-name gateway-SLOT
   --account-secret acme-SLOT
@@ -428,21 +443,32 @@ Healthy output is `.state/azure/endpoints.json`:
 }
 ```
 
-This is the existing `scripts/api.py` contract. Key files are separate and
+This is the existing `harness/api.py` contract. Key files are separate and
 protected. `SLOT-endpoint.json` retains the non-secret HTTPS URL/certificate URI.
 The CLI prints only slot/URL JSON. `SLOT-certificate.json` is written immediately
 after issuance, before the HTTPS deployment, so a subsequent administrative
 reapply cannot downgrade an already-issued gateway after a failed health check.
-Child endpoint/key files live on the
-management PVC; an operator-side exporter must copy them into protected local
-state before the laptop API helper can resolve new child targets. Never dump
-the full credentials file or Kubernetes Secrets into terminal evidence.
+The provider's child endpoint/key files live on the management PVC, but operator
+access does not require copying them. `harness/export-state.py` independently
+discovers actual gateway/PIP DNS, cluster and namespace UIDs, and workload names,
+and reads only each named API runtime Secret's `DEMO_KEY` into protected operator
+state. It never reads `credentials.json`.
+
+Run `uv run python harness/export-state.py --watch --timeout 7200` during
+onboarding. Wait for a fresh `.state/azure/export-status.json` reporting
+`ready_for_onboarding: true` before beginning the API scenario; the exporter
+continues publishing child targets as they appear. Missing resources remain
+pending, while authentication or scope errors fail. See the
+[acceptance exporter contract](../tests/harness/README.md) for `--once`, status fields,
+and target-ownership checks. Export readiness is not proof that acceptance
+passed. Never dump the full credentials file or Kubernetes Secrets into terminal
+evidence.
 
 Run source verification without cloud access:
 
 ```sh
-uv run ruff check src/plane_demo/provisioner.py src/plane_demo/provisioning.py \
-  src/plane_demo/providers scripts/deploy-plane.py scripts/register-radius.py \
-  tests/unit/test_provisioner.py
-uv run pytest tests/unit/test_provisioner.py --basetemp=.state/test-provisioner
+uv run ruff check src/plane_demo/management operations/deploy-plane.py \
+  operations/register-radius.py tests/unit/test_provisioner.py
+mkdir -p .state/check/tmp
+TMPDIR="$PWD/.state/check/tmp" uv run pytest tests/unit/test_provisioner.py
 ```

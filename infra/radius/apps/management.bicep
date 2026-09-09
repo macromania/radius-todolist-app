@@ -7,28 +7,28 @@ param provisionerClientId string = ''
 param gatewayPhase string = 'challenge'
 param certificateSecretUri string = ''
 
-module api './workload.bicep' = {
+module api '../modules/workload.bicep' = {
   name: 'management-api'
   params: {
     application: application
     environment: environment
     name: 'management-api'
     image: image
-    entrypoint: 'plane_demo.management_api'
+    entrypoint: 'plane_demo.management.api'
     serviceAccount: 'management-api'
     runtimeSecretName: 'management-api-runtime'
     api: true
   }
 }
 
-module provisioner './workload.bicep' = {
+module provisioner '../modules/workload.bicep' = {
   name: 'management-provisioner'
   params: {
     application: application
     environment: environment
     name: 'provisioner'
     image: provisionerImage
-    entrypoint: 'plane_demo.provisioner'
+    entrypoint: 'plane_demo.management.provisioner'
     serviceAccount: 'provisioner'
     runtimeSecretName: 'provisioner-runtime'
     workloadIdentity: provisionerWorkloadIdentity
@@ -63,7 +63,7 @@ module provisioner './workload.bicep' = {
   }
 }
 
-module challenge './challenge.bicep' = {
+module challenge '../modules/challenge.bicep' = {
   name: 'management-challenge'
   params: {
     application: application
@@ -72,7 +72,7 @@ module challenge './challenge.bicep' = {
   }
 }
 
-module gateway './gateway.bicep' = {
+module gateway '../modules/gateway.bicep' = {
   name: 'management-gateway'
   params: {
     application: application

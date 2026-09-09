@@ -9,12 +9,12 @@ import pytest
 import redis
 from fastapi.testclient import TestClient
 
-from plane_demo import data_reconciler
-from plane_demo.control_reconciler import run_once as control_poll
-from plane_demo.data_api import create_app
-from plane_demo.kube import ConfigMaps
-from plane_demo.models import AppliedConfiguration
-from plane_demo.settings import Settings, redis_client
+from plane_demo.control.reconciler import run_once as control_poll
+from plane_demo.data import reconciler as data_reconciler
+from plane_demo.data.api import create_app
+from plane_demo.shared.kube import ConfigMaps
+from plane_demo.shared.models import AppliedConfiguration
+from plane_demo.shared.settings import Settings, redis_client
 
 pytestmark = pytest.mark.integration
 HEADERS = {"X-Demo-Key": "integration-test-key-not-a-deployed-credential"}

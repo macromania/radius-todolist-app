@@ -6,10 +6,12 @@ from fastapi.testclient import TestClient
 from kubernetes.client.exceptions import ApiException
 from redis.exceptions import ConnectionError
 
-from plane_demo import control_api, data_api, management_api
-from plane_demo.kube import ConfigurationInvalid, ConfigurationMissing
-from plane_demo.models import AppliedConfiguration
-from plane_demo.settings import Settings
+from plane_demo.control import api as control_api
+from plane_demo.data import api as data_api
+from plane_demo.management import api as management_api
+from plane_demo.shared.kube import ConfigurationInvalid, ConfigurationMissing
+from plane_demo.shared.models import AppliedConfiguration
+from plane_demo.shared.settings import Settings
 
 KEY = "unit-test-demo-key-with-32-characters"
 HEADERS = {"X-Demo-Key": KEY}

@@ -10,10 +10,10 @@ from fastapi.testclient import TestClient
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
-from plane_demo.bootstrap import initialize
-from plane_demo.control_api import create_app as control_app
-from plane_demo.management_api import create_app as management_app
-from plane_demo.settings import Settings
+from plane_demo.control.api import create_app as control_app
+from plane_demo.management.api import create_app as management_app
+from plane_demo.setup.bootstrap import initialize
+from plane_demo.shared.settings import Settings
 
 KEY = "integration-test-key-not-a-deployed-credential"
 HEADERS = {"X-Demo-Key": KEY}

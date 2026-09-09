@@ -139,3 +139,31 @@ management-Radius environment per allocated child slot, scoped to that slot's
 cluster resource group. The child-cluster application definition remains
 unchanged. Real Azure Activity Log evidence confirms Radius creates the cluster;
 the coordinator only bootstraps its Radius installation and workloads afterward.
+
+## D018 - Persistent operator state is separate from runtime provisioning state
+
+Run the initial management deployment in a scoped operator Job when direct
+laptop Kubernetes access is unreliable. Its full operator credentials and
+deployment records persist on `operator-state`; runtime provisioning receives
+only its restricted seed and uses `provisioner-state`. Both use the tagged
+project Azure Disk StorageClass. Standardize kubeconfigs as `<slot>.kubeconfig`;
+the earlier management gate path is only a local alias, never a global context.
+
+## D019 - Kubernetes private-volume permissions
+
+Use `fsGroupChangePolicy: OnRootMismatch` with the fixed workload UID/GID.
+Default recursive ownership handling widened generated credential files from
+0600 to 0660 on remount. Keep strict credential permission checks; do not weaken
+them to hide a mount-policy error. An explicit repair and a real second mount
+verified that private modes are retained.
+
+## D020 - Prove behavior first; organize the repository now
+
+2026-09-09: the user asked to continue the approved end-to-end plan and defer
+deeper refactoring/simplification until it is proven. Make a behavior-preserving
+layout change now: visible management/control/data packages, separate platform
+operations and demonstration harness, separate image packaging, and only three
+plane application definitions. Remove the obsolete todo example and update the
+README, Makefile, imports, image build paths, and tests together. Do not change
+SQL authorization, reconciliation semantics, or the agreed Azure/local topology
+as part of this organization pass. Preserve deployment state and credentials.

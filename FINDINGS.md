@@ -60,10 +60,20 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F029 | 3 | High correctness | `containers/provisioner/*requirements*`, `azure-cli.txt` | dependency resolution | Certificate overlay upgraded urllib3 beyond Kubernetes support, and macOS resolution omitted Linux distro dependency | Resolved: Linux/API-constrained lockfiles, actual tool checks and compatible package checks in ACR build, both fix reviews pass |
 | F030 | 1 | Deployment blocker | Application Gateway / private Key Vault integration | live HTTPS update | App Gateway cannot access the issued certificate reference despite scoped identity grants | Resolved: documented trusted-service network exception, both fix reviews, App Gateway Succeeded and normally verified HTTPS request passed |
 | F031 | 3 | High correctness | Radius workspace creation under restricted runtime identity | live | Helm installation check needs Secret-list permission that the runtime identity intentionally lacks | Known workspace + actual Radius API validation implemented and fix-reviewed; latest full coordinator suite passes |
-| F033 | 3 | High correctness | `src/plane_demo/providers/commands.py` | failed-command diagnostics | Radius reports deployment errors on stdout; stderr-only logging hid the cause | Added bounded redacted stdout with a regression test; fix reviews pending |
+| F033 | 3 | High correctness | `src/plane_demo/providers/commands.py` | failed-command diagnostics | Radius reports deployment errors on stdout; stderr-only logging hid the cause | Bounded redacted stdout and regression implemented; fix and layout reviews passed |
 | F034 | 4 | Medium security/correctness | `scripts/export-state.py` | watch ownership cache | Cached trust decisions could miss changed cluster/gateway ownership | Fresh ownership checks every pass; final fix reviews and offline regressions pass |
-| F035 | 3 | High correctness | `infra/radius/apps/workload.bicep` | worker/base serialization | Workers emitted forbidden livenessProbe:null; paired base Deployment omitted its ServiceAccount name | Omit optional probe and match base ServiceAccount; live worker deployment and compiled regression pass; fix reviews pending |
-| F036 | 3 | High correctness | workload and operator Pod security contexts | real PVC remount | Default fsGroup recursion changed private credentials from 0600 to 0660, preventing restart | OnRootMismatch added; explicit repair and second real remount preserve 0600; strict loader retained; fix reviews pending |
+| F035 | 3 | High correctness | `infra/radius/apps/workload.bicep` | worker/base serialization | Workers emitted forbidden livenessProbe:null; paired base Deployment omitted its ServiceAccount name | Optional probe omitted and base ServiceAccount matched; live worker proof, compiled regression, fix and layout reviews passed |
+| F036 | 3 | High correctness | workload and operator Pod security contexts | real PVC remount | Default fsGroup recursion changed private credentials from 0600 to 0660, preventing restart | OnRootMismatch preserves 0600 in a real second mount; strict loader retained; fix and layout reviews passed |
+| F038 | 7 | Medium correctness | `operations/clean-azure.py` | role_state | Cleanup absence proof relies on a broad role listing rather than checking every manifest GUID | Exact-GUID lookup verified available; strengthen before final teardown |
+| F039 | 7 | High integration | `harness/export-state.py`, `operations/clean-azure.py` | cleanup handoff | Exporter does not yet generate cleanup-targets.json and its Radius workspace metadata | Wire automatically before final teardown; do not require manual PVC/credential copying |
+| F040 | 7 | Medium correctness | `operations/clean-azure.py` | interrupt handling | KeyboardInterrupt bypasses the explicit incomplete-cleanup result | Add explicit interrupted outcome before final teardown |
+
+Cleanup review F037 (claimed unsupported `resource delete --application`) was
+not reproduced. The installed CLI declares the flag, and an offline invocation
+with a valid workspace reaches Kubernetes configuration rather than rejecting
+it. Pinned command/scope source also does not reject it. Do not treat this as a
+proven deployment blocker; ownership must remain established by cleanup's
+resource/group checks, not by an assumed application filter.
 
 A suspected F032 in-cluster context override was withdrawn after tracing the
 actual CLI call path. The generic helper prefers in-cluster credentials, but
@@ -192,3 +202,39 @@ logic/SQL simplification until end-to-end proof. A layout-only pass is separatin
 runtime plane code, platform operations, image packaging, and the demo harness.
 Historical finding paths above refer to the files at discovery time; they are
 not rewritten to suggest those reviews ran against a later layout.
+
+### Structure-only source verification, 2026-09-09
+
+The working tree now groups runtime code under management/control/data,
+shared helpers, and setup support. `operations/` contains platform commands;
+`harness/` contains demo-driving/export/fault tooling; `images/` contains image
+packaging. Radius `apps/` contains only the three planes and `modules/` contains
+their helpers. The current Azure environment replaces the legacy map; no local
+three-plane deployment is claimed. Obsolete tracked todo files were removed.
+
+`make check` passed: Ruff across runtime/operations/harness/tests, three generated
+Radius extensions, all 22 Bicep source files, 320 tests plus 47 subtests, and
+ShellCheck. Fifty live-dependency integration tests were explicitly skipped.
+The existing Starlette HTTPX deprecation warning remains; dependency versions
+were not changed. All four old Redis CI guards now run against the current
+Recipe/data application through the layout tests.
+
+Regression checks exercise deployment path routing, new entrypoint imports from
+the API image's exact COPY subset, absence of privileged code in that subset,
+matching image/provenance source lists, and harness invocation from another
+directory. SQL and unchanged shared helpers match their original contents
+byte-for-byte. Documentation links and current source references were checked.
+F033/F035/F036 source edits and their regressions remain intact.
+
+Prior untracked cleanup/operator helpers, documentation, and tests were
+preserved in their corresponding groups. No runtime state, credentials, or
+cloud resources were moved/deleted. No image build, push, deployment, or commit
+was performed. Existing image/integration evidence applies to its original
+source; rebuilt-image inspection and live onboarding/outage proof are still
+required. This source check does not replace the parent's layout reviews.
+
+Parent layout verification also passed `make check` with the same 320 tests,
+47 subtests, 50 explicit dependency-test skips, 22 Bicep files, and three type
+extensions. Independent walkthrough and security reviews found no layout
+regression. The inspected obsolete `.pytest-work` scratch directory was removed
+after tests finished; live deployment state and credentials were untouched.

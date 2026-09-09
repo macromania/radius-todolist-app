@@ -1,4 +1,4 @@
-@description('Shared AKS implementation. Only azure.bicep creates management directly; children call this from the Radius cluster Recipe.')
+@description('Management-bootstrap AKS implementation. Keep the flat child cluster Recipe aligned; Radius 0.60.2 cannot resolve our cross-RG module references.')
 param clusterName string
 param location string
 param kubernetesVersion string

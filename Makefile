@@ -1,143 +1,105 @@
-# radius-todolist-app
-#
-# One application definition (infra/radius/app.bicep), two environments.
-# The difference between "Redis is a pod" and "Redis is Azure Managed Redis"
-# lives in infra/radius/environments/*.bicep, never in the application definition.
-#
-# Run `make help` for the target list.
+SHELL := /bin/bash
+.DEFAULT_GOAL := help
 
-include ports.env
+ENV ?= azure
+CONFIG ?= .state/azure/provisioning.json
+ACCEPTANCE_CONFIG ?= .state/azure/acceptance.json
+SLOT ?= management
+BICEP ?= $(HOME)/.rad/bin/bicep
+RUN := uv run --no-sync
+export CONFIRM_AZURE
+export PYTHONDONTWRITEBYTECODE := 1
+export TMPDIR := $(CURDIR)/.state/check/tmp
 
-KIND_CONTEXT   ?= kind-radius-todolist-app
-AKS_CONTEXT    ?= aks-todolist
-APP            ?= todolist
-RAD_GROUP      ?= todolist
-LOCAL_NS       ?= todolist-local-todolist
-AZURE_NS       ?= todolist-azure-todolist
+.PHONY: help check lint test test-integration check-bicep check-shell check-work \
+        require-azure confirm-azure preflight bootstrap-preview validate-azure bootstrap \
+        install-radius publish-recipes build-publish register-radius deploy-management \
+        export-state test-e2e test-outages clean-plan clean-azure verify-clean
 
-SUBSCRIPTION   ?= a3ed6c04-563f-4855-ac84-bdf1e5fbc3fc
-TENANT         ?= 16b3c013-d300-468d-ac64-7eda0820b6d3
-LOCATION       ?= eastus2
-PLATFORM_RG    ?= rg-todolist-platform
-APP_RG         ?= rg-todolist-app
-AKS_NAME       ?= aks-todolist
-
-ACR_NAME       ?= acrtodolistjts7g6kk6ua66
-
-# Radius 0.60 rejects digest references for Recipes and demands a tag, even
-# though `rad bicep publish` prints a digest URL and calls it the way to pin the
-# artifact immutably. Immutability is therefore enforced two other ways: the tag
-# is locked in the registry (writeEnabled=false, deleteEnabled=false), and
-# scripts/setup-env-azure.sh refuses to deploy unless the tag still resolves to
-# the digest below. For Recipe changes, publish a new RECIPE_TAG, then update
-# the tag and digest below. Reruns reuse an existing tag only if its digest matches.
-RECIPE_TAG     ?= 0.1.0
-RECIPE_REF     ?= $(ACR_NAME).azurecr.io/radius-recipes/azure-managed-redis:$(RECIPE_TAG)
-RECIPE_EXPECTED_DIGEST ?= sha256:fa1f09dc9b1ceb21faac753a2360855f6d1689de92acc8a06a4b9cb0ba07417e
-
-# az bicep is too old to compile two of these files: it lacks the redisEnterprise
-# types and rejects @secure() outputs with BCP129. The compiler bundled with rad
-# does both, so use it for everything.
-BICEP          ?= $(HOME)/.rad/bin/bicep
-
-.PHONY: help check test-publish-recipe env-local up-local down-local logs-local test-local \
-        registry-azure publish-recipe infra-azure radius-azure env-azure \
-        up-azure down-azure logs-azure test-azure clean-azure
-
-help: ## Show this help
+help: ## List implemented commands; local deployment is not available
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
-	  awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
+	  awk 'BEGIN {FS = ":.*?## "}; {printf "  %-22s %s\n", $$1, $$2}'
 
-## ---------------------------------------------------------------- validation
+check-work:
+	@mkdir -p "$(TMPDIR)" .state/check infra/radius/types/.build
 
-check: ## Compile-check every Bicep file
-	$(BICEP) build --stdout infra/radius/recipes/azure/managed-redis.bicep > /dev/null
-	$(BICEP) build --stdout infra/main.bicep > /dev/null
-	$(BICEP) build --stdout infra/registry.bicep > /dev/null
-	rad bicep generate-kubernetes-manifest infra/radius/app.bicep -g $(RAD_GROUP) \
-	  --parameters application=/planes/radius/local/resourcegroups/$(RAD_GROUP)/providers/Applications.Core/applications/$(APP) \
-	  --parameters environment=/planes/radius/local/resourcegroups/$(RAD_GROUP)/providers/Applications.Core/environments/local \
-	  --destination-file /tmp/check-app.yaml
-	rad bicep generate-kubernetes-manifest infra/radius/environments/local.bicep -g $(RAD_GROUP) \
-	  --destination-file /tmp/check-envlocal.yaml
-	rad bicep generate-kubernetes-manifest infra/radius/environments/azure.bicep -g $(RAD_GROUP) \
-	  --parameters azureSubscriptionId=$(SUBSCRIPTION) \
-	  --parameters redisRecipeRef=$(RECIPE_REF) \
-	  --parameters privateEndpointSubnetId=/subscriptions/x/resourceGroups/y/providers/Microsoft.Network/virtualNetworks/v/subnets/s \
-	  --parameters privateDnsZoneId=/subscriptions/x/resourceGroups/y/providers/Microsoft.Network/privateDnsZones/z \
-	  --destination-file /tmp/check-envazure.yaml
-	@echo "all bicep files compile"
+check: lint test check-shell ## Run cloud-free lint, tests, Bicep/type compilation, and shell checks
 
-test-publish-recipe: ## Test Recipe publishing without Azure access
-	bash scripts/test-publish-recipe.sh
+lint: check-work ## Check runtime, operations, harness, and tests with Ruff
+	$(RUN) ruff check src operations harness tests infra/bootstrap/tests
 
-## --------------------------------------------------------------------- local
+check-bicep: check-work ## Generate Radius extensions and compile every current Bicep file
+	@set -euo pipefail; \
+	for type in clusters postgresql gateways; do \
+	  rad --config "$(CURDIR)/.state/check/radius.yaml" bicep publish-extension \
+	    --from-file "infra/radius/types/$$type.yaml" \
+	    --target "infra/radius/types/$$type.tgz" --force; \
+	done; \
+	for file in infra/bootstrap/*.bicep infra/radius/recipes/azure/*.bicep \
+	  infra/radius/apps/*.bicep infra/radius/modules/*.bicep \
+	  infra/radius/environments/*.bicep; do \
+	  printf '==> %s\n' "$$file"; \
+	  "$(BICEP)" build "$$file" --stdout >/dev/null; \
+	done
 
-# rad workspace create validates that the Radius resource group and environment
-# already exist, so the workspace is created twice: once with only a context to
-# bootstrap, and again once both exist.
-env-local: ## Create the local Radius environment on the kind cluster
-	rad workspace create kubernetes local --context $(KIND_CONTEXT) --force
-	rad group show $(RAD_GROUP) --workspace local >/dev/null 2>&1 || \
-	  rad group create $(RAD_GROUP) --workspace local
-	rad deploy infra/radius/environments/local.bicep --workspace local --group $(RAD_GROUP)
-	rad workspace create kubernetes local --context $(KIND_CONTEXT) \
-	  --group $(RAD_GROUP) --environment local --force
+test: check-bicep ## Run offline suites, including compiled infrastructure contracts
+	env -u TEST_POSTGRES_DSN -u TEST_ALLOW_DATABASE_CREATE -u TEST_REDIS_URL \
+	  -u TEST_KUBECONFIG -u TEST_KUBE_CONTEXT -u TEST_KUBE_NAMESPACE \
+	  RADIUS_BICEP="$(BICEP)" $(RUN) pytest -q tests infra/bootstrap/tests
 
-up-local: env-local ## Deploy the application to the kind cluster
-	rad deploy infra/radius/app.bicep --application $(APP) --workspace local
+test-integration: check-work ## Run dependency tests with explicitly configured disposable databases
+	$(RUN) pytest -q tests/integration
 
-down-local: ## Delete the application from the kind cluster
-	rad app delete $(APP) --workspace local --yes
+check-shell: ## Check shell entrypoints without executing them
+	shellcheck operations/*.sh harness/*.sh
 
-logs-local: ## Tail application logs on the kind cluster
-	kubectl --context $(KIND_CONTEXT) -n $(LOCAL_NS) logs deploy/demo --tail=50
+require-azure: check-work
+	@test "$(ENV)" = azure || { echo "Local deployment is not implemented." >&2; exit 1; }
 
-test-local: ## Prove a todo survives a pod restart on the kind cluster
-	./scripts/test-persistence-local.sh
+confirm-azure: require-azure
+	@test "$(CONFIRM_AZURE)" = yes || { echo "Set CONFIRM_AZURE=yes for Azure mutations." >&2; exit 1; }
 
-## --------------------------------------------------------------------- azure
+preflight: require-azure ## Inspect Azure prerequisites and write scoped local context
+	$(RUN) python operations/project.py preflight --environment "$(ENV)"
 
-registry-azure: ## Create the resource groups and the Recipe registry
-	az group create -n $(PLATFORM_RG) -l $(LOCATION) -o none
-	az group create -n $(APP_RG) -l $(LOCATION) -o none
-	az deployment group create -g $(PLATFORM_RG) -n registry \
-	  -f infra/registry.bicep -o none
+bootstrap-preview: require-azure ## Prepare bootstrap inputs and run Azure what-if
+	$(RUN) python operations/project.py bootstrap-preview --environment "$(ENV)"
 
-publish-recipe: ## Publish or reuse the pinned Recipe, then lock the tag
-	ACR_NAME="$(ACR_NAME)" SUBSCRIPTION="$(SUBSCRIPTION)" \
-	  RECIPE_TAG="$(RECIPE_TAG)" RECIPE_EXPECTED_DIGEST="$(RECIPE_EXPECTED_DIGEST)" \
-	  bash scripts/publish-recipe.sh
+validate-azure: require-azure ## Run real Azure what-if/validation and record template hashes
+	$(RUN) python operations/validate-bootstrap.py
 
-infra-azure: ## Create the network, private DNS zone and AKS cluster
-	az deployment group create -g $(PLATFORM_RG) -n todolist-platform \
-	  -f infra/main.bicep -p infra/main.bicepparam -o none
-	az aks get-credentials -g $(PLATFORM_RG) -n $(AKS_NAME) \
-	  --context $(AKS_CONTEXT) --overwrite-existing
-	kubelogin convert-kubeconfig -l azurecli
-	kubectl --context $(AKS_CONTEXT) get nodes
+bootstrap: confirm-azure ## Create the foundation from previously validated inputs
+	$(RUN) python operations/project.py bootstrap --environment "$(ENV)"
 
-radius-azure: ## Install Radius on AKS and register its Azure identity
-	./scripts/setup-radius-azure.sh
+install-radius: confirm-azure ## Install management Radius after bootstrap
+	$(RUN) python operations/project.py install-radius --environment "$(ENV)"
 
-env-azure: ## Create the Azure Radius environment
-	RECIPE_REF=$(RECIPE_REF) RECIPE_EXPECTED_DIGEST=$(RECIPE_EXPECTED_DIGEST) \
-	  ACR_NAME=$(ACR_NAME) ./scripts/setup-env-azure.sh
+publish-recipes: confirm-azure ## Publish and verify immutable Recipe tags in the project ACR
+	$(RUN) python operations/publish-artifacts.py
 
-up-azure: ## Deploy the application to AKS
-	rad deploy infra/radius/app.bicep --application $(APP) --workspace azure
+build-publish: confirm-azure ## Build/push committed images in ACR; content verification remains required
+	$(RUN) python operations/build-images.py
 
-down-azure: ## Delete the application from AKS
-	rad app delete $(APP) --workspace azure --yes
+register-radius: confirm-azure ## Register types/environment in an existing configured cluster
+	$(RUN) python operations/register-radius.py --slot "$(SLOT)" --config "$(CONFIG)"
 
-logs-azure: ## Tail application logs on AKS
-	kubectl --context $(AKS_CONTEXT) -n $(AZURE_NS) logs deploy/demo --tail=50
+deploy-management: confirm-azure ## Submit the management operator Job; verify completion separately
+	$(RUN) python operations/run-management-job.py --config "$(CONFIG)" --execute
 
-test-azure: ## Read a todo back out of Azure Managed Redis from inside the cluster
-	./scripts/test-persistence-azure.sh
+export-state: require-azure ## Export protected harness state once; exit 3 means not ready yet
+	$(RUN) python harness/export-state.py --config "$(CONFIG)" --once
 
-clean-azure: ## Delete every Azure resource this project created
-	-rad app delete $(APP) --workspace azure --yes
-	az group delete -n $(APP_RG) --yes --no-wait
-	az group delete -n $(PLATFORM_RG) --yes --no-wait
-	@echo "Note: the fallback service principal, if one was created, survives this."
+test-e2e: confirm-azure ## Run the opt-in live Azure onboarding scenario
+	$(RUN) python harness/test-e2e.py --config "$(ACCEPTANCE_CONFIG)" --mode scenario --execute
+
+test-outages: confirm-azure ## Run opt-in live parent-link outages and restoration
+	$(RUN) python harness/test-e2e.py --config "$(ACCEPTANCE_CONFIG)" --mode outages --execute
+
+clean-plan: require-azure ## Read cloud ownership and print the ordered cleanup plan
+	$(RUN) python operations/clean-azure.py
+
+clean-azure: confirm-azure ## Delete only verified project-owned Azure resources in owner order
+	$(RUN) python operations/clean-azure.py --execute
+
+verify-clean: require-azure ## Verify actual Azure deletion and report retained recovery records
+	$(RUN) python operations/verify-clean.py
