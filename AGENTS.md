@@ -93,6 +93,7 @@ Do not move or bulk-clean `.state/azure/`, credentials, or live PVC state.
 Historical finding paths describe the original files; do not rewrite evidence.
 Use explicit project Radius configurations, kubeconfigs, subscription, and context.
 Never change global CLI defaults, open public databases, or grant runtime role delegation.
+Operational safety checks use unconditional guards, never Python `assert`.
 Use Docker Desktop and the reservations in `ports.env`; no default host ports.
 Live tests and cloud mutations are opt-in. Local is not a fallback deployment path.
 Read [docs/cleanup.md](docs/cleanup.md) before deletion; verify exact ownership.

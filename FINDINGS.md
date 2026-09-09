@@ -73,6 +73,9 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F044 | 3 | Deployment blocker | `src/plane_demo/management/providers/azure.py` | data prerequisites | Bootstrap ConfigMap Roles collide with Radius's same-name generated container Roles | Distinct -configmaps Role/Binding names preserve exact subjects/verbs; run-path tests and both fix reviews pass; fresh deployment required |
 | F045 | 3 | Deployment blocker | `infra/radius/recipes/azure/redis.bicep` | existing endpointNic | Radius reads the declared existing NIC before the private endpoint creates it | Dependency added to the existing NIC itself, not only its tag extension; emitted-template test and both fix reviews pass; fresh Recipe execution required |
 | F046 | reset | Correctness/access blocker | `operations/clean-azure.py` | Radius-only group inventory | Partial reset requests Reader permission on node groups whose AKS was never created | Inspect every live AKS node group before deletion; report other node groups as uninspected and untouched; full cleanup unchanged; both fix reviews and regressions pass |
+| F047 | reset | Operational blocker | Failed Redis Recipe outputs | live | Failed Recipe left created cache/endpoint/NIC outside Radius deletion tracking | Normal reset stopped safely; exact ownership and link graph verified, explicit operator removal completed, app group empty; not claimed as normal Radius cleanup proof |
+| F048 | reset | Medium security | `.state/azure/remove-orphaned-redis.py` | 14-68 (initial) | Python optimization removes assert-based deletion safety checks | Unconditional require checks and guarded mutation path replace assertions; normal/optimized run-path cases and final fix reviews pass |
+| F049 | reset | Medium security | `.state/azure/radius-reset-execute.json` | 81 (initial) | Generated executor still references old immutable bootstrap after source guard repair | Original manifest archived; new preview/execute references repaired immutable payload, compared byte-for-byte and checked for unconditional guards; final review clean |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -455,3 +458,33 @@ After the full checks, actual-image inspection verified identical nested
 `index.json`/`types.json` bytes for all three extensions rather than claiming
 their changed archive digests implied changed code. The other inspected image
 inputs still match. No image rebuild was used to conceal that distinction.
+
+### Failed-Recipe orphan recovery and guard corrections
+
+The first reset quiesced management, deleted the data Radius application, and
+correctly stopped on its remaining Azure app-group resources. The failed Recipe
+had not recorded the created Redis/endpoint/NIC outputs for owner deletion.
+The operator checked the exact three resource IDs, all ownership tags, the
+original Radius tags, and the one-to-one cache/endpoint/NIC relationship.
+No group or cluster was selected for direct deletion.
+
+The recovery-script security review found F048 (medium, 10/10): `assert` was
+being used for operational safety checks. These now use unconditional
+`cleanup.require`, construct an authorized `Cleanup`, and invoke its
+`mutation=True` command path. The reset bootstrap's equivalent guards were
+also corrected. The follow-up review found F049: changing source alone had not
+rewired the generated executor. Its historical manifest is preserved; the
+new `radius-reset-guarded-source` payload matches the repaired bootstrap and
+both upcoming manifests reference it. The final security review was clean.
+The direct walkthrough checked exact deletion order and generated-code wiring.
+Twelve optimized/unoptimized script run-path cases passed with every external
+process blocked. A permanent optimized-Python cleanup authorization regression
+was added; the cleanup suite passed 50 tests and 15 subtests.
+
+The guarded explicit operator recovery then deleted the private endpoint
+(and its generated NIC), followed by the exact cache. Real Azure queries
+verified all three absent and the data app group empty. The app group, both
+child clusters, and the foundation were retained. The protected
+`orphan-redis-recovery.json` records the completed action. This exceptional
+recovery is not a normal Radius-cleanup success and does not retry the failed
+tenant operation. The renewed guarded Radius reset still needs to complete.

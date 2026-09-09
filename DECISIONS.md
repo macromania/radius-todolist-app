@@ -237,3 +237,12 @@ AKS in the partial path; give the scoped operator read access to those groups.
 Without a live AKS, Radius-only cleanup cannot delete the corresponding node
 group: report it as uninspected, never absent. Full cleanup still checks all
 allocated groups, including orphans.
+
+## D028 - Operational safety checks must survive Python optimization
+
+Use unconditional validation and exceptions, not `assert`, for deployment,
+cleanup, authentication, ownership, and evidence guards, including disposable
+operator scripts. Route mutations through the existing guarded command helpers.
+When code is embedded in an immutable ConfigMap, regenerate and verify the
+actual upcoming execution reference after a fix. Keep old failed manifests as
+historical evidence rather than treating a repaired source file as a deployed fix.

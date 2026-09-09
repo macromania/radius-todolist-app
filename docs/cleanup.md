@@ -250,6 +250,14 @@ broaden authorized IP ranges, create a new transport, or automatically use
 `az aks command invoke`. A normal-path access failure is a blocker, not proof
 that resources are absent.
 
+A failed Recipe can create Azure resources without recording successful
+outputs for Radius deletion. Normal cleanup stops if those resources remain.
+An explicit operator recovery must inspect exact resource IDs, ownership tags,
+and dependencies, remove only the reviewed orphan resources, and verify the
+app group empty before repeating owner-ordered cleanup. Never enable automatic
+provider fallback or call this exceptional recovery normal Radius deletion
+proof. Preserve the failure and recovery evidence.
+
 ## Verification, credentials, and retained records
 
 `verify-clean.py` is Azure-read-only and needs no Kubernetes connection. It

@@ -602,6 +602,20 @@ class CleanupTests(unittest.TestCase):
                 self.engine()
         self.assertEqual(self.commands.calls, [])
 
+    def test_optimized_python_keeps_confirmation_and_mutation_guards(self):
+        path = ROOT / "operations/clean-azure.py"
+        namespace = {"__name__": "optimized_cleanup", "__file__": str(path)}
+        exec(compile(path.read_text(), str(path), "exec", optimize=2), namespace)
+        error, engine_type = namespace["CleanupError"], namespace["Cleanup"]
+        with patch.dict(os.environ, {"CONFIRM_AZURE": "no"}):
+            with self.assertRaisesRegex(error, "Execution requires CONFIRM_AZURE=yes"):
+                engine_type(self.manifest, root=self.root, commands=self.commands, execute=True)
+        engine = engine_type(self.manifest, root=self.root, commands=self.commands, execute=True)
+        with patch.dict(os.environ, {"CONFIRM_AZURE": "no"}):
+            with self.assertRaisesRegex(error, "Mutation requires"):
+                engine.az("group", "delete", "--name", self.manifest.platform, mutation=True)
+        self.assertFalse(self.commands.calls)
+
     def test_tampered_manifest_project_subscription_groups_and_roles_are_rejected(self):
         mutations = [
             lambda d: d["foundation"].update(projectName="foreign"),
