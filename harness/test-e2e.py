@@ -373,16 +373,23 @@ def paused_reconciler(kube, *, clock=time.monotonic, sleep=time.sleep):
     kube.verify_scope()
     original = kube.deployment(component)
     require(original["spec"].get("replicas", 1) == 1, "pause_requires_single_replica")
+    grace = original["spec"]["template"]["spec"].get("terminationGracePeriodSeconds", 30)
+    require(type(grace) is int and 0 <= grace <= 300, "invalid_pause_termination_grace")
     uid = original["metadata"]["uid"]
     try:
         replicas(kube, component, 0, uid=uid, expected=1)
         selector = ",".join(f"{key}={value}" for key, value in kube.labels(component).items())
-        until(
-            lambda: not kube.json("get", "pods", "-l", selector).get("items", []),
-            timeout=30,
-            clock=clock,
-            sleep=sleep,
-        )
+        try:
+            until(
+                lambda: not kube.json("get", "pods", "-l", selector).get("items", []),
+                timeout=grace + 30,
+                clock=clock,
+                sleep=sleep,
+            )
+        except AcceptanceError as error:
+            if str(error) != "convergence_deadline_exceeded":
+                raise
+            raise AcceptanceError("reconciler_pause_drain_timeout") from None
         yield {"deployment": original["metadata"]["name"], "uid": uid, "original_replicas": 1}
     finally:
         current = kube.deployment(component)

@@ -264,3 +264,11 @@ content, never Terraform state or credential directories. Keep a Radius installa
 CA-verified child API access, and no automatic interrupted-provisioning recovery.
 Socket permissions, sibling API SANs, and actual execution remain live gates;
 local implementation still waits for Azure acceptance.
+
+## D030 - Separate Pod shutdown time from configuration catch-up
+
+The acceptance harness waits for the data reconciler's configured termination
+grace plus 30 seconds of controller margin when pausing it. Validate that grace
+before changing replicas and restore the same Deployment in `finally`.
+Do not force-delete Pods or weaken the independent 30-second outage catch-up
+requirement to accommodate normal Kubernetes shutdown.

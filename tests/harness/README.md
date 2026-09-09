@@ -292,7 +292,8 @@ process updates child entries during onboarding.
 
 ## Scenario
 
-The scenario requires the three configured tenant IDs to be absent. It performs:
+A fresh scenario requires the three configured tenant IDs to be absent.
+The guarded continuation above permits only its verified first tenant. It performs:
 
 1. Prompt management `202`, persisted operation lookup, duplicate `409` with the
    original status URL, and another request's `503`/`Retry-After` while the first
@@ -304,7 +305,10 @@ The scenario requires the three configured tenant IDs to be absent. It performs:
    compared before/after shared reuse and against the isolated pair.
 3. Pausing only the shared data reconciler for the second shared onboarding:
    management must become ready while control is pending and data returns 404.
-   The original replica count is restored in `finally`.
+   The drain budget is the Deployment's termination grace plus 30 seconds of
+   controller margin; grace must be an integer from 0 to 300 seconds. This does
+   not change the 30-second outage catch-up limit. The original replica count
+   is restored in `finally`, including on a drain timeout; Pods are not force-deleted.
 4. Consecutive control versions, applied message/version checks, atomic counter
    changes without crossing tenant keys, missing/wrong-key rejection, minimal
    health, and absence of the old environment-disclosing route.

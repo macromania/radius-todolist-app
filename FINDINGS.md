@@ -77,6 +77,7 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F048 | reset | Medium security | `.state/azure/remove-orphaned-redis.py` | 14-68 (initial) | Python optimization removes assert-based deletion safety checks | Unconditional require checks and guarded mutation path replace assertions; normal/optimized run-path cases and final fix reviews pass |
 | F049 | reset | Medium security | `.state/azure/radius-reset-execute.json` | 81 (initial) | Generated executor still references old immutable bootstrap after source guard repair | Original manifest archived; new preview/execute references repaired immutable payload, compared byte-for-byte and checked for unconditional guards; final review clean |
 | F050 | 4 | High correctness | `harness/test-e2e.py` | IDENTITY_PROBE | Attribute-based Redis TLS detection rejects a real verified TLS socket | Resolved: negotiated-socket detection, optimization-safe PING, actual live probe pass, bounded first-verification continuation and both fix reviews pass |
+| F051 | 4 | High correctness | `harness/test-e2e.py` | paused_reconciler | A 30-second drain deadline leaves no room for the Pod's own 30-second shutdown grace and controller latency | Validated configured grace plus 30-second margin; UID/restoration guards and outage deadlines unchanged; regressions and fix review pass |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -591,3 +592,19 @@ first-tenant checks rerun before any later admission, mutation, or fault.
 The failed record remains unchanged and is linked from fresh evidence.
 Independent rubber-duck and security fix reviews were clean. The full harness
 suite passed 165 tests and 155 subtests. Remaining acceptance is not yet passed.
+
+The corrected continuation passed TLS and repeated first-tenant verification,
+then stopped before the second admission while draining the data reconciler.
+Its Pod had a 30-second termination grace, equal to the harness's entire drain
+budget. Kubernetes recorded shutdown at 23:09:52Z; the restored replacement
+was created at 23:10:25Z. The `finally` path restored one Running replica.
+No second tenant was admitted.
+
+F051 now uses the Deployment's configured grace (default 30 seconds, validated
+as an integer from 0 to 300) plus a 30-second controller margin. A drain timeout
+has its own error code and still restores the original replica. The required
+30-second outage catch-up limits are unchanged, and no Pod is force-deleted.
+The direct walkthrough and security review were clean; 168 harness tests and
+162 subtests passed, including full-grace shutdown, custom grace, timeout
+restoration, and invalid metadata before mutation. Live continuation remains
+to verify the corrected pause before the remaining scenario.

@@ -756,19 +756,21 @@ class RunnerTests(StateCase):
         self.assertEqual(json.loads(runner.path.read_text())["error"], "outage_failed")
         runner.apis.close.assert_called_once()
 
-    def test_pause_restores_replica_after_assertion_failure(self):
+    def pause_fixture(self, grace=30, drain_at=0):
         kube = Mock()
-        count = 1
+        state = {"replicas": 1}
         target = {
             "metadata": {"name": "data-reconciler", "uid": POD_UID},
-            "spec": {"replicas": 1},
+            "spec": {
+                "replicas": 1,
+                "template": {"spec": {"terminationGracePeriodSeconds": grace}},
+            },
         }
 
         def deployment(_component):
-            return {**target, "spec": {"replicas": count}}
+            return {**target, "spec": {**target["spec"], "replicas": state["replicas"]}}
 
         def run(*args, **_kwargs):
-            nonlocal count
             if args[0] == "patch":
                 operations = json.loads(args[-1])
                 self.assertEqual(
@@ -779,18 +781,52 @@ class RunnerTests(StateCase):
                         "value": POD_UID,
                     },
                 )
-                count = operations[-1]["value"]
+                state["replicas"] = operations[-1]["value"]
             return ""
 
         kube.deployment.side_effect = deployment
         kube.run.side_effect = run
         kube.labels.return_value = {"plane-demo/project": "radplanes"}
-        kube.json.return_value = {"items": []}
+        kube.json.side_effect = lambda *_: {"items": [{}] if self.clock() < drain_at else []}
+        return kube, state
+
+    def test_pause_restores_replica_after_assertion_failure(self):
+        kube, state = self.pause_fixture()
         with self.assertRaisesRegex(Error, "deliberate"):
             with runner_module.paused_reconciler(kube, clock=self.clock, sleep=self.clock.sleep):
-                self.assertEqual(count, 0)
+                self.assertEqual(state["replicas"], 0)
                 raise Error("deliberate")
-        self.assertEqual(count, 1)
+        self.assertEqual(state["replicas"], 1)
+
+    def test_pause_allows_full_termination_grace_and_controller_delay(self):
+        for grace, drain_at in ((30, 32), (90, 110)):
+            with self.subTest(grace=grace):
+                self.clock.value = 0
+                kube, state = self.pause_fixture(grace=grace, drain_at=drain_at)
+                with runner_module.paused_reconciler(
+                    kube, clock=self.clock, sleep=self.clock.sleep
+                ):
+                    self.assertEqual(state["replicas"], 0)
+                    self.assertGreaterEqual(self.clock(), drain_at)
+                self.assertEqual(state["replicas"], 1)
+
+    def test_pause_timeout_still_restores_the_original_replica(self):
+        kube, state = self.pause_fixture(grace=30, drain_at=61)
+        with self.assertRaisesRegex(Error, "reconciler_pause_drain_timeout"):
+            with runner_module.paused_reconciler(kube, clock=self.clock, sleep=self.clock.sleep):
+                self.fail("A non-drained reconciler must never admit another tenant")
+        self.assertEqual(state["replicas"], 1)
+
+    def test_pause_invalid_grace_is_rejected_before_mutation(self):
+        for grace in (-1, 301, True, "30", None):
+            with self.subTest(grace=grace):
+                kube, _ = self.pause_fixture(grace=grace)
+                with self.assertRaisesRegex(Error, "invalid_pause_termination_grace"):
+                    with runner_module.paused_reconciler(
+                        kube, clock=self.clock, sleep=self.clock.sleep
+                    ):
+                        self.fail("Invalid shutdown metadata must fail before mutation")
+                kube.run.assert_not_called()
 
 
 if __name__ == "__main__":
