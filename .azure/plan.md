@@ -1,6 +1,6 @@
 # Three-plane Radius deployment checkpoint
 
-Status: Validated (dedicated harness identity; live acceptance pending).
+Status: Validated (fresh-demo artifacts; reset completion remains a deployment gate).
 Full API-driven onboarding, outage acceptance, local deployment, and final
 teardown remain open. A source-layout change is not a new deployment result.
 
@@ -8,10 +8,11 @@ teardown remain open. A source-layout change is not a new deployment result.
 
 The user approved implementation, real Azure deployment, automatic parent
 commits, and phase/fix verification with rubber-duck and security reviews on
-2026-09-09. The current structure-only pass does not deploy or change live state.
-Deeper SQL/code simplification is deferred until end-to-end proof. The layout
-is committed as `43b24fc`; its rebuilt API and provisioner images were checked
-inside AKS for matching source/artifact hashes and grouped module imports.
+2026-09-09. The first real shared tenant reached control HTTPS, then failed
+during data deployment. F044/F045 are corrected in `ad031e2`; its rebuilt
+images passed in-cluster source/artifact checks, and the updated Redis Recipe
+is published and locked. A reviewed Radius-only reset is running before a
+fresh demo. Deeper SQL/code simplification remains deferred until end-to-end proof.
 
 Use the explicitly scoped subscription
 `a3ed6c04-563f-4855-ac84-bdf1e5fbc3fc`, region `centralus`, and owned
@@ -33,11 +34,18 @@ implementation contracts and evidence, not a duplicate architecture.
 
 ## Next deployment boundary
 
-Preserve `.state/azure/`, protected credentials, ownership manifests, and
-distinct operator/provisioner volumes. Rebuild and inspect changed images and
-update layout-dependent command overrides before deployment. Existing live
-application evidence refers to the pre-layout source; the reorganized image
-checks are recorded separately in `.state/azure/images.json`.
+Preserve `.state/azure/`, bootstrap ownership, and the hash-verified failed
+evidence archive. Verify the running reset actually removes Radius-owned
+applications and child AKS while retaining the foundation. Only afterward
+clear the explicitly named old application-state volumes and stale runtime
+bootstrap objects for a fresh management deployment; do not replay the failed
+operation or bulk-delete local state. Revoke the recorded temporary reset
+Reader grants and federation after the executor finishes.
+
+`.state/azure/provisioning-next.json` validates against the inspected images and
+locked Recipes without changing active configuration. Switch it into use only
+after reset verification. The bootstrap uses standalone Bicep through the scoped
+Azure CLI; application deployment uses Radius and its per-cluster Recipes.
 
 Before any later cloud deployment, set the workflow status to
 `Ready for Validation`, run the Azure validation workflow, record its result,
@@ -46,6 +54,28 @@ and parameter hashes in `.state/azure/validation.json`; changed hashes require
 validation again. Never infer deployment success from compilation or Job submission.
 
 ## 7. Validation Proof
+
+2026-09-09T19:30:26Z: renewed
+`uv run --no-sync python operations/validate-bootstrap.py` passed real ARM
+what-if and validate, recording the unchanged exact template/parameter hashes.
+What-if reported 86 deploy entries, 122 unsupported expansions, and 29 ignored
+entries, with no proposed deletion. No bootstrap mutation is needed for the
+fresh application run.
+
+`make check` passed Ruff, all 22 Bicep files, three generated extensions,
+404 tests and 150 subtests, and ShellCheck. Fifty explicit dependency tests
+were skipped, not counted as passing. The inspected `ad031e2` images and locked
+Recipe references pass `OperatorConfig` validation in `provisioning-next.json`.
+Regenerating `.tgz` extensions changes packing metadata: a separate tokenless
+AKS inspection verified identical `index.json` and `types.json` payload bytes
+for all three regenerated extensions. All other inspected image inputs still
+match source. This is content proof, not an inference from image digests.
+
+The live Radius-only reset preview passed ownership/UID/scope checks and
+produced the expected owner order using source `2b3b7ff`. Its execution is
+running in independent `radplanes-system`; wait for verified removal, clear only
+approved old application state, and remove temporary reset access before
+deploying fresh management. Validation does not claim reset or tenant success.
 
 2026-09-09T17:46:04Z: the dedicated harness identity passed
 `uv run --no-sync python operations/validate-bootstrap.py` (bundled Bicep compile,

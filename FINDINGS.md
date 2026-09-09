@@ -438,3 +438,20 @@ AKS as uninspected/untouched. It does not interpret `Forbidden` as absence.
 Full cleanup still checks every allocated node group and role. Both fix reviews
 were clean, and 65 cleanup/export tests plus 40 subtests passed. A renewed live
 preview is required before deletion.
+
+The third read-only reset preview passed using committed source `2b3b7ff`.
+It verified the three live clusters and listed the two never-created isolated
+node groups as uninspected, then produced the expected child-app, child-cluster,
+management-app deletion sequence. `radius-reset-execute` is running that exact
+immutable source and metadata; reset completion is not yet claimed.
+
+Fresh-deployment validation passed at 2026-09-09T19:30:26Z. `make check` passed
+404 tests and 150 subtests, all 22 Bicep files, three extensions, Ruff, and
+ShellCheck; 50 dependency tests were explicitly skipped. The foundation's
+actual ARM what-if/validate passed with unchanged input hashes.
+
+Generated Radius `.tgz` archives change packing metadata on regeneration.
+After the full checks, actual-image inspection verified identical nested
+`index.json`/`types.json` bytes for all three extensions rather than claiming
+their changed archive digests implied changed code. The other inspected image
+inputs still match. No image rebuild was used to conceal that distinction.
