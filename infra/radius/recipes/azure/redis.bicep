@@ -68,6 +68,10 @@ resource endpoint 'Microsoft.Network/privateEndpoints@2024-07-01' = {
 }
 resource endpointNic 'Microsoft.Network/networkInterfaces@2024-07-01' existing = {
   name: 'nic-${cacheName}'
+  // Radius reads existing resources eagerly, including ones only used as tag scopes.
+  dependsOn: [
+    endpoint
+  ]
 }
 resource endpointNicTags 'Microsoft.Resources/tags@2021-04-01' = {
   scope: endpointNic

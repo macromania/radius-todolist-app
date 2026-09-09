@@ -70,6 +70,8 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F041 | 3 | High correctness | `src/plane_demo/management/providers/azure.py` | management_permissions | Worker had namespace pod/port-forward access but lacked cluster-scoped access to Radius's aggregated API | Narrow planes/local, resourceName radius grant added; live 403 became 200 and worker stayed Running without restarts; fix review/unit checks recorded below |
 | F042 | 4 | Deployment blocker | `harness/run-azure.py`, `infra/bootstrap/azure.bicep` | identity selection | Harness reused coordinator identity, which cannot read gateway/subnet metadata | Resolved: dedicated harness identity, both fix reviews, 21 exact live grants verified; exporter ready and first tenant provisioning started |
 | F043 | 4 | High correctness | `harness/export-state.py` | optional AKS lookup | AKS returns NotFound during creation as well as ResourceNotFound; exporter treated the former as fatal | Exact optional-lookup alternative added; run-path regression, rubber-duck pass, and security fix review passed |
+| F044 | 3 | Deployment blocker | `src/plane_demo/management/providers/azure.py` | data prerequisites | Bootstrap ConfigMap Roles collide with Radius's same-name generated container Roles | Distinct -configmaps Role/Binding names preserve exact subjects/verbs; run-path tests and both fix reviews pass; fresh deployment required |
+| F045 | 3 | Deployment blocker | `infra/radius/recipes/azure/redis.bicep` | existing endpointNic | Radius reads the declared existing NIC before the private endpoint creates it | Dependency added to the existing NIC itself, not only its tag extension; emitted-template test and both fix reviews pass; fresh Recipe execution required |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -358,3 +360,31 @@ the exporter stopped. The new offline harness suite passed 154 tests and 116
 subtests; independent rubber-duck and security reviews found no actionable
 issues. The walkthrough verified that the actual Git bundle includes the
 predecessor commit. Live continuation remains to be run.
+
+The continuation ran successfully up to observing the original provisioning
+failure; it neither replayed admission nor bypassed that failure. At
+2026-09-09T18:37:53Z the operation failed in `data-application`. Management and
+control applications, private PostgreSQL, and control HTTPS had deployed, but
+the data application hit F044/F045. Both the original operation and continued
+acceptance remain failed.
+
+### Data-plane ownership and existing-resource ordering corrections
+
+Radius generates a Role named after each container. Bootstrap's same-name
+ConfigMap Roles conflicted with Radius server-side apply on `.rules`. Bootstrap
+now owns separate `data-api-configmaps` and `data-reconciler-configmaps`
+Roles/Bindings, still bound to the original service accounts with exactly
+`get`, and `get/create/patch`, respectively.
+
+The Redis private endpoint and its NIC were eventually created and tagged
+correctly. The actual failure was Radius's earlier lookup of the declared
+`existing` NIC, not the final tagging operation. Adding `dependsOn: [endpoint]`
+to that existing resource emits the dependency in the language-version-2
+template. The tag extension already had its own dependency and retains it.
+
+The direct rubber-duck pass checked both resource-ownership boundaries and the
+compiled dependency graph. The independent security fix review was clean.
+The coordinator/compiled-infrastructure suite passed 145 tests and 19 subtests.
+Changed worker image and Recipe publication, content inspection, and a fresh
+demo deployment remain required. Do not reset the failed operation to pending
+or reinterpret it as a successful onboarding.

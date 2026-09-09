@@ -1146,8 +1146,20 @@ def test_scoped_data_rbac_and_tokenless_public_accounts(provider, monkeypatch):
         for resource in resources
         if resource["kind"] == "Role"
     }
-    assert roles["data-api"]["rules"][0]["verbs"] == ["get"]
-    assert roles["data-reconciler"]["rules"][0]["verbs"] == ["get", "create", "patch"]
+    assert set(roles) == {"data-api-configmaps", "data-reconciler-configmaps"}
+    assert roles["data-api-configmaps"]["rules"][0]["verbs"] == ["get"]
+    assert roles["data-reconciler-configmaps"]["rules"][0]["verbs"] == ["get", "create", "patch"]
+    bindings = {
+        resource["metadata"]["name"]: resource
+        for resource in resources
+        if resource["kind"] == "RoleBinding"
+    }
+    for account in ("data-api", "data-reconciler"):
+        binding = bindings[account + "-configmaps"]
+        assert binding["roleRef"]["name"] == account + "-configmaps"
+        assert binding["subjects"] == [
+            {"kind": "ServiceAccount", "name": account, "namespace": "radplanes-shared-data-data"}
+        ]
     challenge = next(
         resource
         for resource in resources

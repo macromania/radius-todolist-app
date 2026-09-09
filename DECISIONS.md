@@ -209,3 +209,17 @@ Retain the failed record and link it from fresh evidence with both source
 commits. Never retry provisioning, reset tenant state, skip later assertions,
 or describe a continued run as an uninterrupted fresh run. This does not add
 runtime recovery or a general-purpose resumable test workflow.
+
+## D025 - Give bootstrap RBAC its own resource names
+
+Radius generates container Roles under container names. Bootstrap's additional
+ConfigMap grants use `data-api-configmaps` and `data-reconciler-configmaps`
+Role/Binding names instead. Bind the original service accounts; do not force
+field-manager ownership or expand permissions to resolve a naming collision.
+
+## D026 - Order existing-resource reads in Radius Recipes
+
+Radius evaluates declared existing Azure resources during Recipe execution.
+When a private endpoint creates the NIC being referenced, put the endpoint
+dependency on that existing NIC declaration as well as on its tag extension.
+An existing declaration is not merely a compile-time resource ID in this path.

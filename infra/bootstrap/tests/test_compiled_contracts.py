@@ -59,6 +59,18 @@ class CompiledInfrastructureTests(unittest.TestCase):
         cls.network = compile_template("infra/bootstrap/network.bicep")
         cls.cluster_recipe = compile_template("infra/radius/recipes/azure/cluster.bicep")
         cls.postgresql_recipe = compile_template("infra/radius/recipes/azure/postgresql.bicep")
+        cls.redis_recipe = compile_template("infra/radius/recipes/azure/redis.bicep")
+
+    def test_existing_redis_nic_waits_for_private_endpoint_before_radius_reads_it(self):
+        template = self.redis_recipe
+        nic = template["resources"]["endpointNic"]
+        self.assertIs(nic["existing"], True)
+        self.assertEqual(nic["dependsOn"], ["endpoint"])
+        self.assertEqual(template["resources"]["endpointNicTags"]["dependsOn"], ["endpoint"])
+        self.assertEqual(
+            template["resources"]["endpointNicTags"]["properties"]["tags"],
+            "[variables('requiredTags')]",
+        )
 
     def test_bootstrap_has_no_unbound_copy_indices(self):
         assert_bound_copy_indices(self.bootstrap)

@@ -669,7 +669,7 @@ class AzureProvider:
             ):
                 resources += self.role_binding(
                     namespace,
-                    account,
+                    account + "-configmaps",
                     namespace,
                     account,
                     [{"apiGroups": [""], "resources": ["configmaps"], "verbs": verbs}],
