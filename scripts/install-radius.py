@@ -5,12 +5,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import sys
 from pathlib import Path
 
-from project import ROOT, SUBSCRIPTION, CommandError, run, uuid
+from project import ROOT, SUBSCRIPTION, CommandError, radius_environment, run, uuid
 
 
 def install(context: str, kubeconfig: Path, config: Path, client_id: str, tenant_id: str) -> None:
@@ -25,7 +24,7 @@ def install(context: str, kubeconfig: Path, config: Path, client_id: str, tenant
     uuid(client_id, "Radius client ID")
     uuid(tenant_id, "Tenant ID")
     config.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    environment = {**os.environ, "KUBECONFIG": str(kubeconfig.resolve())}
+    environment = radius_environment(kubeconfig, context)
     rad = ["rad", "--config", str(config.resolve())]
     kubectl = ["kubectl", "--context", context]
 

@@ -71,6 +71,30 @@ def write_json(path: Path, value: Any) -> None:
     temporary.replace(path)
 
 
+def radius_environment(kubeconfig: Path, context: str) -> dict[str, str]:
+    if not re.fullmatch(r"radplanes-[a-z0-9-]+", context):
+        raise ValueError("Invalid project Radius context")
+    state = (ROOT / ".state/azure").resolve()
+    if not kubeconfig.resolve().is_relative_to(state):
+        raise ValueError("Radius kubeconfig must remain in project state")
+    home = state / "homes" / context
+    home.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for relative, target in ((".kube/config", kubeconfig.resolve()), (".rad/bin/bicep", BICEP)):
+        link = home / relative
+        link.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if link.exists() or link.is_symlink():
+            if link.resolve() != target.resolve():
+                raise ValueError("Project Radius home contains an unexpected configuration link")
+        else:
+            link.symlink_to(target)
+    return {
+        **os.environ,
+        "HOME": str(home),
+        "KUBECONFIG": str(kubeconfig.resolve()),
+        "AZURE_CONFIG_DIR": os.environ.get("AZURE_CONFIG_DIR", str(Path.home() / ".azure")),
+    }
+
+
 def uuid(value: str, label: str) -> str:
     if not re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", value):
         raise ValueError(f"{label} is not a UUID")
@@ -152,6 +176,16 @@ def preflight(environment: str) -> None:
             raise CommandError(
                 f"Project name collides with an unowned resource group: {group['name']}"
             )
+    observed_file = state_dir(environment) / "operator-ips.json"
+    observed = json.loads(observed_file.read_text())["observed"] if observed_file.exists() else []
+    if not isinstance(observed, list) or len(observed) > 4:
+        raise ValueError("At most four explicitly observed operator addresses are allowed")
+    for address in observed:
+        if not isinstance(address, str):
+            raise ValueError("Observed operator addresses must be IPv4 strings")
+        candidate = ipaddress.ip_address(address)
+        if candidate.version != 4 or not candidate.is_global:
+            raise ValueError("Additional operator addresses must be public IPv4 addresses")
     context = {
         "project": PROJECT,
         "subscription": SUBSCRIPTION,
@@ -159,6 +193,7 @@ def preflight(environment: str) -> None:
         "tenant": uuid(account["tenantId"], "Tenant ID"),
         "operator_object_id": operator,
         "operator_ip": public_ip,
+        "additional_operator_ips": observed,
         "kubernetes_version": "1.35.7",
         "node_vm_size": "Standard_D4s_v5",
         "node_count": 2,
@@ -198,6 +233,7 @@ def bootstrap(preview: bool) -> None:
         "location": LOCATION,
         "nameSalt": salt,
         "operatorIp": context["operator_ip"],
+        "additionalOperatorIps": context.get("additional_operator_ips", []),
         "operatorObjectId": context["operator_object_id"],
         "kubernetesVersion": context["kubernetes_version"],
         "nodeVmSize": context["node_vm_size"],
@@ -231,7 +267,7 @@ def bootstrap(preview: bool) -> None:
         f"@{parameter_file}",
     ]
     if preview:
-        run(args)
+        run([*args, "--result-format", "ResourceIdOnly"])
         return
     require_confirmation("azure")
     validation = state / "validation.json"

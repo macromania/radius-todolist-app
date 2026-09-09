@@ -14,6 +14,13 @@ SPEC.loader.exec_module(project)
 
 class PreflightTests(unittest.TestCase):
     def test_operator_lookup_pins_subscription_without_changing_defaults(self):
+        self.exercise_operator_lookup()
+
+    def test_numeric_operator_address_is_rejected_from_preflight(self):
+        with self.assertRaisesRegex(ValueError, "must be IPv4 strings"):
+            self.exercise_operator_lookup([134744072])
+
+    def exercise_operator_lookup(self, observed=None):
         commands = []
 
         def run(args, **kwargs):
@@ -48,6 +55,8 @@ class PreflightTests(unittest.TestCase):
             b'{"id":"22222222-2222-2222-2222-222222222222"}'
         )
         with tempfile.TemporaryDirectory() as temp:
+            if observed is not None:
+                (Path(temp) / "operator-ips.json").write_text(json.dumps({"observed": observed}))
             with (
                 patch.object(project, "run", side_effect=run),
                 patch.object(project.http.client, "HTTPSConnection", return_value=connection),

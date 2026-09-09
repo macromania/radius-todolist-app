@@ -81,3 +81,33 @@ deterministic certificate/account objects. A child identity must not read or
 replace other planes' certificates. Keep staging and production issuance
 distinguishable in certificate tags, and never reuse a staging certificate as
 the final trusted-HTTPS certificate.
+
+## D011 - Radius workspace isolation requires an isolated HOME
+
+Live Radius 0.60.2 workspace creation reads `HOME/.kube/config` even when
+`KUBECONFIG` is set. Each cluster therefore gets a project-owned home directory,
+a link to its exact kubeconfig, and the verified Bicep compiler. Preserve the
+Azure CLI cache path explicitly; never add contexts to the user's global file.
+
+## D012 - Operator access follows observed egress, not a broad CIDR
+
+The laptop's outbound network changed during implementation. Record the actual
+observed public IPv4 addresses in ignored environment state and authorize each
+as `/32`, plus the project's fixed NAT address. Do not open a subnet or
+`0.0.0.0/0` to compensate for a timeout. Refresh/revalidate IaC when egress
+changes; Azure's authenticated command channel can distinguish cluster health
+from operator reachability without exposing the Kubernetes endpoint.
+
+## D013 - Private Recipe authentication is separate from Azure provisioning
+
+Each Radius environment explicitly configures Bicep registry authentication
+through a workload-identity SecretStore. Granting AcrPull and registering the
+Azure provider alone did not authenticate Recipe downloads. This correction
+was verified by a real private PostgreSQL Recipe deployment.
+
+## D014 - Use an Azure image builder when the local package CDN is unreachable
+
+The local package CDN failed TLS handshakes repeatedly with multiple clients.
+Build in the project ACR with the same pinned Dockerfiles, preserving complete
+build/push output. Pull the resulting image and compare its actual source
+contents before deployment. Never disable TLS verification to make a build pass.

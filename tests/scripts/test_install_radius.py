@@ -55,11 +55,13 @@ class RadiusInstallTests(unittest.TestCase):
             config.touch()
             with (
                 patch.object(installer, "ROOT", root),
+                patch("project.ROOT", root),
                 patch.object(installer, "run", side_effect=run),
             ):
                 installer.install("radplanes-management", kubeconfig, config, CLIENT, TENANT)
             for args, env in commands:
                 self.assertEqual(env["KUBECONFIG"], str(kubeconfig.resolve()))
+                self.assertEqual(env["HOME"], str((state / "homes/radplanes-management").resolve()))
                 if args[0] == "kubectl":
                     self.assertEqual(args[1:3], ["--context", "radplanes-management"])
                 else:

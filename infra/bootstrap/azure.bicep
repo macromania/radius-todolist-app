@@ -11,6 +11,8 @@ param nameSalt string
 @minLength(7)
 @maxLength(15)
 param operatorIp string
+@description('Additional observed operator IPv4 addresses, each authorized as one /32.')
+param additionalOperatorIps array = []
 param operatorObjectId string
 @description('Regional az aks get-versions probe on 2026-09-09 confirmed 1.35.7 in centralus.')
 param kubernetesVersion string = '1.35.7'
@@ -33,6 +35,7 @@ param tags object = {}
 
 var prefix = projectName
 var operatorIpCidr = '${operatorIp}/32'
+var operatorRanges = union([operatorIpCidr], map(additionalOperatorIps, ip => '${ip}/32'))
 var requiredTags = union(tags, {
   SecurityControl: 'Ignore'
   project: 'radplanes'
@@ -310,10 +313,9 @@ module management './aks.bicep' = {
     nodeResourceGroup: 'rg-${prefix}-management-nodes'
     controlPlaneIdentityId: identity[0].outputs.identity.controlPlane.id
     kubeletIdentity: identity[0].outputs.identity.kubelet
-    authorizedIpRanges: [
-      operatorIpCidr
+    authorizedIpRanges: concat(operatorRanges, [
       '${network.outputs.foundation.egressIp}/32'
-    ]
+    ])
     tags: requiredTags
   }
   dependsOn: [
@@ -387,10 +389,9 @@ output foundation object = union(network.outputs.foundation, {
     childClusterRecipe: clusterRecipeRole.id
     childIdentityFederation: federationRole.id
   }
-  authorizedIpRanges: [
-    operatorIpCidr
+  authorizedIpRanges: concat(operatorRanges, [
     '${network.outputs.foundation.egressIp}/32'
-  ]
+  ])
   tags: requiredTags
 })
 output allocations array = [for (slot, i) in slots: union(network.outputs.allocations[i], {

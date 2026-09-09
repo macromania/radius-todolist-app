@@ -30,20 +30,32 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | ID | Phase | Severity | File | Lines | Finding | Status |
 |---|---|---|---|---|---|---|
 | F001 | 0 | Medium correctness | `scripts/project.py` | 84-90 (initial) | Operator Graph lookup used the global tenant instead of the project subscription | Resolved; live preflight, 4 tests, rubber-duck and security fix reviews passed |
-| F002 | 1 | Deployment blocker | Azure PostgreSQL regional capability | n/a | Subscription cannot provision PostgreSQL in East US 2 or West US 2 | Resolved for preflight: Central US capability checks and both fix reviews passed; actual provisioning remains a phase gate |
+| F002 | 1 | Deployment blocker | Azure PostgreSQL regional capability | n/a | Subscription cannot provision PostgreSQL in East US 2 or West US 2 | Resolved: Central US managed PostgreSQL created through Radius and verified TLS connection succeeded from AKS |
 | F003 | 1 | High correctness | `infra/bootstrap/azure.bicep` | 144-156, 245-247 (initial) | Compiled module scopes include invalid loop expressions in non-loop references | Resolved: compiled-contract tests, fix walkthrough, real ARM what-if/validate pass |
 | F004 | 1 | High correctness | `infra/bootstrap/federation.bicep` | 11 (initial) | Concurrent writes to one identity's federated credentials can return 409 | Fixed with serial loops; fix walkthrough passes, live deployment pending |
 | F005 | 1 | High security | `infra/bootstrap/platform-access.bicep` | 150-167 (initial) | Tenant-reachable gateway/issuer identities can read or replace other planes' certificates in the shared vault | Resolved in source: exact object grants, both fix reviews pass; live cross-plane denial still required |
 | F006 | 1 | High correctness | `scripts/install-radius.py` | 38-59 (initial) | Existing workload-identity label means a patch does not restart pods after identity annotations | Fixed; explicit rollout restart, regression, and both fix reviews passed; live pod projection remains a deployment gate |
 | F007 | 2 | Medium correctness | `src/plane_demo/control_api.py` | 35-52 (initial) | A delayed older-version success hides failure of the current desired version | Resolved: reproduced before fix, 37 related real-PostgreSQL integration tests passed after, both fix reviews clean |
-| F008 | 3 | High correctness | `infra/radius/apps/challenge.bicep`, `workload.bicep` | initial workload integration | Challenge responder correctly returns 404 at /livez, so an inherited HTTP probe would restart it | Changed challenge to TCP probe; provisioner also explicitly Recreate; live rendering and fix reviews pending |
-| F009 | 3 | High correctness | `scripts/publish-artifacts.py` | 67-107 (initial) | Existing tag accepted without verifying its trusted source/digest record | Corrected; fix tests/review pending |
-| F010 | 3 | Medium correctness | `scripts/issue-certificate.py` | 131-144 (initial) | Staging issuance could replace the live versionless certificate | Staging now validation-only; fix tests/review pending |
-| F011 | 3 | Medium correctness | `scripts/issue-certificate.py` | 100-109 (initial) | Failed first issuance discarded a newly registered ACME account | Account state saved in finally; fix tests/review pending |
-| F012 | 3 | High security | `containers/provisioner/Dockerfile` | 41 (initial) | Bundled Bicep executable downloaded without digest verification | Published per-architecture SHA-256 verification added; fix review pending |
-| F013 | 3 | Medium security | `.dockerignore` | 1-16 (initial) | Build context omitted several credential-file exclusions | Added credential patterns and explicit runtime-script copies; fix review pending |
-| F014 | 1 | Connectivity blocker | Management AKS administrative endpoint | live | Operator connection times out despite healthy AKS | Verifying both observed /32 egress addresses; Azure authenticated command channel confirms both nodes Ready |
-| F015 | 1 | High correctness | `scripts/install-radius.py` / Radius workspace loader | live | Radius workspace enumeration ignores KUBECONFIG and reads HOME/.kube/config | Per-cluster project HOME added; actual workspace/credential registration and identity verification succeeded; fix reviews pending |
+| F008 | 3 | High correctness | `infra/radius/apps/challenge.bicep`, `workload.bicep` | initial workload integration | Challenge responder correctly returns 404 at /livez, so an inherited HTTP probe would restart it | TCP probe/Recreate corrected and fix-reviewed; live rendering gate pending |
+| F009 | 3 | High correctness | `scripts/publish-artifacts.py` | 67-107 (initial) | Existing tag accepted without verifying its trusted source/digest record | Resolved: regression tests and both fix reviews pass; real publication succeeded |
+| F010 | 3 | Medium correctness | `scripts/issue-certificate.py` | 131-144 (initial) | Staging issuance could replace the live versionless certificate | Resolved in source: validation-only staging, regression and both fix reviews pass |
+| F011 | 3 | Medium correctness | `scripts/issue-certificate.py` | 100-109 (initial) | Failed first issuance discarded a newly registered ACME account | Resolved in source: finally persistence, regression and both fix reviews pass |
+| F012 | 3 | High security | `containers/provisioner/Dockerfile` | 41 (initial) | Bundled Bicep executable downloaded without digest verification | Published per-architecture SHA-256 verification added; both fix reviews pass, build gate pending |
+| F013 | 3 | Medium security | `.dockerignore` | 1-16 (initial) | Build context omitted several credential-file exclusions | Resolved: credential patterns, explicit runtime-script copies, both fix reviews pass |
+| F014 | 1 | Connectivity blocker | Management AKS administrative endpoint | live | Operator connection times out despite healthy AKS | Observed /32 refresh restores access; parsed string guard and both final fix reviews pass; changing operator egress remains an operational prerequisite |
+| F015 | 1 | High correctness | `scripts/install-radius.py` / Radius workspace loader | live | Radius workspace enumeration ignores KUBECONFIG and reads HOME/.kube/config | Resolved: per-cluster HOME, actual workspace/credential registration and identity verification, both fix reviews pass |
+| F016 | 1 | High correctness | `infra/radius/environments/project-azure.bicep` | live | Azure provider credentials do not automatically authenticate private Recipe downloads | Resolved: documented WI registry SecretStore, real download/deploy and both fix reviews pass |
+| F017 | 1 | Deployment blocker | `infra/radius/recipes/azure/cluster.bicep` | live | Cross-resource-group nested Azure modules fail in Radius deployment-engine evaluation | Infrastructure agent correcting Recipe/environment scope; no direct-creation bypass |
+| F018 | 3 | High correctness | `src/plane_demo/providers/azure.py` | 374-380 (initial) | Environment registration omitted required private-registry authentication inputs | Provisioner agent correcting |
+| F019 | 3 | High correctness | `src/plane_demo/providers/azure.py` | 932-936 (initial) | Management deployment omitted provisioner managed-identity client ID | Provisioner agent correcting |
+| F020 | 3 | Medium correctness | `src/plane_demo/providers/azure.py` | 678-687 (initial) | Incomplete PostgreSQL Recipe state could be replayed before intent persisted | Provisioner agent adding pre-submission intent and explicit refusal |
+| F021 | 3 | Medium correctness | `src/plane_demo/provisioning.py` | 95-127 (initial) | Malformed operator network fields were passed to infrastructure | Provisioner agent adding parsed CIDR/IP validation |
+| F022 | 4 | Medium security | `scripts/fault-parent-link.py` | 76-79, 127-140 (initial) | Caller working directory and arbitrary project identity defined the mutation boundary | Acceptance agent fixing immutable repository/project scope |
+| F023 | 4 | Medium correctness | `scripts/test-e2e.py` | 623-646 (initial) | Ignored message updates or reset counters could pass acceptance | Acceptance agent adding value/counter assertions |
+| F024 | 4 | Medium correctness | `scripts/test-e2e.py` | 471-478 (initial) | Stale applied version or missing report time could pass | Acceptance agent checking exact child report |
+| F025 | 4 | Medium correctness | `scripts/test-e2e.py` | 666-680 (initial) | Empty control timelines could pass | Acceptance agent requiring expected state-change/report events |
+| F026 | 4 | Medium correctness | `scripts/test-e2e.py`, `scripts/fault-parent-link.py` | recovery deadline (initial) | Cleanup time was excluded from catch-up timing | Acceptance agent using one recovery deadline |
+| F027 | 4 | Medium correctness | `scripts/test-e2e.py` | provenance checks (initial) | Coordinator code and replacement data pod omitted from source verification | Acceptance agent extending actual image/source checks |
 
 F001 first correction (`az rest --subscription`) failed the fix walkthrough:
 Azure CLI's Graph request path can still acquire the default tenant's token.
@@ -68,6 +80,13 @@ verified in real pods. Four Recipe artifacts were published and tag-locked in
 the project ACR. The actual resource-tag audit found no missing requested tag.
 Child cluster, managed datastore, gateway and certificate Recipe execution still
 remain live integration gates.
+
+PostgreSQL gate now passed: Radius created a private PostgreSQL 16 server and
+its setup Secret in the management namespace. A Job using the Azure-built API
+image connected with `sslmode=verify-full` and checked `pg_stat_ssl.ssl=true`.
+The connection-test Job was removed. Setup credentials were never printed.
+The isolated API image was pulled from ACR and all 16 included Python/SQL file
+hashes matched the source; it runs as UID 10001 and excludes provisioner code.
 
 | # | Severity | File | Lines | Vulnerability | Confidence |
 |---|----------|------|-------|---------------|------------|
@@ -96,3 +115,12 @@ declined additional product limits for that scenario. This is not a fixed
 security claim. Local Docker daemon access is powerful and project labels do
 not confine it. High availability, automatic renewal, and interrupted
 provisioning recovery are out of scope.
+
+## Phase 4 - Acceptance tooling source review
+
+The initial acceptance/fault tooling passed 36 offline tests. It has not yet
+run live faults. Source reviews identified F022-F027, now being corrected.
+The walkthrough additionally suggested restarting the data API during the
+management outage. That is not an unmet requirement: the approved plan requires
+that restart during the control-source outage only, which the runner already
+does. No extra restart scenario is added merely to satisfy a broader review.
