@@ -22,6 +22,7 @@ runner = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(runner)
 COMMIT = "a" * 40
 SECRET = "synthetic-federation-token-never-log"
+PRIOR_EVIDENCE = ".state/azure/evidence/acceptance-" + "c" * 32 + ".json"
 
 
 def configuration():
@@ -281,7 +282,7 @@ class AzureRunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(runner.HarnessError, "source_configmap_too_large"):
             runner.resources(self.config, "demo-acceptance-test", b"x" * 700_000, COMMIT, "all")
 
-    def launch(self, *, inspected=True, jobs=None):
+    def launch(self, *, inspected=True, jobs=None, continue_first_from=None):
         (self.state / "images.json").write_text(
             json.dumps(
                 {
@@ -309,7 +310,9 @@ class AzureRunnerTests(unittest.TestCase):
                 ],
             ) as invoke,
         ):
-            result = runner.launch(self.config, "demo-acceptance-test", "all", inspected, COMMIT)
+            result = runner.launch(
+                self.config, "demo-acceptance-test", "all", inspected, COMMIT, continue_first_from
+            )
         return result, git, invoke
 
     def test_host_submits_exact_manifest_without_claiming_completion(self):
@@ -332,6 +335,50 @@ class AzureRunnerTests(unittest.TestCase):
             base64.b64decode(manifest["items"][1]["binaryData"]["source.bundle"]),
             b"actual-head-bundle",
         )
+
+    def test_continuation_host_forwards_pvc_path_without_reading_or_bundling_evidence(self):
+        self.assertFalse((self.root / PRIOR_EVIDENCE).exists())
+        result, _, _ = self.launch(continue_first_from=PRIOR_EVIDENCE)
+        self.assertEqual(result["outcome"], "submitted_not_completed")
+        manifest = json.loads((self.state / "harness/demo-acceptance-test.json").read_text())
+        cm, job = manifest["items"][1], manifest["items"][3]
+        self.assertEqual(
+            job["spec"]["template"]["spec"]["containers"][0]["command"][-2:],
+            ["--continue-first-from", PRIOR_EVIDENCE],
+        )
+        self.assertNotIn(PRIOR_EVIDENCE, json.dumps(cm))
+        self.assertEqual(
+            job["spec"]["template"]["spec"]["volumes"][-1]["persistentVolumeClaim"]["claimName"],
+            "harness-state",
+        )
+
+    def test_continuation_cli_validates_exact_path_and_mode_before_loading_config(self):
+        for path, mode in (
+            ("/" + PRIOR_EVIDENCE, "all"),
+            ("./" + PRIOR_EVIDENCE, "all"),
+            (PRIOR_EVIDENCE.replace("evidence/", "evidence/../evidence/"), "all"),
+            (PRIOR_EVIDENCE.replace("c" * 32, "c" * 33), "all"),
+            (PRIOR_EVIDENCE.replace(".json", ".json;echo"), "all"),
+            (PRIOR_EVIDENCE, "outages"),
+        ):
+            with (
+                self.subTest(path=path, mode=mode),
+                patch.object(runner, "configuration") as config,
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(
+                    runner.main(["--execute", "--mode", mode, "--continue-first-from", path]), 1
+                )
+                config.assert_not_called()
+        with (
+            patch.object(runner, "source_commit", return_value=COMMIT),
+            patch.object(
+                runner, "launch", return_value={"outcome": "submitted_not_completed"}
+            ) as launch,
+            redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(runner.main(["--execute", "--continue-first-from", PRIOR_EVIDENCE]), 0)
+        self.assertEqual(launch.call_args.args[-1], PRIOR_EVIDENCE)
 
     def test_host_refuses_uninspected_images_and_nonterminal_job(self):
         with self.assertRaisesRegex(runner.HarnessError, "image_inspection_required"):
@@ -394,7 +441,7 @@ class AzureRunnerTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 runner.main([])
 
-    def bootstrap(self, *, bad_digest=False, bad_commit=False):
+    def bootstrap(self, *, bad_digest=False, bad_commit=False, continue_first_from=None):
         bundle_dir = self.root / "bundle"
         bundle_dir.mkdir()
         (bundle_dir / "source.bundle").write_bytes(b"bundle")
@@ -430,7 +477,12 @@ class AzureRunnerTests(unittest.TestCase):
                     "bootstrap.py",
                     COMMIT,
                     "bad" if bad_digest else hashlib.sha256(b"bundle").hexdigest(),
-                    "outages",
+                    "all" if continue_first_from else "outages",
+                    *(
+                        ["--continue-first-from", continue_first_from]
+                        if continue_first_from
+                        else []
+                    ),
                 ],
             ),
             redirect_stdout(io.StringIO()) as output,
@@ -442,6 +494,14 @@ class AzureRunnerTests(unittest.TestCase):
             except SystemExit as error:
                 self.assertEqual(error.code, 1)
         return key, execute, output.getvalue()
+
+    def test_bootstrap_forwards_continuation_to_in_cluster_cli(self):
+        _, execute, output = self.bootstrap(continue_first_from=PRIOR_EVIDENCE)
+        self.assertEqual(output, "")
+        self.assertEqual(
+            execute.call_args.args[1][-6:],
+            ["--in-cluster", "--mode", "all", "--execute", "--continue-first-from", PRIOR_EVIDENCE],
+        )
 
     def test_bootstrap_checks_real_head_and_bundle_without_cloning_over_state(self):
         key, execute, output = self.bootstrap()
@@ -539,6 +599,7 @@ class AzureRunnerTests(unittest.TestCase):
         interrupt=False,
         forced=False,
         mode="all",
+        continue_first_from=None,
     ):
         thread = Mock(ident=1)
         events = []
@@ -593,7 +654,8 @@ class AzureRunnerTests(unittest.TestCase):
                 return exporter
             self.assertEqual(
                 argv[2:],
-                ["--config", str(self.state / "acceptance.json"), "--mode", mode, "--execute"],
+                ["--config", str(self.state / "acceptance.json"), "--mode", mode, "--execute"]
+                + (["--continue-first-from", continue_first_from] if continue_first_from else []),
             )
             evidence = self.state / "evidence/acceptance-fresh.json"
             evidence.parent.mkdir()
@@ -638,12 +700,17 @@ class AzureRunnerTests(unittest.TestCase):
             ),
             patch.object(runner.time, "sleep"),
         ):
-            result = runner.in_cluster(self.config, mode, COMMIT)
+            result = runner.in_cluster(self.config, mode, COMMIT, continue_first_from)
         thread.start.assert_called_once()
         thread.join.assert_called_once_with(timeout=60)
         self.assertIs(factory.call_args.kwargs["target"], runner.refresh_login)
         authenticate.assert_called_once()
         return result, events
+
+    def test_in_cluster_forwards_continuation_to_existing_test_e2e_subprocess(self):
+        result, _ = self.flow(continue_first_from=PRIOR_EVIDENCE)
+        self.assertEqual(result["outcome"], "passed")
+        self.assertEqual(self.popen.call_count, 2)
 
     def test_pass_requires_scenario_exit_and_matching_fresh_evidence(self):
         result, _ = self.flow(mode="outages", exporter_code=0)
@@ -767,11 +834,15 @@ class AzureRunnerTests(unittest.TestCase):
         result = {"outcome": "failed", "error": "workload_login_failed", "mode": "all"}
         with (
             patch.object(runner, "source_commit", return_value=COMMIT),
-            patch.object(runner, "in_cluster", return_value=result),
+            patch.object(runner, "in_cluster", return_value=result) as in_cluster,
             patch.object(runner, "TERMINATION", termination),
             redirect_stdout(io.StringIO()) as output,
         ):
-            self.assertEqual(runner.main(["--in-cluster", "--execute"]), 1)
+            self.assertEqual(
+                runner.main(["--in-cluster", "--execute", "--continue-first-from", PRIOR_EVIDENCE]),
+                1,
+            )
+        self.assertEqual(in_cluster.call_args.args[-1], PRIOR_EVIDENCE)
         self.assertEqual(json.loads(termination.read_text()), result)
         self.assertEqual(json.loads((self.state / "harness/termination.json").read_text()), result)
         self.assertNotIn(SECRET, output.getvalue())

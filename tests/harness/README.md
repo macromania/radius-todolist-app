@@ -57,6 +57,49 @@ The launcher never mounts operator/provisioner state. `--name` accepts a bounded
 Modes remain `all`, `scenario`, and `outages`. The exporter must support the
 requested 10,800-second watch timeout before this Job can pass.
 
+### Continue only a previously admitted first tenant
+
+If the observer/exporter failed after the first tenant's admission while its
+runtime operation continued, either harness script accepts the explicit option:
+
+```sh
+--continue-first-from .state/azure/evidence/acceptance-<32-lowercase-hex-run-id>.json
+```
+
+This is **not workflow resume or provisioning recovery**. Only `scenario` and
+`all` accept it, and the prior mode must match. The prior protected file must
+belong to this project's Azure state, describe a failed version-1 run with a
+clean, timestamp-verified source commit, and contain exactly these ordered events:
+`acceptance_started`, management API `workload_image`, provisioner
+`workload_image`, and one `tenant_accepted` for the configured first tenant.
+That admission must retain its original operation UUID, HTTP 202, and
+`busy_verified: true`. Missing, altered-shape, progressed, foreign, oversized,
+nonprivate, or symlinked evidence is refused.
+
+The harness requires both remaining tenants to return 404. It reads the first
+tenant, checks the same shared-pair operation is not failed/interrupted, and
+waits for the existing readiness and operation completion checks. It sends
+**no first-tenant onboarding POST**, including duplicate checks or retries.
+The original run ID determines the initial message; version 1 and that exact
+message must still be applied. Changed configuration fails before admitting the
+second tenant. All later admissions, paused-reconciler/inventory checks,
+configuration/counter checks, provenance, timelines, and selected outages run
+normally. There are no resets or skips of later scenario steps.
+
+The failed file remains byte-for-byte unchanged. A new run has its own fresh
+timestamps and current clean source metadata; `continued_first_from` separately
+records the predecessor's relative path, SHA-256, run/source metadata, timestamps,
+and actual earlier admission. The new event list records `first_tenant_continued`,
+not a fabricated first HTTP 202. Protected evidence is trusted operator input,
+not a cryptographically signed attestation.
+
+For `run-azure.py`, the path refers to the retained **harness-state PVC**, not a
+required local file. Only that bounded relative argument is forwarded through
+bootstrap to the existing in-cluster harness; old evidence is not bundled in a
+ConfigMap, and operator/provisioner volumes remain unmounted. Current source,
+image inspection, and final fresh-evidence verification requirements are unchanged.
+Offline tests cover this path; they do not establish live acceptance success.
+
 Generate state from the existing provisioning configuration; no manual endpoint,
 key, namespace UID, or component-name editing is required:
 

@@ -404,6 +404,7 @@ class Runner:
         configuration,
         mode: str,
         *,
+        continue_first_from: str | None = None,
         apis=None,
         kube_factory=faults.Kubectl,
         fault_factory=faults.ParentFault,
@@ -411,11 +412,16 @@ class Runner:
         sleep=time.sleep,
     ):
         self.configuration, self.mode = configuration, mode
+        self.continue_first_from = continue_first_from
         self.apis = apis if apis is not None else APIs(configuration)
         self.kube_factory, self.fault_factory = kube_factory, fault_factory
         self.clock, self.sleep = clock, sleep
         self.run_id = uuid4().hex
         self.path = configuration.root / "evidence" / f"acceptance-{self.run_id}.json"
+        if continue_first_from is not None:
+            require(
+                not self.path.exists() and not self.path.is_symlink(), "continuation_output_exists"
+            )
         self.record = {
             "version": 1,
             "run_id": self.run_id,
@@ -446,6 +452,106 @@ class Runner:
         self.tenants = {}
         self.expectations = {}
         self.updates_finished_at = None
+
+    def load_first_admission(self):
+        relative = self.continue_first_from
+        require(self.mode in {"scenario", "all"}, "continuation_requires_scenario")
+        require(
+            self.configuration.environment == "azure"
+            and self.configuration.root == ROOT / ".state/azure"
+            and isinstance(relative, str)
+            and re.fullmatch(r"\.state/azure/evidence/acceptance-[a-f0-9]{32}\.json", relative),
+            "continuation_path_refused",
+        )
+        path = faults.state_path(Path(relative))
+        require(path == ROOT / relative, "continuation_symlink_refused")
+        path = self.configuration.file(str(path.relative_to(self.configuration.root)), secret=True)
+        with path.open("rb") as stream:
+            raw = stream.read(2_000_001)
+        require(len(raw) <= 2_000_000, "continuation_evidence_too_large")
+
+        def unique_fields(pairs):
+            value = dict(pairs)
+            require(len(value) == len(pairs), "continuation_duplicate_field")
+            return value
+
+        prior = json.loads(raw, object_pairs_hook=unique_fields)
+        require(
+            isinstance(prior, dict)
+            and type(prior.get("version")) is int
+            and prior["version"] == 1
+            and prior.get("project") == self.configuration.project
+            and prior.get("environment") == "azure"
+            and prior.get("mode") == self.mode
+            and prior.get("outcome") == "failed"
+            and prior.get("run_id") == path.stem.removeprefix("acceptance-")
+            and prior["run_id"] != self.run_id
+            and "continued_first_from" not in prior,
+            "continuation_identity_mismatch",
+        )
+        source = prior.get("source")
+        require(
+            isinstance(source, dict)
+            and set(source) == {"commit", "committed_at", "worktree_dirty"}
+            and isinstance(source["commit"], str)
+            and re.fullmatch(r"[a-f0-9]{40,64}", source["commit"])
+            and source["worktree_dirty"] is False,
+            "continuation_source_invalid",
+        )
+        started, finished = (
+            report_time(prior.get("started_at")),
+            report_time(prior.get("finished_at")),
+        )
+        require(
+            report_time(source["committed_at"])
+            <= started
+            <= finished
+            <= report_time(self.record["started_at"]),
+            "continuation_timestamps_invalid",
+        )
+        require(
+            report_time(
+                faults.command(["git", "show", "-s", "--format=%cI", source["commit"]]).strip()
+            )
+            == report_time(source["committed_at"]),
+            "continuation_source_mismatch",
+        )
+        events = prior.get("events")
+        require(
+            isinstance(events, list)
+            and all(isinstance(event, dict) for event in events)
+            and [event.get("type") for event in events]
+            == ["acceptance_started", "workload_image", "workload_image", "tenant_accepted"]
+            and [(event.get("slot"), event.get("component")) for event in events[1:3]]
+            == [("management", "management-api"), ("management", "provisioner")],
+            "continuation_progress_refused",
+        )
+        observed = started
+        for event in events:
+            at = report_time(event.get("at"))
+            require(observed <= at <= finished, "continuation_event_timestamp_invalid")
+            observed = at
+        admission = events[-1]
+        require(
+            set(admission)
+            == {"type", "at", "tenant", "http_status", "operation_id", "busy_verified"}
+            and admission["tenant"] == self.names[0]
+            and type(admission["http_status"]) is int
+            and admission["http_status"] == 202
+            and admission["busy_verified"] is True
+            and isinstance(admission["operation_id"], str)
+            and str(UUID(admission["operation_id"])) == admission["operation_id"],
+            "continuation_admission_invalid",
+        )
+        self.record["continued_first_from"] = {
+            "path": relative,
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "run_id": prior["run_id"],
+            "source": source,
+            "started_at": prior["started_at"],
+            "finished_at": prior["finished_at"],
+            "admission": admission,
+        }
 
     def save(self, event: str, **details):
         self.record["events"].append({"type": event, "at": faults.utc_now(), **details})
@@ -548,9 +654,15 @@ class Runner:
             busy_verified=check_busy,
         )
         ready = self.wait_ready(tenant)
+        self.wait_operation(accepted["operation_id"])
+        management.request("POST", "/tenants", body=body, statuses=(409,))
+        return ready
+
+    def wait_operation(self, operation_id):
+        management = self.client("management")
 
         def completed():
-            operation = management.request("GET", f"/operations/{accepted['operation_id']}")[1]
+            operation = management.request("GET", f"/operations/{operation_id}")[1]
             require(
                 operation.get("status") not in {"failed", "interrupted"},
                 "onboarding_operation_failed",
@@ -558,7 +670,35 @@ class Runner:
             return operation.get("status") == "succeeded"
 
         until(completed, timeout=30, clock=self.clock, sleep=self.sleep)
-        management.request("POST", "/tenants", body=body, statuses=(409,))
+
+    def continue_first(self):
+        prior = self.record["continued_first_from"]
+        tenant, operation_id = self.names[0], prior["admission"]["operation_id"]
+
+        def check(value):
+            require(
+                value.get("tenant_id") == tenant
+                and value.get("operation_id") == operation_id
+                and value.get("pair_id") == "shared"
+                and value.get("isolation") == "shared",
+                "continuation_tenant_mismatch",
+            )
+            require(
+                value.get("provisioning_status") in {"pending", "running", "succeeded"}
+                and value.get("onboarding_status") in {"pending", "ready"}
+                and value.get("control_record", {}).get("status") != "failed",
+                "onboarding_operation_failed",
+            )
+
+        check(self.client("management").get(tenant))
+        self.expectations[tenant] = {
+            "version": 1,
+            "message": f"acceptance-{prior['run_id'][:8]}-{tenant}",
+        }
+        self.save("first_tenant_continued", tenant=tenant, operation_id=operation_id)
+        ready = self.wait_ready(tenant)
+        check(ready)
+        self.wait_operation(operation_id)
         return ready
 
     def applied(
@@ -702,11 +842,15 @@ class Runner:
     def scenario(self):
         first, second, isolated = self.names
         management = self.client("management")
-        for name in self.names:
+        for name in self.names[1:] if self.continue_first_from else self.names:
             management.request("GET", f"/tenants/{name}", statuses=(404,))
-        first_status = self.onboard(first, "shared", check_busy=True)
+        first_status = (
+            self.continue_first()
+            if self.continue_first_from
+            else self.onboard(first, "shared", check_busy=True)
+        )
         require(first_status["pair_id"] == "shared", "shared_pair_assignment_changed")
-        self.applied(first)
+        self.applied(first, **(self.expectations[first] if self.continue_first_from else {}))
         initial_inventory = self.pair_inventory()["shared"]
         shared_instances = self.workload_evidence("shared")
 
@@ -1104,6 +1248,8 @@ class Runner:
                 "acceptance_source_worktree_dirty",
             )
             self.record["source"] = faults.source_metadata()
+            if self.continue_first_from is not None:
+                self.load_first_admission()
             if self.mode in {"outages", "all"}:
                 require(
                     self.configuration.environment == "azure", "local_fault_strategy_unimplemented"
@@ -1140,12 +1286,15 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--mode", choices=("scenario", "outages", "all"), default="all")
+    parser.add_argument(
+        "--continue-first-from", help="Protected failed first-admission evidence only"
+    )
     parser.add_argument("--execute", action="store_true", required=True)
     args = parser.parse_args(argv)
     runner = None
     try:
         configuration = faults.Configuration(args.config)
-        runner = Runner(configuration, args.mode)
+        runner = Runner(configuration, args.mode, continue_first_from=args.continue_first_from)
         with faults.interruption_is_failure():
             runner.run()
         print(json.dumps({"outcome": "passed", "mode": args.mode, "evidence": str(runner.path)}))

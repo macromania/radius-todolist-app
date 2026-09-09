@@ -197,3 +197,15 @@ direct Azure resource writes, role delegation, or Key Vault data access to this
 identity. Keep the coordinator's existing runtime grants unchanged. The harness
 must refuse missing identity configuration rather than fall back to coordinator
 or human credentials.
+
+## D024 - Continue observation, never replay an accepted provisioning operation
+
+An exporter failure stopped the acceptance harness after its first tenant
+request had passed admission, duplicate, and busy-response checks. The runtime
+operation kept running normally. Provide a narrow, opt-in harness continuation
+from that failed evidence only: verify the original admission and current
+operation identity, observe completion, then execute the remaining scenario.
+Retain the failed record and link it from fresh evidence with both source
+commits. Never retry provisioning, reset tenant state, skip later assertions,
+or describe a continued run as an uninterrupted fresh run. This does not add
+runtime recovery or a general-purpose resumable test workflow.

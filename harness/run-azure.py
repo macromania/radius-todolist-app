@@ -62,6 +62,18 @@ def state_path(path):
     return path
 
 
+def continuation_arguments(path, mode):
+    if path is None:
+        return []
+    require(mode in {"scenario", "all"}, "continuation_requires_scenario")
+    require(
+        isinstance(path, str)
+        and re.fullmatch(r"\.state/azure/evidence/acceptance-[a-f0-9]{32}\.json", path),
+        "continuation_path_refused",
+    )
+    return ["--continue-first-from", path]
+
+
 def private_file(path, content):
     path = state_path(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -162,7 +174,7 @@ def harness_identity(config):
 
 BOOTSTRAP = r"""import fcntl, hashlib, json, os, pathlib, subprocess, sys
 root, mount = pathlib.Path("/workspace"), pathlib.Path("/bundle")
-commit, digest, mode = sys.argv[1:]
+commit, digest, mode, *continuation = sys.argv[1:]
 try:
     os.umask(0o077)
     bundle = mount / "source.bundle"
@@ -198,7 +210,7 @@ try:
     os.environ.update(EXPECTED_SOURCE_COMMIT=commit, HARNESS_LOCK_FD=str(lock),
                       PYTHONPATH=str(root / "src"))
     os.execv(sys.executable, [sys.executable, str(root / "harness/run-azure.py"),
-                             "--in-cluster", "--mode", mode, "--execute"])
+                             "--in-cluster", "--mode", mode, "--execute", *continuation])
 except Exception:
     print(json.dumps({"outcome": "failed", "mode": mode, "commit": commit,
                       "evidence": None, "error": "harness_bootstrap_failed"}))
@@ -206,7 +218,8 @@ except Exception:
 """
 
 
-def resources(config, name, bundle, commit, mode):
+def resources(config, name, bundle, commit, mode, continue_first_from=None):
+    continuation = continuation_arguments(continue_first_from, mode)
     metadata = {"namespace": NAMESPACE, "labels": LABELS}
     identity = harness_identity(config)
     bootstrap = {
@@ -281,6 +294,7 @@ def resources(config, name, bundle, commit, mode):
                                 commit,
                                 hashlib.sha256(bundle).hexdigest(),
                                 mode,
+                                *continuation,
                             ],
                             "env": [{"name": "CONFIRM_AZURE", "value": "yes"}],
                             "securityContext": {
@@ -333,7 +347,8 @@ def invoke(remote_command, *extra):
     return result
 
 
-def launch(config, name, mode, inspected, commit):
+def launch(config, name, mode, inspected, commit, continue_first_from=None):
+    continuation_arguments(continue_first_from, mode)
     require(re.fullmatch(r"demo-acceptance(?:-[a-z0-9]{1,16})?", name), "job_name_invalid")
     images = json.loads(state_path(Path(".state/azure/images.json")).read_text())
     require(inspected and images.get("content_verified") is True, "image_inspection_required")
@@ -377,7 +392,9 @@ def launch(config, name, mode, inspected, commit):
             {
                 "apiVersion": "v1",
                 "kind": "List",
-                "items": resources(config, name, bundle.read_bytes(), commit, mode),
+                "items": resources(
+                    config, name, bundle.read_bytes(), commit, mode, continue_first_from
+                ),
             }
         ),
     )
@@ -494,7 +511,8 @@ def verify_evidence(output, mode, commit, started):
     return str(evidence.relative_to(ROOT))
 
 
-def in_cluster(config, mode, commit):
+def in_cluster(config, mode, commit, continue_first_from=None):
+    continuation = continuation_arguments(continue_first_from, mode)
     require(
         ROOT == WORKSPACE and NAMESPACE_FILE.read_text().strip() == NAMESPACE,
         "in_cluster_namespace_required",
@@ -581,6 +599,7 @@ def in_cluster(config, mode, commit):
                 "--mode",
                 mode,
                 "--execute",
+                *continuation,
                 stdout=stream,
                 stderr=log_stream("scenario-errors"),
             )
@@ -624,6 +643,9 @@ def main(argv=None):
     parser.add_argument("--config", type=Path, default=ROOT / ".state/azure/provisioning.json")
     parser.add_argument("--name", default="demo-acceptance-" + uuid4().hex[:12])
     parser.add_argument("--mode", choices=("all", "scenario", "outages"), default="all")
+    parser.add_argument(
+        "--continue-first-from", help="Prior evidence path on the harness-state PVC"
+    )
     parser.add_argument("--images-inspected", action="store_true")
     parser.add_argument("--in-cluster", action="store_true")
     parser.add_argument("--execute", action="store_true", required=True)
@@ -632,11 +654,19 @@ def main(argv=None):
     commit = None
     try:
         require(os.environ.get("CONFIRM_AZURE") == "yes", "azure_confirmation_required")
+        continuation_arguments(args.continue_first_from, args.mode)
         config, commit = configuration(args.config), source_commit()
         result = (
-            in_cluster(config, args.mode, commit)
+            in_cluster(config, args.mode, commit, args.continue_first_from)
             if args.in_cluster
-            else launch(config, args.name, args.mode, args.images_inspected, commit)
+            else launch(
+                config,
+                args.name,
+                args.mode,
+                args.images_inspected,
+                commit,
+                args.continue_first_from,
+            )
         )
     except Exception as error:
         code = str(error) if isinstance(error, HarnessError) else "azure_harness_failed"

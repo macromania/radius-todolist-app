@@ -340,3 +340,21 @@ suite passed 72 tests and 35 subtests. Both shared AKS clusters subsequently
 passed real harness credential/Kubernetes access probes. Their original tenant
 operation continued into child Radius installation without restart or replay.
 The failed acceptance run remains failed; it is not relabeled as a pass.
+
+### First-admission observation continuation
+
+The opt-in harness flag `--continue-first-from` accepts only a protected failed
+record with the exact first-admission event sequence. It verifies the original
+commit timestamp, tenant/operation identity, message, and version; it never
+POSTs the first tenant again. Both later tenant absence checks and all remaining
+scenario/outage assertions still run. New evidence links the untouched failed
+record by path, hash, source commit, and admission rather than rewriting history.
+
+The retained live record is
+`acceptance-c680a8557f3b4722b01f7815ad1b644b.json`, SHA-256
+`36884b08e34c32413b449e319d8f44d9808d568d2120b6730d036bbe4448068b`.
+Its actual first admission passed HTTP 202, duplicate, and busy checks before
+the exporter stopped. The new offline harness suite passed 154 tests and 116
+subtests; independent rubber-duck and security reviews found no actionable
+issues. The walkthrough verified that the actual Git bundle includes the
+predecessor commit. Live continuation remains to be run.

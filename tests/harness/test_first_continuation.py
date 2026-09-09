@@ -1,0 +1,559 @@
+import copy
+import hashlib
+import io
+import json
+from contextlib import ExitStack, contextmanager, redirect_stdout
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+from uuid import uuid4
+
+import httpx
+import test_acceptance as base
+import test_azure_runner as azure
+
+module, faults, Error = base.runner_module, base.faults, base.Error
+
+
+class FirstContinuationTests(base.StateCase):
+    def setUp(self):
+        super().setUp()
+        self.project = self.root.resolve()
+        self.state = self.project / ".state/azure"
+        self.state.mkdir(parents=True)
+        self.config_path = self.state / "acceptance.json"
+        self.write_config()
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        for owner in (module, faults, azure.runner):
+            self.stack.enter_context(patch.object(owner, "ROOT", self.project))
+        self.old_id = "1a" * 16
+        self.relative = f".state/azure/evidence/acceptance-{self.old_id}.json"
+        self.previous = self.project / self.relative
+        self.previous.parent.mkdir(mode=0o700)
+        now = datetime.now(UTC)
+        committed, started, finished = [(now - timedelta(minutes=n)).isoformat() for n in (4, 3, 2)]
+        self.source = {"commit": "a" * 40, "committed_at": committed, "worktree_dirty": False}
+        self.current_source = {
+            **self.source,
+            "commit": "b" * 40,
+            "committed_at": (now - timedelta(minutes=1)).isoformat(),
+        }
+        self.operation = str(uuid4())
+        self.prior = {
+            "version": 1,
+            "run_id": self.old_id,
+            "mode": "all",
+            "outcome": "failed",
+            "error": "operator_interrupted",
+            "project": "radplanes",
+            "environment": "azure",
+            "started_at": started,
+            "finished_at": finished,
+            "source": self.source,
+            "events": [
+                {"type": "acceptance_started", "at": started},
+                *[
+                    {
+                        "type": "workload_image",
+                        "at": started,
+                        "slot": "management",
+                        "component": component,
+                        "pod_uid": str(uuid4()),
+                        "configured_image": self.values["images"][role],
+                        "running_image_id": self.values["images"][role],
+                        "source_hashes": {"source.py": "c" * 64},
+                    }
+                    for component, role in (
+                        ("management-api", "api"),
+                        ("provisioner", "provisioner"),
+                    )
+                ],
+                {
+                    "type": "tenant_accepted",
+                    "at": started,
+                    "tenant": "shared-a",
+                    "operation_id": self.operation,
+                    "http_status": 202,
+                    "busy_verified": True,
+                },
+            ],
+        }
+        self.write_prior()
+        self.tenants = {"shared-a": self.tenant("shared-a", self.operation, self.old_id)}
+        self.calls = []
+        self.paused = False
+        self.clients = {
+            target: module.Client(
+                "https://test.centralus.cloudapp.azure.com",
+                target + "-synthetic-key",
+                transport=httpx.MockTransport(
+                    lambda request, target=target: self.request(target, request)
+                ),
+            )
+            for target in (
+                "management",
+                "control:shared",
+                "data:shared",
+                "control:isolated-1",
+                "data:isolated-1",
+            )
+        }
+        for client in self.clients.values():
+            self.addCleanup(client.close)
+        self.apis = SimpleNamespace(
+            clients=self.clients, client=self.clients.__getitem__, close=Mock()
+        )
+        self.instances = {
+            pair: {
+                "control": {"cluster_uid": pair + "-control", "postgresql": {"host": pair + "-pg"}},
+                "data": {"cluster_uid": pair + "-data", "redis": {"host": pair + "-redis"}},
+            }
+            for pair in ("shared", "isolated-1")
+        }
+        self.inventory = {
+            pair: {
+                "control_cluster_id": pair + "-control",
+                "data_cluster_id": pair + "-data",
+            }
+            for pair in self.instances
+        }
+
+    def write_prior(self):
+        self.previous.write_text(json.dumps(self.prior, indent=2) + "\n")
+        self.previous.chmod(0o600)
+
+    def tenant(self, name, operation, run_id):
+        pair = "isolated-1" if name == "isolated-c" else "shared"
+        return {
+            "tenant_id": name,
+            "operation_id": operation,
+            "onboarding_id": str(uuid4()),
+            "isolation": "isolated" if pair != "shared" else "shared",
+            "pair_id": pair,
+            "provisioning_status": "running",
+            "onboarding_status": "ready",
+            "control_record": {
+                "status": "created",
+                "observed_revision": 1,
+                "reported_at": self.prior["started_at"],
+            },
+            "control_url": pair + "-control",
+            "data_url": pair + "-data",
+            "version": 1,
+            "message": f"acceptance-{run_id[:8]}-{name}",
+            "counter": 0,
+        }
+
+    def request(self, target, request):
+        path, method = request.url.path, request.method
+        body = json.loads(request.content) if request.content else None
+        self.calls.append((target, method, path, body))
+        if path == "/healthz":
+            return httpx.Response(200, json={"status": "ok"})
+        if request.headers.get("X-Demo-Key") != self.clients[target].key:
+            return httpx.Response(401, json={"detail": "unauthorized"})
+        if path == "/api/container-info":
+            return httpx.Response(404, json={})
+        if path == "/tenants" and method == "POST":
+            name = body["tenant_id"]
+            if name.startswith("busy-"):
+                return httpx.Response(
+                    503, json={"detail": "provisioner_busy"}, headers={"Retry-After": "5"}
+                )
+            if name in self.tenants:
+                return httpx.Response(
+                    409,
+                    json={"status_url": f"/tenants/{name}"},
+                    headers={"Location": f"/tenants/{name}"},
+                )
+            value = self.tenant(name, str(uuid4()), self.runner.run_id)
+            value["message"] = body["initial_message"]
+            self.tenants[name] = value
+            return httpx.Response(
+                202, json={"operation_id": value["operation_id"], "status_url": f"/tenants/{name}"}
+            )
+        if path.startswith("/operations/"):
+            value = next(v for v in self.tenants.values() if path.endswith(v["operation_id"]))
+            return httpx.Response(
+                200,
+                json={
+                    "status": value.get(
+                        "operation_status", "succeeded" if value.get("observed") else "running"
+                    )
+                },
+            )
+        name = path.split("/")[2]
+        if name not in self.tenants:
+            return httpx.Response(404, json={})
+        value = self.tenants[name]
+        pending = self.paused and name == "shared-b"
+        if target == "management":
+            value["observed"] = True
+            return httpx.Response(200, json=value)
+        if target.startswith("control:"):
+            if method == "PUT":
+                value["version"] += 1
+                value["message"] = body["message"]
+            return httpx.Response(
+                200,
+                json={
+                    "onboarding_id": value["onboarding_id"],
+                    "desired": {"version": value["version"], "message": value["message"]},
+                    "data_config": {
+                        "status": "pending" if pending else "applied",
+                        "last_applied_version": None if pending else value["version"],
+                        "reported_at": self.prior["started_at"],
+                    },
+                },
+            )
+        if pending:
+            return httpx.Response(404, json={})
+        if method == "POST":
+            value["counter"] += 1
+        return httpx.Response(200, json={**value, "applied_version": value["version"]})
+
+    @contextmanager
+    def pause(self, *_args, **_kwargs):
+        self.paused = True
+        try:
+            yield {"scoped": True}
+        finally:
+            self.paused = False
+
+    def exercise(self, *, continuation=True, mode="all", path=None):
+        runner_class = module.Runner
+
+        def build(*args, **kwargs):
+            self.runner = value = runner_class(
+                *args, **kwargs, apis=self.apis, clock=self.clock, sleep=self.clock.sleep
+            )
+            value.configuration.target = Mock(
+                return_value=SimpleNamespace(cluster_uid="management")
+            )
+            value.kube = Mock()
+            value.management_image = Mock()
+            value.pair_inventory = Mock(return_value=self.inventory)
+            value.workload_evidence = Mock(side_effect=self.instances.__getitem__)
+            value.check_updates_and_counters = Mock(wraps=value.check_updates_and_counters)
+            value.collect_timelines = Mock(return_value={"unchanged": True})
+            value.control_poll_observed = Mock(return_value=True)
+            value.assert_updates_survived_poll = Mock(wraps=value.assert_updates_survived_poll)
+            value.management_outage, value.control_outage = Mock(), Mock()
+            return value
+
+        def git(argv):
+            if argv[:3] == ["git", "show", "-s"]:
+                faults.require(argv[-1] == self.source["commit"], "unknown_source_commit")
+                return self.source["committed_at"]
+            self.assertEqual(argv[:2], ["git", "status"])
+            return ""
+
+        argv = ["--config", ".state/azure/acceptance.json", "--mode", mode, "--execute"]
+        if continuation:
+            argv += ["--continue-first-from", path if path is not None else self.relative]
+        self.started = datetime.now(UTC).timestamp()
+        with (
+            patch.object(module, "Runner", side_effect=build),
+            patch.object(module, "paused_reconciler", side_effect=self.pause),
+            patch.object(faults, "command", side_effect=git),
+            patch.object(faults, "source_metadata", return_value=self.current_source),
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            code = module.main(argv)
+        self.summary = json.loads(output.getvalue())
+        return code
+
+    def test_matching_all_run_continues_only_first_and_runs_remaining_scenario(self):
+        original = self.previous.read_bytes()
+        self.assertEqual(self.exercise(), 0, self.summary)
+        self.assertEqual(self.previous.read_bytes(), original)
+        self.assertEqual(self.previous.stat().st_mode & 0o777, 0o600)
+        record = json.loads(self.runner.path.read_text())
+        predecessor = record["continued_first_from"]
+        self.assertEqual(predecessor["path"], self.relative)
+        self.assertEqual(predecessor["sha256"], hashlib.sha256(original).hexdigest())
+        self.assertEqual(predecessor["source"], self.source)
+        self.assertEqual(predecessor["run_id"], self.old_id)
+        self.assertEqual(predecessor["admission"], self.prior["events"][-1])
+        self.assertEqual(record["source"], self.current_source)
+        self.assertNotEqual(record["run_id"], self.old_id)
+        accepted = [e for e in record["events"] if e["type"] == "tenant_accepted"]
+        self.assertEqual([e["tenant"] for e in accepted], ["shared-b", "isolated-c"])
+        mutations = [
+            body["tenant_id"]
+            for target, method, path, body in self.calls
+            if target == "management" and method == "POST" and path == "/tenants"
+        ]
+        self.assertEqual(mutations, ["shared-b"] * 3 + ["isolated-c"] * 3)
+        self.assertEqual(
+            self.calls[:2],
+            [
+                ("management", "GET", "/tenants/shared-b", None),
+                ("management", "GET", "/tenants/isolated-c", None),
+            ],
+        )
+        self.assertIn(("management", "GET", f"/operations/{self.operation}", None), self.calls)
+        self.assertEqual(self.runner.management_image.call_count, 2)
+        self.assertEqual(self.runner.pair_inventory.call_count, 3)
+        self.assertEqual(
+            [call.args[0] for call in self.runner.workload_evidence.call_args_list],
+            ["shared", "shared", "isolated-1"],
+        )
+        self.runner.check_updates_and_counters.assert_called_once()
+        self.runner.assert_updates_survived_poll.assert_called_once()
+        self.assertEqual(self.runner.collect_timelines.call_count, 3)
+        self.runner.management_outage.assert_called_once()
+        self.runner.control_outage.assert_called_once()
+        self.assertEqual([self.tenants[name]["counter"] for name in self.runner.names], [4, 1, 1])
+        self.assertTrue(all(v["version"] == 3 for v in self.tenants.values()))
+        self.assertIn("immediate_child_readiness_proved", [e["type"] for e in record["events"]])
+        output = self.state / "summary.json"
+        output.write_text(json.dumps(self.summary))
+        self.assertEqual(
+            azure.runner.verify_evidence(
+                output, "all", self.current_source["commit"], self.started
+            ),
+            str(self.runner.path.relative_to(self.project)),
+        )
+
+    def test_scenario_mode_continues_without_claiming_outages(self):
+        self.prior["mode"] = "scenario"
+        self.write_prior()
+        self.assertEqual(self.exercise(mode="scenario"), 0, self.summary)
+        self.runner.management_outage.assert_not_called()
+        self.runner.control_outage.assert_not_called()
+
+    def test_reported_predecessor_metadata_and_original_message_match_contract(self):
+        self.old_id = "c680a8557f3b4722b01f7815ad1b644b"
+        self.operation = "036be342-eb25-459c-97a9-1b6af2229a15"
+        self.relative = f".state/azure/evidence/acceptance-{self.old_id}.json"
+        self.previous = self.project / self.relative
+        self.source = {
+            "commit": "788cbda7684c7466dc945e2b3fd130d94862dc13",
+            "committed_at": "2026-09-09T21:49:09+04:00",
+            "worktree_dirty": False,
+        }
+        self.prior.update(
+            run_id=self.old_id,
+            source=self.source,
+            started_at="2026-09-09T17:52:35.874258+00:00",
+            finished_at="2026-09-09T17:58:15.504750+00:00",
+        )
+        # The supplied summary does not include raw workload probes or their timestamps.
+        for event in self.prior["events"][:-1]:
+            event["at"] = self.prior["started_at"]
+        self.prior["events"][-1].update(
+            at="2026-09-09T17:53:02.951206+00:00", operation_id=self.operation
+        )
+        self.write_prior()
+        self.tenants["shared-a"] = self.tenant("shared-a", self.operation, self.old_id)
+        self.assertEqual(self.tenants["shared-a"]["message"], "acceptance-c680a855-shared-a")
+        self.assertEqual(self.exercise(), 0, self.summary)
+        prior = self.runner.record["continued_first_from"]
+        self.assertEqual(prior["source"], self.source)
+        self.assertEqual(prior["admission"], self.prior["events"][-1])
+        self.assertIn(("management", "GET", f"/operations/{self.operation}", None), self.calls)
+
+    def test_existing_first_waits_for_ready_and_operation_completion_without_replay(self):
+        request = self.request
+        reads, operations = 0, 0
+
+        def pending(target, message):
+            nonlocal reads, operations
+            response = request(target, message)
+            if target == "management" and message.url.path == "/tenants/shared-a":
+                reads += 1
+                if reads <= 2:
+                    return httpx.Response(
+                        200,
+                        json={
+                            **response.json(),
+                            "onboarding_status": "pending",
+                            "control_record": {"status": "pending"},
+                        },
+                    )
+            if message.url.path == f"/operations/{self.operation}":
+                operations += 1
+                if operations == 1:
+                    return httpx.Response(200, json={"status": "running"})
+            return response
+
+        with patch.object(self, "request", side_effect=pending):
+            self.assertEqual(self.exercise(), 0, self.summary)
+        self.assertGreaterEqual(reads, 3)
+        self.assertEqual(operations, 2)
+        self.assertFalse(
+            any(
+                target == "management"
+                and method == "POST"
+                and (body or {}).get("tenant_id") == "shared-a"
+                for target, method, _, body in self.calls
+            )
+        )
+
+    def test_colliding_output_never_overwrites_original_failed_evidence(self):
+        original = self.previous.read_bytes()
+        with patch.object(module, "uuid4", return_value=SimpleNamespace(hex=self.old_id)):
+            self.assertEqual(self.exercise(), 1)
+        self.assertEqual(self.previous.read_bytes(), original)
+        self.assertEqual(self.calls, [])
+
+    def test_default_still_demands_fresh_first_and_performs_original_admission(self):
+        self.tenants.clear()
+        self.assertEqual(self.exercise(continuation=False), 0, self.summary)
+        self.assertNotIn("continued_first_from", self.runner.record)
+        first = next(e for e in self.runner.record["events"] if e["type"] == "tenant_accepted")
+        self.assertEqual(first["tenant"], "shared-a")
+        self.assertEqual(first["http_status"], 202)
+        self.assertIs(first["busy_verified"], True)
+        self.assertTrue(
+            any(
+                (body or {}).get("tenant_id", "").startswith("busy-")
+                for _, method, _, body in self.calls
+                if method == "POST"
+            )
+        )
+
+    def test_default_does_not_implicitly_continue_an_existing_first(self):
+        self.assertEqual(self.exercise(continuation=False), 1)
+        self.assertFalse(any(method != "GET" for _, method, _, _ in self.calls))
+
+    def test_tampered_or_foreign_prior_fails_before_any_api_call(self):
+        cases = [
+            (("version",), 2),
+            (("version",), True),
+            (("project",), "foreign"),
+            (("environment",), "local"),
+            (("mode",), "scenario"),
+            (("outcome",), "passed"),
+            (("outcome",), "running"),
+            (("run_id",), "2b" * 16),
+            (("source", "commit"), "bad"),
+            (("source", "commit"), "c" * 40),
+            (("source", "worktree_dirty"), True),
+            (("source", "committed_at"), None),
+            (("source", "committed_at"), "2000-01-01T00:00:00+00:00"),
+            (("started_at",), "2000-01-01T00:00:00+00:00"),
+            (("finished_at",), "2999-01-01T00:00:00+00:00"),
+            (("events", 0, "at"), "2000-01-01T00:00:00"),
+            (("events", 2, "at"), "2000-01-01T00:00:00+00:00"),
+            (("events", 1, "slot"), "foreign"),
+            (("events", 3, "tenant"), "shared-b"),
+            (("events", 3, "operation_id"), "invalid"),
+            (("events", 3, "http_status"), 409),
+            (("events", 3, "busy_verified"), False),
+            (("events", 3, "unexpected"), "reject"),
+        ]
+        original = copy.deepcopy(self.prior)
+        for keys, change in cases:
+            with self.subTest(keys=keys, change=change):
+                self.prior = copy.deepcopy(original)
+                value = self.prior
+                for key in keys[:-1]:
+                    value = value[key]
+                value[keys[-1]] = change
+                self.write_prior()
+                before = self.previous.read_bytes()
+                self.assertEqual(self.exercise(), 1)
+                self.assertEqual(self.previous.read_bytes(), before)
+                self.assertEqual(self.calls, [])
+
+    def test_progress_missing_admission_and_unknown_admission_shape_are_refused(self):
+        original = copy.deepcopy(self.prior["events"])
+        events = [
+            original[:-1],
+            [],
+            [*original, original[-1]],
+            [*original[:-1], {k: v for k, v in original[-1].items() if k != "busy_verified"}],
+        ] + [
+            [*original, {"type": name, "at": self.prior["started_at"]}]
+            for name in (
+                "management_ready",
+                "data_applied",
+                "data_reconciler_paused",
+                "immediate_child_readiness_proved",
+                "pair_isolation",
+                "configuration_counter_and_auth_checks",
+                "complete_paginated_timelines",
+                "data_continuity",
+                "management_link_recovered",
+                "control_link_recovered_latest_only",
+                "first_tenant_continued",
+            )
+        ]
+        for value in events:
+            with self.subTest(events=value):
+                self.prior["events"] = value
+                self.write_prior()
+                self.assertEqual(self.exercise(), 1)
+                self.assertEqual(self.calls, [])
+
+    def test_paths_permissions_size_and_outages_fail_closed(self):
+        for path in (
+            "/" + self.relative,
+            "../" + self.relative,
+            "./" + self.relative,
+            self.relative.replace("evidence/", "evidence/../evidence/"),
+            self.relative.replace(self.old_id, "x" * 32),
+            self.relative.replace(self.old_id, "a" * 33),
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(self.exercise(path=path), 1)
+        self.assertEqual(self.exercise(mode="outages"), 1)
+        self.previous.chmod(0o644)
+        self.assertEqual(self.exercise(), 1)
+        self.previous.chmod(0o600)
+        self.previous.write_text(
+            json.dumps(self.prior).replace(
+                '"outcome": "failed"', '"outcome": "passed", "outcome": "failed"'
+            )
+        )
+        self.assertEqual(self.exercise(), 1)
+        self.previous.write_bytes(b" " * 2_000_001)
+        self.assertEqual(self.exercise(), 1)
+        self.previous.write_bytes(b"{invalid")
+        self.assertEqual(self.exercise(), 1)
+        self.previous.unlink()
+        self.assertEqual(self.exercise(), 1)
+        outside = self.project / "foreign.json"
+        outside.write_text(json.dumps(self.prior))
+        outside.chmod(0o600)
+        self.previous.symlink_to(outside)
+        self.assertEqual(self.exercise(), 1)
+        self.assertEqual(self.calls, [])
+
+    def test_wrong_current_operation_pair_status_or_changed_config_never_admits_second(self):
+        original = copy.deepcopy(self.tenants["shared-a"])
+        for key, value in (
+            ("operation_id", str(uuid4())),
+            ("tenant_id", "foreign"),
+            ("pair_id", "isolated-1"),
+            ("isolation", "isolated"),
+            ("provisioning_status", "failed"),
+            ("provisioning_status", "interrupted"),
+            ("operation_status", "failed"),
+            ("operation_status", "interrupted"),
+            ("version", 2),
+            ("message", "changed-after-admission"),
+        ):
+            with self.subTest(key=key, value=value):
+                self.tenants["shared-a"] = {**original, key: value}
+                self.calls.clear()
+                self.assertEqual(self.exercise(), 1)
+                self.assertFalse(any(method != "GET" for _, method, _, _ in self.calls))
+                self.runner.check_updates_and_counters.assert_not_called()
+                self.runner.management_outage.assert_not_called()
+
+    def test_existing_remaining_or_missing_first_is_not_skipped(self):
+        original = copy.deepcopy(self.tenants)
+        for name in ("shared-b", "isolated-c", "missing-first"):
+            with self.subTest(name=name):
+                self.tenants = copy.deepcopy(original)
+                if name == "missing-first":
+                    self.tenants.clear()
+                else:
+                    self.tenants[name] = self.tenant(name, str(uuid4()), self.old_id)
+                self.calls.clear()
+                self.assertEqual(self.exercise(), 1)
+                self.assertFalse(any(method != "GET" for _, method, _, _ in self.calls))
