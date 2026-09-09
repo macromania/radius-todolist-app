@@ -1192,7 +1192,7 @@ class Exporter:
         return handle
 
     def run(self, *, watch: bool, timeout=7200, emit=print):
-        require(1 <= timeout <= 7200, "invalid_export_timeout")
+        require(1 <= timeout <= 10800, "invalid_export_timeout")
         self.deadline = self.clock() + timeout
         lock = self.take_lock()
         try:

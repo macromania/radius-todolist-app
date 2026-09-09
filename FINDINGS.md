@@ -271,3 +271,14 @@ context, CA and allowed-exec validation before reuse. Nested export paths
 round-trip through the cleanup reader. Exact role-GUID and interruption tests
 also pass. The final focused suite passed 64 tests and 15 subtests, and both
 final fix reviews were clean. Live end-of-demo teardown remains unproven.
+
+### In-cluster harness source verification
+
+The optional Azure harness launcher uses the existing inspected provisioner
+image, an actual clean-HEAD Git bundle with a checksum, and a separate
+`harness-state` volume. It runs the existing exporter and scenario/fault runner;
+it does not introduce another application plane or copy operator database
+credentials. The exporter now accepts the launcher's bounded three-hour window.
+Child diagnostics persist in private files rather than being discarded.
+The complete offline harness suite passed 134 tests and 53 subtests, and both
+source reviews were clean. First live scenario execution is still pending.

@@ -466,6 +466,14 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(targets["shared-data"]["parent"]["allowed_cidrs"], ["10.64.49.0/27"])
         self.assertEqual(targets["isolated-1-data"]["parent"]["allowed_cidrs"], ["10.64.51.0/27"])
 
+    def test_cloud_harness_three_hour_timeout_is_supported(self):
+        self.assertEqual(self.exporter().run(watch=False, timeout=10800, emit=lambda _: None), 0)
+
+    def test_timeout_above_cloud_harness_limit_is_rejected(self):
+        with self.assertRaisesRegex(export_module.ExportError, "invalid_export_timeout"):
+            self.exporter().run(watch=False, timeout=10801, emit=lambda _: None)
+        self.assertEqual(self.platform.calls, [])
+
     def test_commands_are_scoped_operator_reads_not_resource_creation(self):
         self.exporter().run(watch=False, emit=lambda _: None)
         for args in self.platform.calls:

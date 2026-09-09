@@ -120,6 +120,17 @@ make export-state
 
 State export must be repeated as child endpoints become available. See the
 [harness contract](tests/harness/README.md) before running acceptance or faults.
+If the operator cannot reach the AKS API directly, the same harness can run in
+a management-cluster Job using committed source and the inspected tool image:
+
+```sh
+CONFIRM_AZURE=yes uv run python harness/run-azure.py --images-inspected --mode all --execute
+```
+
+This submits a Job, not a success result. Its separate `harness-state` volume
+keeps evidence and exported API access; it does not contain the provisioner's
+database credentials or add another application plane.
+
 Each isolated tenant creates another two clusters, two gateways, PostgreSQL,
 and Redis. Synthetic data and trusted operators only: demo keys are not
 production tenant authentication or spending controls.
