@@ -55,3 +55,13 @@ with their managed identity and label their pods for the AKS workload-identity
 webhook. Verify projected identity configuration in the running pods. The
 follow-up on radius-project/radius#12278 identifies this as the missing setup;
 do not fall back silently to a long-lived service-principal secret.
+
+## D008 - Central US after a real regional restriction
+
+Azure PostgreSQL capability queries rejected provisioning in both `eastus2` and
+`westus2` for this subscription, returning no versions or editions. Use
+`centralus`, where PostgreSQL 16/17/18 and the chosen General Purpose SKUs are
+available, AKS 1.35.7 is supported, Managed Redis is listed, and DSv5/regional
+capacity is 100 cores with zero in use. Preflight now rejects an empty PostgreSQL
+capability result instead of deploying into a known-restricted region.
+This supersedes D001's initial region while preserving its subscription.

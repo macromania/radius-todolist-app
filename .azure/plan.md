@@ -11,8 +11,9 @@ This is a resource tag, not permission to disable Azure Policy or other controls
 
 Use the authenticated subscription
 `a3ed6c04-563f-4855-ac84-bdf1e5fbc3fc`
-(`MCAPS-Hybrid-REQ-38794-2022-mahmutcanga`), region `eastus2`, matching the
-approved plan and existing repository. No budget ceiling was requested.
+(`MCAPS-Hybrid-REQ-38794-2022-mahmutcanga`), region `centralus`. Live preflight
+found PostgreSQL subscription restrictions in `eastus2` and `westus2`; Central US
+supports the required PostgreSQL, AKS, and Redis services. No budget ceiling was requested.
 Use explicit subscription/context flags, never change global defaults.
 
 The detailed approved ExecPlan is in this session:

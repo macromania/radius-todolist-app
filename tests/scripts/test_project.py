@@ -34,6 +34,8 @@ class PreflightTests(unittest.TestCase):
                 ])
             if args[:3] == ["az", "group", "list"]:
                 return "[]"
+            if args[:3] == ["az", "postgres", "flexible-server"]:
+                return '[{"supportedServerEditions":[{"name":"GeneralPurpose"}]}]'
             return ""
 
         connection = MagicMock()
@@ -74,6 +76,28 @@ class PreflightTests(unittest.TestCase):
                 project.operator_identity()
         self.assertEqual(connection.request.call_count, 1)
         connection.close.assert_called_once()
+
+    def test_restricted_postgres_fails_before_persisting_deployment_context(self):
+        replies = [
+            {"id": project.SUBSCRIPTION, "tenantId": "11111111-1111-1111-1111-111111111111"},
+            [
+                {"name": {"value": name}, "currentValue": 0, "limit": 100}
+                for name in ("cores", "standardDSv5Family")
+            ],
+            [{"supportedServerEditions": [], "reason": "Subscriptions are restricted"}],
+        ]
+        with (
+            patch.object(project, "az", side_effect=replies),
+            patch.object(project, "operator_identity",
+                         return_value={"id": "22222222-2222-2222-2222-222222222222"}),
+            patch.object(project, "run", return_value="8.8.8.8"),
+            patch.object(project.shutil, "which", return_value="/tool"),
+            patch.object(project.Path, "is_file", return_value=True),
+            patch.object(project, "write_json") as write,
+        ):
+            with self.assertRaisesRegex(project.CommandError, "PostgreSQL provisioning is unavailable"):
+                project.preflight("azure")
+        write.assert_not_called()
 
     def test_azure_mutation_requires_explicit_confirmation(self):
         with patch.dict(project.os.environ, {}, clear=True):

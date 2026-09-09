@@ -30,6 +30,7 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | ID | Phase | Severity | File | Lines | Finding | Status |
 |---|---|---|---|---|---|---|
 | F001 | 0 | Medium correctness | `scripts/project.py` | 84-90 (initial) | Operator Graph lookup used the global tenant instead of the project subscription | Resolved; live preflight, 4 tests, rubber-duck and security fix reviews passed |
+| F002 | 1 | Deployment blocker | Azure PostgreSQL regional capability | n/a | Subscription cannot provision PostgreSQL in East US 2 or West US 2 | Resolved for preflight: Central US capability checks and both fix reviews passed; actual provisioning remains a phase gate |
 
 F001 first correction (`az rest --subscription`) failed the fix walkthrough:
 Azure CLI's Graph request path can still acquire the default tenant's token.
@@ -38,6 +39,11 @@ The final correction explicitly acquires a subscription-scoped Graph token with
 Graph `/me`, without redirects or token logging. Regression tests inspect every
 Azure command from the actual preflight path, the token passed to Graph, and
 redirect rejection. No global `az account set` is used.
+
+F002 verification: the restricted-region regression rejects an empty edition
+list before writing deployment context. The real Central US preflight passed;
+the fix-specific rubber-duck and security reviews found no remaining issue.
+This does not claim that PostgreSQL has already been provisioned.
 
 ## Accepted scope limitations
 

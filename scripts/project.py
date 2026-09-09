@@ -19,7 +19,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT = "radplanes"
 SUBSCRIPTION = "a3ed6c04-563f-4855-ac84-bdf1e5fbc3fc"
-LOCATION = "eastus2"
+LOCATION = "centralus"
 BICEP = Path.home() / ".rad/bin/bicep"
 TAGS = {
     "project": PROJECT,
@@ -125,6 +125,12 @@ def preflight(environment: str) -> None:
     for name in ("cores", "standardDSv5Family"):
         if name not in capacity or capacity[name]["limit"] - capacity[name]["current"] < 20:
             raise CommandError(f"Insufficient or unknown compute capacity for five D4s_v5 nodes: {name}")
+    postgres = az("postgres", "flexible-server", "list-skus", "--location", LOCATION)
+    if not any(item.get("supportedServerEditions") for item in postgres):
+        raise CommandError(
+            f"PostgreSQL provisioning is unavailable in {LOCATION}: "
+            + "; ".join(item.get("reason") or "No editions returned" for item in postgres)
+        )
     groups = az("group", "list", "--query",
                 "[?starts_with(name, 'rg-radplanes-')].{name:name,tags:tags}")
     for group in groups:
@@ -136,6 +142,7 @@ def preflight(environment: str) -> None:
         "operator_object_id": operator, "operator_ip": public_ip,
         "kubernetes_version": "1.35.7", "node_vm_size": "Standard_D4s_v5",
         "tags": TAGS, "capacity": capacity,
+        "postgres_available": True,
     }
     write_json(state_dir(environment) / "context.json", context)
     print(json.dumps(context, indent=2))
