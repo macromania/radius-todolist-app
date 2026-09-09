@@ -523,6 +523,17 @@ class CleanupTests(unittest.TestCase):
             self.engine(radius_only=True).clean()
         self.assertFalse(self.mutations())
 
+    def test_radius_only_reports_but_does_not_inspect_node_groups_without_live_aks(self):
+        slot = "shared-data"
+        allocation = self.manifest.allocations[slot]
+        self.commands.clusters.pop(slot)
+        self.commands.resources[allocation["appResourceGroup"]] = []
+        self.commands.fail = lambda args: allocation["nodeResourceGroup"] in args
+        result = self.engine(radius_only=True, execute=False).clean()
+        self.assertEqual(result["uninspectedManagedNodeGroups"], [allocation["nodeResourceGroup"]])
+        self.assertFalse(self.mutations())
+        self.assertIn(allocation["nodeResourceGroup"], self.commands.groups)
+
     def test_radius_only_is_not_a_provider_fallback_or_a_full_clean_claim(self):
         with self.assertRaisesRegex(cleanup.CleanupError, "modes cannot be combined"):
             self.engine(radius_only=True, provider_only=True)

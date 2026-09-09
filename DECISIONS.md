@@ -232,6 +232,8 @@ the bootstrap foundation for a fresh run. `clean-azure.py --radius-only` has an
 explicit partial result and keeps credentials/evidence. It never deletes Azure
 groups or role assignments directly, so scoped in-cluster operator access is
 enough. Full teardown keeps its role checks and remains a separate acceptance
-gate. Managed node-resource ownership checks remain mandatory in both modes;
-give a scoped operator explicit read access to those existing groups rather
-than skipping them.
+gate. Managed node-resource ownership checks remain mandatory for every live
+AKS in the partial path; give the scoped operator read access to those groups.
+Without a live AKS, Radius-only cleanup cannot delete the corresponding node
+group: report it as uninspected, never absent. Full cleanup still checks all
+allocated groups, including orphans.

@@ -72,6 +72,7 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F043 | 4 | High correctness | `harness/export-state.py` | optional AKS lookup | AKS returns NotFound during creation as well as ResourceNotFound; exporter treated the former as fatal | Exact optional-lookup alternative added; run-path regression, rubber-duck pass, and security fix review passed |
 | F044 | 3 | Deployment blocker | `src/plane_demo/management/providers/azure.py` | data prerequisites | Bootstrap ConfigMap Roles collide with Radius's same-name generated container Roles | Distinct -configmaps Role/Binding names preserve exact subjects/verbs; run-path tests and both fix reviews pass; fresh deployment required |
 | F045 | 3 | Deployment blocker | `infra/radius/recipes/azure/redis.bicep` | existing endpointNic | Radius reads the declared existing NIC before the private endpoint creates it | Dependency added to the existing NIC itself, not only its tag extension; emitted-template test and both fix reviews pass; fresh Recipe execution required |
+| F046 | reset | Correctness/access blocker | `operations/clean-azure.py` | Radius-only group inventory | Partial reset requests Reader permission on node groups whose AKS was never created | Inspect every live AKS node group before deletion; report other node groups as uninspected and untouched; full cleanup unchanged; both fix reviews and regressions pass |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -428,3 +429,12 @@ target rather than only the executable; permission failures remain fatal.
 The direct walkthrough and independent security fix review were clean, and
 48 cleanup tests plus 15 subtests passed. The read-only preview must pass
 before executing the reset; no access failure is treated as absence.
+
+The scoped failure was a HEAD request for the never-created isolated-control
+node group. The operator separately confirmed both isolated node groups absent.
+F046 now discovers live AKS first in Radius-only mode, checks every live cluster's
+managed node-group ownership, and explicitly reports node groups without a live
+AKS as uninspected/untouched. It does not interpret `Forbidden` as absence.
+Full cleanup still checks every allocated node group and role. Both fix reviews
+were clean, and 65 cleanup/export tests plus 40 subtests passed. A renewed live
+preview is required before deletion.

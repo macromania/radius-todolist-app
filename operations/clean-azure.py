@@ -687,12 +687,24 @@ class Cleanup:
 
     def clean(self) -> dict:
         self.unexpected_resources()
-        groups = {name: self.group(name) for name in self.manifest.groups}
+        node_groups = {item["nodeResourceGroup"] for item in self.manifest.allocations.values()}
+        groups = {
+            name: self.group(name)
+            for name in self.manifest.groups
+            if not self.radius_only or name not in node_groups
+        }
         if not self.radius_only:
             self.role_state()  # Validate every custom scope before any mutation.
         clusters = self.clusters(groups)
+        uninspected_node_groups = set()
         if self.radius_only:
             require("management" in clusters, "Radius-only cleanup requires management Radius")
+            live_node_groups = {
+                self.manifest.allocations[slot]["nodeResourceGroup"] for slot in clusters
+            }
+            for name in sorted(live_node_groups):
+                require(self.group(name) is not None, "Live AKS managed node group is missing")
+            uninspected_node_groups = node_groups - live_node_groups
         if any(value is not None for value in groups.values()) and not self.provider_only:
             require(
                 "management" in clusters, "Management Radius is unavailable; review --provider-only"
@@ -804,6 +816,7 @@ class Cleanup:
             return {
                 "status": "radius_resources_removed" if self.execute else "planned",
                 "foundationRetained": True,
+                "uninspectedManagedNodeGroups": sorted(uninspected_node_groups),
                 "steps": self.steps,
             }
         for slot in self.manifest.children:

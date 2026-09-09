@@ -202,10 +202,15 @@ registry, network, and certificate vault remain.
 
 This mode makes no direct Azure mutations. It does not inspect custom role
 assignments because it never modifies them; normal full cleanup retains those
-checks. Resource-group ownership checks, including managed node-group contents,
-remain mandatory. A scoped in-cluster operator needs Reader on all owned groups
-(including the existing managed node groups) and AKS cluster access, without
-Azure delete or role-delegation grants. It still needs exported targets for every live
+checks. Resource-group ownership checks remain mandatory, including the managed
+node-group contents of every live AKS cluster before any deletion. Node groups
+without a live AKS are neither inspected nor deleted in this mode; they are
+listed in `uninspectedManagedNodeGroups`, not asserted absent. Normal full
+cleanup still checks every allocated group, including orphaned node groups.
+This avoids requesting permissions on node groups not yet created by AKS.
+A scoped in-cluster operator needs Reader on all app/cluster/platform groups
+and live AKS node groups, plus AKS cluster access, without Azure delete or
+role-delegation grants. It still needs exported targets for every live
 cluster. The mode neither installs a transport nor copies human tokens into
 Pods.
 
