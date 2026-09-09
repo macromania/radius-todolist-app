@@ -50,16 +50,20 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F019 | 3 | High correctness | `src/plane_demo/providers/azure.py` | 932-936 (initial) | Management deployment omitted provisioner managed-identity client ID | Corrected and fix-reviewed; current coordinator tests pass |
 | F020 | 3 | Medium correctness | `src/plane_demo/providers/azure.py` | 678-687 (initial) | Incomplete PostgreSQL Recipe state could be replayed before intent persisted | Pre-submission intent/refusal implemented and fix-reviewed; current coordinator tests pass |
 | F021 | 3 | Medium correctness | `src/plane_demo/provisioning.py` | 95-127 (initial) | Malformed operator network fields were passed to infrastructure | Parsed IPv4/CIDR validation implemented and fix-reviewed; current coordinator tests pass |
-| F022 | 4 | Medium security | `scripts/fault-parent-link.py` | 76-79, 127-140 (initial) | Caller working directory and arbitrary project identity defined the mutation boundary | Acceptance agent fixing immutable repository/project scope |
-| F023 | 4 | Medium correctness | `scripts/test-e2e.py` | 623-646 (initial) | Ignored message updates or reset counters could pass acceptance | Acceptance agent adding value/counter assertions |
-| F024 | 4 | Medium correctness | `scripts/test-e2e.py` | 471-478 (initial) | Stale applied version or missing report time could pass | Acceptance agent checking exact child report |
-| F025 | 4 | Medium correctness | `scripts/test-e2e.py` | 666-680 (initial) | Empty control timelines could pass | Acceptance agent requiring expected state-change/report events |
-| F026 | 4 | Medium correctness | `scripts/test-e2e.py`, `scripts/fault-parent-link.py` | recovery deadline (initial) | Cleanup time was excluded from catch-up timing | Acceptance agent using one recovery deadline |
-| F027 | 4 | Medium correctness | `scripts/test-e2e.py` | provenance checks (initial) | Coordinator code and replacement data pod omitted from source verification | Acceptance agent extending actual image/source checks |
+| F022 | 4 | Medium security | `scripts/fault-parent-link.py` | 76-79, 127-140 (initial) | Caller working directory and arbitrary project identity defined the mutation boundary | Fixed and independently reviewed; offline harness tests pass, live acceptance pending |
+| F023 | 4 | Medium correctness | `scripts/test-e2e.py` | 623-646 (initial) | Ignored message updates or reset counters could pass acceptance | Exact values/counters asserted; fix-reviewed and offline-tested |
+| F024 | 4 | Medium correctness | `scripts/test-e2e.py` | 471-478 (initial) | Stale applied version or missing report time could pass | Exact current child report checked; fix-reviewed and offline-tested |
+| F025 | 4 | Medium correctness | `scripts/test-e2e.py` | 666-680 (initial) | Empty control timelines could pass | Required events checked while allowing skipped intermediate versions; fix-reviewed |
+| F026 | 4 | Medium correctness | `scripts/test-e2e.py`, `scripts/fault-parent-link.py` | recovery deadline (initial) | Cleanup time was excluded from catch-up timing | Deadline includes final cleanup/recording; late standalone run fails; final fix reviews and 88 offline tests pass |
+| F027 | 4 | Medium correctness | `scripts/test-e2e.py` | provenance checks (initial) | Coordinator code and replacement data pod omitted from source verification | Provenance extended to coordinator and replacement pod; fix-reviewed |
 | F028 | 3 | High correctness | `containers/provisioner/Dockerfile` | tool runtime check | Bicep binary cannot start without ICU on the slim base image | Resolved: libicu72, real Bicep startup/build and both fix reviews pass |
 | F029 | 3 | High correctness | `containers/provisioner/*requirements*`, `azure-cli.txt` | dependency resolution | Certificate overlay upgraded urllib3 beyond Kubernetes support, and macOS resolution omitted Linux distro dependency | Resolved: Linux/API-constrained lockfiles, actual tool checks and compatible package checks in ACR build, both fix reviews pass |
 | F030 | 1 | Deployment blocker | Application Gateway / private Key Vault integration | live HTTPS update | App Gateway cannot access the issued certificate reference despite scoped identity grants | Resolved: documented trusted-service network exception, both fix reviews, App Gateway Succeeded and normally verified HTTPS request passed |
 | F031 | 3 | High correctness | Radius workspace creation under restricted runtime identity | live | Helm installation check needs Secret-list permission that the runtime identity intentionally lacks | Known workspace + actual Radius API validation implemented and fix-reviewed; latest full coordinator suite passes |
+| F033 | 3 | High correctness | `src/plane_demo/providers/commands.py` | failed-command diagnostics | Radius reports deployment errors on stdout; stderr-only logging hid the cause | Added bounded redacted stdout with a regression test; fix reviews pending |
+| F034 | 4 | Medium security/correctness | `scripts/export-state.py` | watch ownership cache | Cached trust decisions could miss changed cluster/gateway ownership | Fresh ownership checks every pass; final fix reviews and offline regressions pass |
+| F035 | 3 | High correctness | `infra/radius/apps/workload.bicep` | worker/base serialization | Workers emitted forbidden livenessProbe:null; paired base Deployment omitted its ServiceAccount name | Omit optional probe and match base ServiceAccount; live worker deployment and compiled regression pass; fix reviews pending |
+| F036 | 3 | High correctness | workload and operator Pod security contexts | real PVC remount | Default fsGroup recursion changed private credentials from 0600 to 0660, preventing restart | OnRootMismatch added; explicit repair and second real remount preserve 0600; strict loader retained; fix reviews pending |
 
 A suspected F032 in-cluster context override was withdrawn after tracing the
 actual CLI call path. The generic helper prefers in-cluster credentials, but
@@ -157,8 +161,10 @@ provisioning recovery are out of scope.
 
 ## Phase 4 - Acceptance tooling source review
 
-The initial acceptance/fault tooling passed 36 offline tests. It has not yet
-run live faults. Source reviews identified F022-F027, now being corrected.
+The acceptance/fault tooling now passes 88 offline tests. It has not yet
+run live faults. Source reviews and subsequent fix reviews covered F022-F027
+and F034; final walkthrough/security reviews found no remaining issue in those
+corrections.
 The walkthrough additionally suggested restarting the data API during the
 management outage. That is not an unmet requirement: the approved plan requires
 that restart during the control-source outage only, which the runner already
@@ -171,3 +177,18 @@ and security review. The walkthrough caught a stale mocked response in the
 F031 test while that fixture was being updated. A fresh parent run of the
 complete current coordinator suite passed 117 tests. The deployed public
 onboarding path remains the next gate; mocked command tests are not that proof.
+
+Live authorization checks passed using verified workload-identity principals:
+the coordinator received Azure `403 AuthorizationFailed` for an AKS write,
+and both coordinator and management Radius received the same denial for role
+assignment writes. Probe bodies deliberately omitted required resource fields;
+no probe resource or assignment was created. The actual project resource-tag
+audit also found no resource missing `SecurityControl=Ignore`.
+
+## Layout checkpoint
+
+The user resumed the approved implementation on 2026-09-09 and deferred deeper
+logic/SQL simplification until end-to-end proof. A layout-only pass is separating
+runtime plane code, platform operations, image packaging, and the demo harness.
+Historical finding paths above refer to the files at discovery time; they are
+not rewritten to suggest those reviews ran against a later layout.
