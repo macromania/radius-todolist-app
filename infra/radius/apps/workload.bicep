@@ -85,6 +85,7 @@ resource workload 'Applications.Core/containers@2023-10-01-preview' = {
         labels: {
           'azure.workload.identity/use': workloadIdentity ? 'true' : 'false'
           'plane-demo/component': name
+          'plane-demo/project': 'radplanes'
         }
       }
     ]

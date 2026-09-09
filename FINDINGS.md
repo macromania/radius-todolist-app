@@ -46,10 +46,10 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F015 | 1 | High correctness | `scripts/install-radius.py` / Radius workspace loader | live | Radius workspace enumeration ignores KUBECONFIG and reads HOME/.kube/config | Resolved: per-cluster HOME, actual workspace/credential registration and identity verification, both fix reviews pass |
 | F016 | 1 | High correctness | `infra/radius/environments/project-azure.bicep` | live | Azure provider credentials do not automatically authenticate private Recipe downloads | Resolved: documented WI registry SecretStore, real download/deploy and both fix reviews pass |
 | F017 | 1 | Deployment blocker | `infra/radius/recipes/azure/cluster.bicep` | live | Cross-resource-group nested Azure modules fail in Radius deployment-engine evaluation | Resolved: flat Recipe/per-slot scope, both fix reviews, actual AKS creation by Radius identity, child Radius installation and HTTP workload proof passed |
-| F018 | 3 | High correctness | `src/plane_demo/providers/azure.py` | 374-380 (initial) | Environment registration omitted required private-registry authentication inputs | Provisioner agent correcting |
-| F019 | 3 | High correctness | `src/plane_demo/providers/azure.py` | 932-936 (initial) | Management deployment omitted provisioner managed-identity client ID | Provisioner agent correcting |
-| F020 | 3 | Medium correctness | `src/plane_demo/providers/azure.py` | 678-687 (initial) | Incomplete PostgreSQL Recipe state could be replayed before intent persisted | Provisioner agent adding pre-submission intent and explicit refusal |
-| F021 | 3 | Medium correctness | `src/plane_demo/provisioning.py` | 95-127 (initial) | Malformed operator network fields were passed to infrastructure | Provisioner agent adding parsed CIDR/IP validation |
+| F018 | 3 | High correctness | `src/plane_demo/providers/azure.py` | 374-380 (initial) | Environment registration omitted required private-registry authentication inputs | Corrected and fix-reviewed; included in current 117 passing coordinator tests; full onboarding pending |
+| F019 | 3 | High correctness | `src/plane_demo/providers/azure.py` | 932-936 (initial) | Management deployment omitted provisioner managed-identity client ID | Corrected and fix-reviewed; current coordinator tests pass |
+| F020 | 3 | Medium correctness | `src/plane_demo/providers/azure.py` | 678-687 (initial) | Incomplete PostgreSQL Recipe state could be replayed before intent persisted | Pre-submission intent/refusal implemented and fix-reviewed; current coordinator tests pass |
+| F021 | 3 | Medium correctness | `src/plane_demo/provisioning.py` | 95-127 (initial) | Malformed operator network fields were passed to infrastructure | Parsed IPv4/CIDR validation implemented and fix-reviewed; current coordinator tests pass |
 | F022 | 4 | Medium security | `scripts/fault-parent-link.py` | 76-79, 127-140 (initial) | Caller working directory and arbitrary project identity defined the mutation boundary | Acceptance agent fixing immutable repository/project scope |
 | F023 | 4 | Medium correctness | `scripts/test-e2e.py` | 623-646 (initial) | Ignored message updates or reset counters could pass acceptance | Acceptance agent adding value/counter assertions |
 | F024 | 4 | Medium correctness | `scripts/test-e2e.py` | 471-478 (initial) | Stale applied version or missing report time could pass | Acceptance agent checking exact child report |
@@ -59,7 +59,7 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F028 | 3 | High correctness | `containers/provisioner/Dockerfile` | tool runtime check | Bicep binary cannot start without ICU on the slim base image | Resolved: libicu72, real Bicep startup/build and both fix reviews pass |
 | F029 | 3 | High correctness | `containers/provisioner/*requirements*`, `azure-cli.txt` | dependency resolution | Certificate overlay upgraded urllib3 beyond Kubernetes support, and macOS resolution omitted Linux distro dependency | Resolved: Linux/API-constrained lockfiles, actual tool checks and compatible package checks in ACR build, both fix reviews pass |
 | F030 | 1 | Deployment blocker | Application Gateway / private Key Vault integration | live HTTPS update | App Gateway cannot access the issued certificate reference despite scoped identity grants | Resolved: documented trusted-service network exception, both fix reviews, App Gateway Succeeded and normally verified HTTPS request passed |
-| F031 | 3 | High correctness | Radius workspace creation under restricted runtime identity | live | Helm installation check needs Secret-list permission that the runtime identity intentionally lacks | Seed known project workspace configuration and verify real Radius API access instead of broadening Secret permissions; provider correction pending |
+| F031 | 3 | High correctness | Radius workspace creation under restricted runtime identity | live | Helm installation check needs Secret-list permission that the runtime identity intentionally lacks | Known workspace + actual Radius API validation implemented and fix-reviewed; latest full coordinator suite passes |
 
 A suspected F032 in-cluster context override was withdrawn after tracing the
 actual CLI call path. The generic helper prefers in-cluster credentials, but
@@ -111,6 +111,13 @@ to fetch child credentials, install Radius there, verify four identity projectio
 and deploy a real child container through child Radius. Its HTTP token check
 passed. The gate cluster must be removed before the clean onboarding scenario.
 
+Gate reset verified: the child smoke application, child AKS, and empty
+management PostgreSQL were deleted through their owning Radius installations.
+Azure queries returned no child AKS, no managed node resource group, and no
+management PostgreSQL server. The PostgreSQL pre-delete check found zero
+application tables. Named temporary Jobs/ConfigMaps were removed; the management
+foundation and gateway remain for the real onboarding run.
+
 Certificate issuance and HTTPS gates passed: staging validation completed
 without importing a staging certificate. Production Let's Encrypt issuance/import
 succeeded through the scoped issuer Job. After the F030 network correction,
@@ -156,3 +163,11 @@ The walkthrough additionally suggested restarting the data API during the
 management outage. That is not an unmet requirement: the approved plan requires
 that restart during the control-source outage only, which the runner already
 does. No extra restart scenario is added merely to satisfy a broader review.
+
+## Phase 3 - Coordinator correction review
+
+The coordinator's F018-F021/F031 production fixes passed independent walkthrough
+and security review. The walkthrough caught a stale mocked response in the
+F031 test while that fixture was being updated. A fresh parent run of the
+complete current coordinator suite passed 117 tests. The deployed public
+onboarding path remains the next gate; mocked command tests are not that proof.
