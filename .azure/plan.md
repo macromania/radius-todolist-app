@@ -89,8 +89,18 @@ Key Vault object grants. F006 restart fix reviews and script regression pass.
 Live creation/import/identity projection remain explicit deployment gates.
 
 This validation authorizes only the bootstrap infrastructure deployment.
-The provisioning image currently has a package-CDN TLS download failure;
-application deployment must wait for a verified successful image build.
+The provisioning tool image subsequently built successfully in ACR after adding
+ICU and resolving Linux dependencies against the API lock. Its actual scripts,
+verified compiler binaries, and nonroot identity were checked in AKS.
+
+## Live integration proof
+
+Management AKS/Radius, private PostgreSQL with verified TLS, real Application
+Gateway/private backends, staging/production ACME issuance, and trusted HTTPS
+have passed their live gates. Radius created a child AKS under a per-slot Azure
+scope; Activity Log attributed creation to management Radius's identity.
+The coordinator bootstrapped child Radius and exercised a child HTTP workload.
+Full tenant onboarding, live outages, local deployment, and teardown remain open.
 
 ## Verification
 

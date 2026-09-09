@@ -145,6 +145,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("slot", "context", "namespace", "kubeconfig", "domain", "config"):
         parser.add_argument(f"--{name}", required=True)
+    parser.add_argument("--staging", action="store_true")
     args = parser.parse_args()
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,47}", args.slot):
         raise ValueError("Invalid allocation slot")
@@ -170,10 +171,14 @@ def main() -> int:
             check=False,
         )
         if result.returncode:
-            raise RuntimeError(f"Certificate Kubernetes operation failed: {command[0]}")
+            raise RuntimeError(
+                f"Certificate Kubernetes operation failed: {command[0]}: {result.stderr[-2000:]}"
+            )
         return json.loads(result.stdout) if "-o" in command else result.stdout
 
     resources = job_resources(settings, args.slot, args.namespace, args.domain)
+    if args.staging:
+        resources[-1]["spec"]["template"]["spec"]["containers"][0]["command"].append("--staging")
     execute(["apply", "-f", "-"], {"apiVersion": "v1", "kind": "List", "items": resources[:-1]})
     existing = execute(
         [
@@ -217,6 +222,12 @@ def main() -> int:
                     terminated = container.get("state", {}).get("terminated", {})
                     if container["name"] == "issuer" and terminated.get("exitCode") == 0:
                         result = json.loads(terminated["message"])
+                        if args.staging:
+                            if result != {"stagingValidation": "passed"}:
+                                raise ValueError("Staging Job returned an unexpected result")
+                            execute(["-n", "radplanes-system", "delete", "job", expected_name])
+                            print(json.dumps(result))
+                            return 0
                         expected = (
                             f"https://{settings['foundation']['vaultName']}.vault.azure.net"
                             f"/secrets/gateway-{args.slot}"

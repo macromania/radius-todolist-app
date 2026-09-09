@@ -196,7 +196,9 @@ resource vault 'Microsoft.KeyVault/vaults@2024-11-01' = {
     softDeleteRetentionInDays: 7
     publicNetworkAccess: 'Disabled'
     networkAcls: {
-      bypass: 'None'
+      // App Gateway certificate validation uses the trusted-service path.
+      // Public clients remain disabled and data-plane RBAC stays object-scoped.
+      bypass: 'AzureServices'
       defaultAction: 'Deny'
     }
   }

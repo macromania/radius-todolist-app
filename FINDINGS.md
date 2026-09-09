@@ -58,7 +58,7 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F027 | 4 | Medium correctness | `scripts/test-e2e.py` | provenance checks (initial) | Coordinator code and replacement data pod omitted from source verification | Acceptance agent extending actual image/source checks |
 | F028 | 3 | High correctness | `containers/provisioner/Dockerfile` | tool runtime check | Bicep binary cannot start without ICU on the slim base image | Resolved: libicu72, real Bicep startup/build and both fix reviews pass |
 | F029 | 3 | High correctness | `containers/provisioner/*requirements*`, `azure-cli.txt` | dependency resolution | Certificate overlay upgraded urllib3 beyond Kubernetes support, and macOS resolution omitted Linux distro dependency | Resolved: Linux/API-constrained lockfiles, actual tool checks and compatible package checks in ACR build, both fix reviews pass |
-| F030 | 1 | Deployment blocker | Application Gateway / private Key Vault integration | live HTTPS update | App Gateway cannot access the issued certificate reference despite scoped identity grants | Investigating service network access; do not broaden vault permissions or claim HTTPS is live |
+| F030 | 1 | Deployment blocker | Application Gateway / private Key Vault integration | live HTTPS update | App Gateway cannot access the issued certificate reference despite scoped identity grants | Resolved: documented trusted-service network exception, both fix reviews, App Gateway Succeeded and normally verified HTTPS request passed |
 | F031 | 3 | High correctness | Radius workspace creation under restricted runtime identity | live | Helm installation check needs Secret-list permission that the runtime identity intentionally lacks | Seed known project workspace configuration and verify real Radius API access instead of broadening Secret permissions; provider correction pending |
 
 A suspected F032 in-cluster context override was withdrawn after tracing the
@@ -111,10 +111,14 @@ to fetch child credentials, install Radius there, verify four identity projectio
 and deploy a real child container through child Radius. Its HTTP token check
 passed. The gate cluster must be removed before the clean onboarding scenario.
 
-Certificate issuance gates passed: staging validation completed without
-importing a staging certificate. Production Let's Encrypt issuance/import
-then succeeded through the scoped issuer Job. Enabling the HTTPS listener is
-blocked by F030; certificate issuance alone is not working public HTTPS.
+Certificate issuance and HTTPS gates passed: staging validation completed
+without importing a staging certificate. Production Let's Encrypt issuance/import
+succeeded through the scoped issuer Job. After the F030 network correction,
+Application Gateway reached Succeeded and a normal certificate-verified HTTPS
+request returned the expected token without a custom CA or disabled verification.
+An actual issuer Job could read its own ACME account but received HTTP 403 for
+another plane's account secret. This is gateway infrastructure proof; the full
+tenant onboarding and outage scenario remains pending.
 
 | # | Severity | File | Lines | Vulnerability | Confidence |
 |---|----------|------|-------|---------------|------------|

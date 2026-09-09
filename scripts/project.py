@@ -87,12 +87,13 @@ def radius_environment(kubeconfig: Path, context: str) -> dict[str, str]:
                 raise ValueError("Project Radius home contains an unexpected configuration link")
         else:
             link.symlink_to(target)
-    return {
+    environment = {
         **os.environ,
         "HOME": str(home),
         "KUBECONFIG": str(kubeconfig.resolve()),
         "AZURE_CONFIG_DIR": os.environ.get("AZURE_CONFIG_DIR", str(Path.home() / ".azure")),
     }
+    return environment
 
 
 def uuid(value: str, label: str) -> str:
@@ -178,8 +179,8 @@ def preflight(environment: str) -> None:
             )
     observed_file = state_dir(environment) / "operator-ips.json"
     observed = json.loads(observed_file.read_text())["observed"] if observed_file.exists() else []
-    if not isinstance(observed, list) or len(observed) > 4:
-        raise ValueError("At most four explicitly observed operator addresses are allowed")
+    if not isinstance(observed, list) or len(observed) > 8:
+        raise ValueError("At most eight explicitly observed operator addresses are allowed")
     for address in observed:
         if not isinstance(address, str):
             raise ValueError("Observed operator addresses must be IPv4 strings")

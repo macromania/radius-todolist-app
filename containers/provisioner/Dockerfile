@@ -4,7 +4,7 @@ USER root
 ARG TARGETARCH
 ENV UV_SYSTEM_CERTS=true UV_CONCURRENT_DOWNLOADS=2 UV_HTTP_RETRIES=5
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl git unzip openssl && \
+    ca-certificates curl git unzip openssl libicu72 && \
     rm -rf /var/lib/apt/lists/*
 COPY containers/provisioner/requirements.txt /tmp/provisioner-requirements.txt
 COPY containers/provisioner/azure-cli.txt /tmp/azure-cli-requirements.txt
@@ -52,5 +52,8 @@ RUN case "$TARGETARCH" in \
     chown -R 10001:10001 /home/plane /app/.state
 ENV HOME=/home/plane PATH="/app/.venv/bin:/opt/azure-cli/bin:$PATH"
 USER 10001:10001
-RUN /home/plane/.rad/bin/bicep --version
+RUN /home/plane/.rad/bin/bicep --version && rad version --cli && \
+    kubectl version --client && kubelogin --version && az version && certbot --version && \
+    uv pip check --python /app/.venv/bin/python && \
+    uv pip check --python /opt/azure-cli/bin/python
 CMD ["python", "-m", "plane_demo.provisioner"]
