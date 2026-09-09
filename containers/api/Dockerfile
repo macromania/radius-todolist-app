@@ -10,7 +10,12 @@ RUN mkdir -p .build-work && \
     TMPDIR=/app/.build-work UV_CACHE_DIR=/app/.uv-cache \
     uv sync --frozen --no-dev --no-install-project && \
     rm -rf .build-work .uv-cache
-COPY src ./src
+COPY src/plane_demo/__init__.py src/plane_demo/auth.py src/plane_demo/bootstrap.py \
+    src/plane_demo/db.py src/plane_demo/http.py src/plane_demo/kube.py \
+    src/plane_demo/models.py src/plane_demo/settings.py \
+    src/plane_demo/management_api.py src/plane_demo/control_api.py \
+    src/plane_demo/data_api.py src/plane_demo/control_reconciler.py \
+    src/plane_demo/data_reconciler.py src/plane_demo/acme_responder.py ./src/plane_demo/
 COPY sql ./sql
 RUN find src -type d -name __pycache__ -prune -exec rm -rf '{}' ';' && \
     python -m compileall -q src && \

@@ -37,6 +37,13 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F006 | 1 | High correctness | `scripts/install-radius.py` | 38-59 (initial) | Existing workload-identity label means a patch does not restart pods after identity annotations | Fixed; explicit rollout restart, regression, and both fix reviews passed; live pod projection remains a deployment gate |
 | F007 | 2 | Medium correctness | `src/plane_demo/control_api.py` | 35-52 (initial) | A delayed older-version success hides failure of the current desired version | Resolved: reproduced before fix, 37 related real-PostgreSQL integration tests passed after, both fix reviews clean |
 | F008 | 3 | High correctness | `infra/radius/apps/challenge.bicep`, `workload.bicep` | initial workload integration | Challenge responder correctly returns 404 at /livez, so an inherited HTTP probe would restart it | Changed challenge to TCP probe; provisioner also explicitly Recreate; live rendering and fix reviews pending |
+| F009 | 3 | High correctness | `scripts/publish-artifacts.py` | 67-107 (initial) | Existing tag accepted without verifying its trusted source/digest record | Corrected; fix tests/review pending |
+| F010 | 3 | Medium correctness | `scripts/issue-certificate.py` | 131-144 (initial) | Staging issuance could replace the live versionless certificate | Staging now validation-only; fix tests/review pending |
+| F011 | 3 | Medium correctness | `scripts/issue-certificate.py` | 100-109 (initial) | Failed first issuance discarded a newly registered ACME account | Account state saved in finally; fix tests/review pending |
+| F012 | 3 | High security | `containers/provisioner/Dockerfile` | 41 (initial) | Bundled Bicep executable downloaded without digest verification | Published per-architecture SHA-256 verification added; fix review pending |
+| F013 | 3 | Medium security | `.dockerignore` | 1-16 (initial) | Build context omitted several credential-file exclusions | Added credential patterns and explicit runtime-script copies; fix review pending |
+| F014 | 1 | Connectivity blocker | Management AKS administrative endpoint | live | Operator connection times out despite healthy AKS | Verifying both observed /32 egress addresses; Azure authenticated command channel confirms both nodes Ready |
+| F015 | 1 | High correctness | `scripts/install-radius.py` / Radius workspace loader | live | Radius workspace enumeration ignores KUBECONFIG and reads HOME/.kube/config | Per-cluster project HOME added; actual workspace/credential registration and identity verification succeeded; fix reviews pending |
 
 F001 first correction (`az rest --subscription`) failed the fix walkthrough:
 Azure CLI's Graph request path can still acquire the default tenant's token.
@@ -55,8 +62,12 @@ This does not claim that PostgreSQL has already been provisioned.
 
 The initial source compiles but has not been deployed. Rubber-duck review
 identified F003/F004/F006; security review identified F005 with confidence 9/10.
-These are being fixed before deployment. The shared certificate vault remains
-one project vault; certificate access will be scoped to each plane's objects.
+The reviewed bootstrap has now deployed successfully. Both management AKS nodes
+are Ready, Radius is installed, and all four Radius workload identities were
+verified in real pods. Four Recipe artifacts were published and tag-locked in
+the project ACR. The actual resource-tag audit found no missing requested tag.
+Child cluster, managed datastore, gateway and certificate Recipe execution still
+remain live integration gates.
 
 | # | Severity | File | Lines | Vulnerability | Confidence |
 |---|----------|------|-------|---------------|------------|
