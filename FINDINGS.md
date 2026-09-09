@@ -31,6 +31,11 @@ created by this phase. Both final F001 fix reviews reported no findings.
 |---|---|---|---|---|---|---|
 | F001 | 0 | Medium correctness | `scripts/project.py` | 84-90 (initial) | Operator Graph lookup used the global tenant instead of the project subscription | Resolved; live preflight, 4 tests, rubber-duck and security fix reviews passed |
 | F002 | 1 | Deployment blocker | Azure PostgreSQL regional capability | n/a | Subscription cannot provision PostgreSQL in East US 2 or West US 2 | Resolved for preflight: Central US capability checks and both fix reviews passed; actual provisioning remains a phase gate |
+| F003 | 1 | High correctness | `infra/bootstrap/azure.bicep` | 144-156, 245-247 (initial) | Compiled module scopes include invalid loop expressions in non-loop references | Fix in progress |
+| F004 | 1 | High correctness | `infra/bootstrap/federation.bicep` | 11 (initial) | Concurrent writes to one identity's federated credentials can return 409 | Fix in progress |
+| F005 | 1 | High security | `infra/bootstrap/platform-access.bicep` | 150-167 (initial) | Tenant-reachable gateway/issuer identities can read or replace other planes' certificates in the shared vault | Fix in progress: exact per-plane object scopes |
+| F006 | 1 | High correctness | `scripts/install-radius.py` | 38-59 (initial) | Existing workload-identity label means a patch does not restart pods after identity annotations | Fixed; explicit rollout restart, regression, and both fix reviews passed; live pod projection remains a deployment gate |
+| F007 | 2 | Medium correctness | `src/plane_demo/control_api.py` | 35-52 (initial) | A delayed older-version success hides failure of the current desired version | Resolved: reproduced before fix, 37 related real-PostgreSQL integration tests passed after, both fix reviews clean |
 
 F001 first correction (`az rest --subscription`) failed the fix walkthrough:
 Azure CLI's Graph request path can still acquire the default tenant's token.
@@ -44,6 +49,28 @@ F002 verification: the restricted-region regression rejects an empty edition
 list before writing deployment context. The real Central US preflight passed;
 the fix-specific rubber-duck and security reviews found no remaining issue.
 This does not claim that PostgreSQL has already been provisioned.
+
+## Phase 1 - Azure integration source review
+
+The initial source compiles but has not been deployed. Rubber-duck review
+identified F003/F004/F006; security review identified F005 with confidence 9/10.
+These are being fixed before deployment. The shared certificate vault remains
+one project vault; certificate access will be scoped to each plane's objects.
+
+## Phase 2 - Application source review
+
+The API/reconciler layer passed 77 tests using real PostgreSQL and Redis; one
+Kubernetes test awaits the live cluster. The final-image smoke exercised
+bootstrap and HTTP 200/401/422/202/409/503 behavior, nonroot execution, and
+source-content hashes. The phase security review found no vulnerabilities.
+The rubber-duck review found F007; it is fixed and both fix reviews found no
+remaining issue. The existing image predates that fix and must be rebuilt and
+re-inspected before deployment. These tests do not replace Azure end-to-end acceptance.
+
+PostgreSQL 16 setup observation: CREATEROLE grants a role creator ADMIN but not
+SET/INHERIT by default. The initializer temporarily enables and restores those
+exact membership flags, tested under a non-superuser setup login. Runtime
+roles remain non-owner/non-superuser and cannot perform schema initialization.
 
 ## Accepted scope limitations
 
