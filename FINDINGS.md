@@ -488,3 +488,30 @@ child clusters, and the foundation were retained. The protected
 `orphan-redis-recovery.json` records the completed action. This exceptional
 recovery is not a normal Radius-cleanup success and does not retry the failed
 tenant operation. The renewed guarded Radius reset still needs to complete.
+
+### Reset completion and fresh management deployment
+
+The guarded reset completed with `radius_resources_removed`, not a full-clean
+claim. Independent operator queries verified all five app groups empty, every
+child AKS absent, and management AKS plus the foundation retained. The three
+temporary Reader assignments and the reset federation are now absent; the
+original 21 harness grants and `demo-harness` federation remain.
+
+Only the old, owned management application namespace was then cleared. It had
+no remaining workload controllers, all Jobs/Pods were terminal, and its three
+PVC/PV bindings matched the recorded claims, Delete reclaim policy, and exact
+owned Azure disk IDs. The two failed acceptance records were checked against
+their archived hashes before deletion. A wrong-UID dry-run returned the
+expected Kubernetes 409, proving the deletion precondition was honored.
+The exact-UID deletion removed the namespace without forcing finalizers.
+At 2026-09-09T21:06:53Z, its three PVs and Azure disks were verified absent.
+All five management Radius Deployments remained available. The state-clearance
+security review found no vulnerabilities; the direct walkthrough checked scope,
+archive preservation, and UID preconditions.
+
+Fresh configuration now uses the inspected `ad031e2` images and locked Recipes;
+the prior configuration is archived. `az quota list` and `az quota usage list`
+reported 8/100 regional and DSv5 vCPUs used, leaving capacity for the required
+32 additional vCPUs. `deploy-management-fresh` was submitted with new state and
+is running. No old provisioning operation or failed evidence was replayed.
+Fresh onboarding and outage acceptance remain pending.
