@@ -619,6 +619,25 @@ class AzureRunnerTests(unittest.TestCase):
             self.assertTrue(path.is_relative_to(self.state / "harness"))
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
+    def test_projected_token_accepts_canonical_system_directory_alias(self):
+        alias = self.root / "var-run-alias"
+        alias.symlink_to(self.token.parent, target_is_directory=True)
+        with (
+            patch.object(runner, "TOKEN_ROOT", alias),
+            patch.dict(os.environ, {"AZURE_FEDERATED_TOKEN_FILE": str(alias / "token")}),
+        ):
+            result, _ = self.flow(mode="outages", exporter_code=0)
+        self.assertEqual(result["outcome"], "passed")
+
+    def test_projected_token_symlink_cannot_escape_the_mount(self):
+        outside = self.root / "outside-token"
+        outside.write_text(SECRET)
+        link = self.token.parent / "escape"
+        link.symlink_to(outside)
+        with patch.dict(os.environ, {"AZURE_FEDERATED_TOKEN_FILE": str(link)}):
+            with self.assertRaisesRegex(runner.HarnessError, "projected_token_required"):
+                runner.in_cluster(self.config, "all", COMMIT)
+
     def test_failed_evidence_never_becomes_success_despite_zero_exit(self):
         result, _ = self.flow(evidence_outcome="failed")
         self.assertEqual(result["outcome"], "failed")

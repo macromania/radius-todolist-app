@@ -468,7 +468,7 @@ def in_cluster(config, mode, commit):
     )
     token = Path(os.environ.get("AZURE_FEDERATED_TOKEN_FILE", ""))
     require(
-        token.is_absolute() and token.resolve().is_relative_to(TOKEN_ROOT),
+        token.is_absolute() and token.resolve().is_relative_to(TOKEN_ROOT.resolve()),
         "projected_token_required",
     )
     state = state_path(Path(".state/azure"))

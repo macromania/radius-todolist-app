@@ -287,3 +287,10 @@ The source-bundle ConfigMap uses server-side apply: a 344 KiB Git bundle would
 exceed Kubernetes' annotation limit if client-side apply copied the full object
 into `last-applied-configuration`. The 900 KiB object bound remains, and conflicts
 are not forced. Its targeted 28 tests and both fix reviews passed.
+
+The first live harness Job stopped before login or tenant mutation because the
+token guard compared a resolved file path with an unresolved `/var/run` root.
+On the Linux image, `/var/run` aliases `/run`. Both paths are now canonicalized;
+the mount boundary, identity checks, and symlink-escape refusal remain. Thirty
+runner tests and both fix reviews passed. No tenant was created by that failed
+startup.
