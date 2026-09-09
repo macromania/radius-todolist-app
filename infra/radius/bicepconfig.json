@@ -1,6 +1,9 @@
 {
 	"extensions": {
 		"radius": "br:biceptypes.azurecr.io/radius:0.60",
-		"aws": "br:biceptypes.azurecr.io/aws:0.60"
+		"aws": "br:biceptypes.azurecr.io/aws:0.60",
+		"clusters": "./types/clusters.tgz",
+		"postgresql": "./types/postgresql.tgz",
+		"gateways": "./types/gateways.tgz"
 	}
 }

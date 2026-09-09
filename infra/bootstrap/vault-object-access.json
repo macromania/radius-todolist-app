@@ -1,0 +1,34 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "Object-scoped Key Vault RBAC. Explicit ARM scope avoids fabricating a management-plane certificate resource or API version."
+  },
+  "parameters": {
+    "objectScope": {
+      "type": "string",
+      "metadata": {
+        "description": "Full resource ID of exactly one versionless Key Vault secret or certificate, never the vault."
+      }
+    },
+    "principalId": {
+      "type": "string"
+    },
+    "roleDefinitionId": {
+      "type": "string"
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[parameters('objectScope')]",
+      "name": "[guid(parameters('objectScope'), parameters('principalId'), parameters('roleDefinitionId'))]",
+      "properties": {
+        "principalId": "[parameters('principalId')]",
+        "principalType": "ServicePrincipal",
+        "roleDefinitionId": "[parameters('roleDefinitionId')]"
+      }
+    }
+  ]
+}

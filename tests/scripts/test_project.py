@@ -1,8 +1,8 @@
 import importlib.util
 import json
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 SPEC = importlib.util.spec_from_file_location(
@@ -19,19 +19,23 @@ class PreflightTests(unittest.TestCase):
         def run(args, **kwargs):
             commands.append(args)
             if args[:3] == ["az", "account", "show"]:
-                return json.dumps({
-                    "id": project.SUBSCRIPTION,
-                    "tenantId": "11111111-1111-1111-1111-111111111111",
-                })
+                return json.dumps(
+                    {
+                        "id": project.SUBSCRIPTION,
+                        "tenantId": "11111111-1111-1111-1111-111111111111",
+                    }
+                )
             if args[:3] == ["az", "account", "get-access-token"]:
                 return '{"accessToken":"project-tenant-token"}'
             if args[0] == "curl":
                 return "8.8.8.8"
             if args[:3] == ["az", "vm", "list-usage"]:
-                return json.dumps([
-                    {"name": {"value": name}, "currentValue": 0, "limit": 100}
-                    for name in ("cores", "standardDSv5Family")
-                ])
+                return json.dumps(
+                    [
+                        {"name": {"value": name}, "currentValue": 0, "limit": 100}
+                        for name in ("cores", "standardDSv5Family")
+                    ]
+                )
             if args[:3] == ["az", "group", "list"]:
                 return "[]"
             if args[:3] == ["az", "postgres", "flexible-server"]:
@@ -55,7 +59,8 @@ class PreflightTests(unittest.TestCase):
                 result = json.loads((Path(temp) / "context.json").read_text())
         self.assertEqual(result["operator_object_id"], "22222222-2222-2222-2222-222222222222")
         connection.request.assert_called_once_with(
-            "GET", "/v1.0/me?$select=id",
+            "GET",
+            "/v1.0/me?$select=id",
             headers={"Authorization": "Bearer project-tenant-token"},
         )
         connection.close.assert_called_once()
@@ -88,14 +93,19 @@ class PreflightTests(unittest.TestCase):
         ]
         with (
             patch.object(project, "az", side_effect=replies),
-            patch.object(project, "operator_identity",
-                         return_value={"id": "22222222-2222-2222-2222-222222222222"}),
+            patch.object(
+                project,
+                "operator_identity",
+                return_value={"id": "22222222-2222-2222-2222-222222222222"},
+            ),
             patch.object(project, "run", return_value="8.8.8.8"),
             patch.object(project.shutil, "which", return_value="/tool"),
             patch.object(project.Path, "is_file", return_value=True),
             patch.object(project, "write_json") as write,
         ):
-            with self.assertRaisesRegex(project.CommandError, "PostgreSQL provisioning is unavailable"):
+            with self.assertRaisesRegex(
+                project.CommandError, "PostgreSQL provisioning is unavailable"
+            ):
                 project.preflight("azure")
         write.assert_not_called()
 

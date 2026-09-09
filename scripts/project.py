@@ -8,13 +8,14 @@ import http.client
 import ipaddress
 import json
 import os
-from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT = "radplanes"
@@ -34,18 +35,22 @@ class CommandError(RuntimeError):
 
 def run(args: list[str], *, capture: bool = False, env: dict[str, str] | None = None) -> str:
     result = subprocess.run(
-        args, cwd=ROOT, env=env, text=True, stdout=subprocess.PIPE if capture else None,
+        args,
+        cwd=ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE if capture else None,
         check=False,
     )
     if result.returncode:
-        raise CommandError(f"{args[0]} {args[1] if len(args) > 1 else ''} exited {result.returncode}")
+        raise CommandError(
+            f"{args[0]} {args[1] if len(args) > 1 else ''} exited {result.returncode}"
+        )
     return result.stdout.strip() if capture else ""
 
 
 def az(*args: str) -> Any:
-    output = run(
-        ["az", *args, "--subscription", SUBSCRIPTION, "--output", "json"], capture=True
-    )
+    output = run(["az", *args, "--subscription", SUBSCRIPTION, "--output", "json"], capture=True)
     return json.loads(output) if output else None
 
 
@@ -81,12 +86,15 @@ def operator_identity() -> dict[str, Any]:
     connection = http.client.HTTPSConnection("graph.microsoft.com", timeout=20)
     try:
         connection.request(
-            "GET", "/v1.0/me?$select=id",
+            "GET",
+            "/v1.0/me?$select=id",
             headers={"Authorization": f"Bearer {access_token}"},
         )
         response = connection.getresponse()
         if response.status != 200:
-            raise CommandError(f"Subscription-scoped Graph identity lookup failed: HTTP {response.status}")
+            raise CommandError(
+                f"Subscription-scoped Graph identity lookup failed: HTTP {response.status}"
+            )
         return json.loads(response.read())
     finally:
         connection.close()
@@ -101,15 +109,17 @@ def preflight(environment: str) -> None:
     run(["docker", "info", "--format", "Docker CPUs={{.NCPU}} memory={{.MemTotal}}"])
     run(["rad", "version", "--cli"])
     if environment != "azure":
-        raise CommandError("The local deployment gate follows Azure acceptance; not implemented yet")
+        raise CommandError(
+            "The local deployment gate follows Azure acceptance; not implemented yet"
+        )
     account = az("account", "show")
     if account["id"] != SUBSCRIPTION:
         raise CommandError("Azure account does not match the project subscription")
     identity = operator_identity()
     operator = uuid(identity["id"], "Operator object ID")
     public_ip = run(
-        ["curl", "--fail", "--silent", "--show-error", "--max-time", "20",
-         "https://api.ipify.org"], capture=True,
+        ["curl", "--fail", "--silent", "--show-error", "--max-time", "20", "https://api.ipify.org"],
+        capture=True,
     )
     parsed_ip = ipaddress.ip_address(public_ip)
     if parsed_ip.version != 4 or not parsed_ip.is_global:
@@ -117,31 +127,43 @@ def preflight(environment: str) -> None:
     usage = az("vm", "list-usage", "--location", LOCATION)
     capacity = {
         item["name"]["value"]: {
-            "current": int(item["currentValue"]), "limit": int(item["limit"]),
+            "current": int(item["currentValue"]),
+            "limit": int(item["limit"]),
         }
         for item in usage
         if item["name"]["value"] in {"cores", "standardDSv5Family"}
     }
     for name in ("cores", "standardDSv5Family"):
-        if name not in capacity or capacity[name]["limit"] - capacity[name]["current"] < 20:
-            raise CommandError(f"Insufficient or unknown compute capacity for five D4s_v5 nodes: {name}")
+        if name not in capacity or capacity[name]["limit"] - capacity[name]["current"] < 48:
+            raise CommandError(
+                f"Insufficient compute capacity for ten D4s_v5 nodes plus surge: {name}"
+            )
     postgres = az("postgres", "flexible-server", "list-skus", "--location", LOCATION)
     if not any(item.get("supportedServerEditions") for item in postgres):
         raise CommandError(
             f"PostgreSQL provisioning is unavailable in {LOCATION}: "
             + "; ".join(item.get("reason") or "No editions returned" for item in postgres)
         )
-    groups = az("group", "list", "--query",
-                "[?starts_with(name, 'rg-radplanes-')].{name:name,tags:tags}")
+    groups = az(
+        "group", "list", "--query", "[?starts_with(name, 'rg-radplanes-')].{name:name,tags:tags}"
+    )
     for group in groups:
         if (group.get("tags") or {}).get("project") != PROJECT:
-            raise CommandError(f"Project name collides with an unowned resource group: {group['name']}")
+            raise CommandError(
+                f"Project name collides with an unowned resource group: {group['name']}"
+            )
     context = {
-        "project": PROJECT, "subscription": SUBSCRIPTION, "location": LOCATION,
+        "project": PROJECT,
+        "subscription": SUBSCRIPTION,
+        "location": LOCATION,
         "tenant": uuid(account["tenantId"], "Tenant ID"),
-        "operator_object_id": operator, "operator_ip": public_ip,
-        "kubernetes_version": "1.35.7", "node_vm_size": "Standard_D4s_v5",
-        "tags": TAGS, "capacity": capacity,
+        "operator_object_id": operator,
+        "operator_ip": public_ip,
+        "kubernetes_version": "1.35.7",
+        "node_vm_size": "Standard_D4s_v5",
+        "node_count": 2,
+        "tags": TAGS,
+        "capacity": capacity,
         "postgres_available": True,
     }
     write_json(state_dir(environment) / "context.json", context)
@@ -162,13 +184,141 @@ def load_context(environment: str) -> dict[str, Any]:
     return context
 
 
+def bootstrap(preview: bool) -> None:
+    context = load_context("azure")
+    state = state_dir("azure")
+    salt_file = state / "name-salt.json"
+    if not salt_file.exists():
+        write_json(salt_file, {"salt": uuid4().hex[:12]})
+    salt = json.loads(salt_file.read_text())["salt"]
+    if not re.fullmatch(r"[a-f0-9]{12}", salt):
+        raise ValueError("Stored resource naming salt is malformed")
+    parameters = {
+        "projectName": PROJECT,
+        "location": LOCATION,
+        "nameSalt": salt,
+        "operatorIp": context["operator_ip"],
+        "operatorObjectId": context["operator_object_id"],
+        "kubernetesVersion": context["kubernetes_version"],
+        "nodeVmSize": context["node_vm_size"],
+        "nodeCount": context["node_count"],
+    }
+    parameter_file = state / "bootstrap.parameters.json"
+    write_json(
+        parameter_file,
+        {
+            "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+            "contentVersion": "1.0.0.0",
+            "parameters": {name: {"value": value} for name, value in parameters.items()},
+        },
+    )
+    template = state / "bootstrap.json"
+    run([str(BICEP), "build", "infra/bootstrap/azure.bicep", "--outfile", str(template)])
+    args = [
+        "az",
+        "deployment",
+        "sub",
+        "what-if" if preview else "create",
+        "--subscription",
+        SUBSCRIPTION,
+        "--location",
+        LOCATION,
+        "--name",
+        f"{PROJECT}-bootstrap",
+        "--template-file",
+        str(template),
+        "--parameters",
+        f"@{parameter_file}",
+    ]
+    if preview:
+        run(args)
+        return
+    require_confirmation("azure")
+    validation = state / "validation.json"
+    if not validation.exists():
+        raise CommandError(
+            "Run azure-validate and record .state/azure/validation.json before deploying"
+        )
+    approval = json.loads(validation.read_text())
+    import hashlib
+
+    if approval.get("template_sha256") != hashlib.sha256(template.read_bytes()).hexdigest():
+        raise CommandError("Validated template hash differs from the current bootstrap")
+    if approval.get("parameters_sha256") != hashlib.sha256(parameter_file.read_bytes()).hexdigest():
+        raise CommandError("Validated parameters differ from the current bootstrap")
+    if approval.get("status") != "passed":
+        raise CommandError("Azure validation has not passed")
+    deployment = json.loads(run([*args, "--output", "json"], capture=True))
+    if deployment.get("properties", {}).get("provisioningState") != "Succeeded":
+        raise CommandError("Bootstrap deployment did not succeed")
+    outputs = {name: value["value"] for name, value in deployment["properties"]["outputs"].items()}
+    write_json(state / "bootstrap.outputs.json", outputs)
+    print(f"Bootstrap succeeded. Outputs saved to {state / 'bootstrap.outputs.json'}")
+
+
+def install_management_radius() -> None:
+    require_confirmation("azure")
+    state = state_dir("azure")
+    outputs = json.loads((state / "bootstrap.outputs.json").read_text())
+    management = outputs["managementCluster"]
+    allocation = next(item for item in outputs["allocations"] if item["slot"] == "management")
+    if management["name"] != "aks-radplanes-management":
+        raise ValueError("Unexpected management cluster name in deployment outputs")
+    kubeconfig = state / "kubeconfig"
+    context = "radplanes-management"
+    run(
+        [
+            "az",
+            "aks",
+            "get-credentials",
+            "--subscription",
+            SUBSCRIPTION,
+            "--resource-group",
+            management["resourceGroup"],
+            "--name",
+            management["name"],
+            "--context",
+            context,
+            "--file",
+            str(kubeconfig),
+            "--overwrite-existing",
+        ]
+    )
+    run(["kubelogin", "convert-kubeconfig", "--kubeconfig", str(kubeconfig), "-l", "azurecli"])
+    run(
+        [
+            sys.executable,
+            "scripts/install-radius.py",
+            "--context",
+            context,
+            "--kubeconfig",
+            str(kubeconfig),
+            "--config",
+            str(state / "radius.yaml"),
+            "--client-id",
+            allocation["identities"]["radius"]["clientId"],
+            "--tenant-id",
+            outputs["foundation"]["tenantId"],
+        ]
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["preflight"])
+    parser.add_argument(
+        "command", choices=["preflight", "bootstrap-preview", "bootstrap", "install-radius"]
+    )
     parser.add_argument("--environment", choices=["azure", "local"], default="azure")
     args = parser.parse_args()
     try:
-        preflight(args.environment)
+        if args.command == "preflight":
+            preflight(args.environment)
+        elif args.environment != "azure":
+            raise CommandError("Local provider follows the Azure acceptance gate")
+        elif args.command == "install-radius":
+            install_management_radius()
+        else:
+            bootstrap(preview=args.command == "bootstrap-preview")
     except (CommandError, ValueError, KeyError, OSError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

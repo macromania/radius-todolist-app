@@ -1,0 +1,47 @@
+namespace: Demo.Platform
+types:
+  clusters:
+    description: A child Kubernetes cluster created by management Radius from an operator-owned allocation.
+    apiVersions:
+      "2025-08-01-preview":
+        schema:
+          type: object
+          properties:
+            environment:
+              type: string
+              description: Radius environment resource ID.
+            application:
+              type: string
+              description: Owning Radius application resource ID.
+            slot:
+              type: string
+              description: Stable allocation key, not an unchecked tenant-provided cloud resource name.
+              pattern: "^[a-z][a-z0-9-]{0,47}$"
+            clusterId:
+              type: string
+              readOnly: true
+            clusterName:
+              type: string
+              readOnly: true
+            resourceGroup:
+              type: string
+              readOnly: true
+            fqdn:
+              type: string
+              readOnly: true
+            oidcIssuer:
+              type: string
+              readOnly: true
+            bootstrapAccessRef:
+              type: string
+              description: AKS resource ID on Azure; a protected access reference locally. Never a kubeconfig.
+              readOnly: true
+            radiusIdentityId:
+              type: string
+              readOnly: true
+            radiusClientId:
+              type: string
+              readOnly: true
+          required:
+            - environment
+            - slot

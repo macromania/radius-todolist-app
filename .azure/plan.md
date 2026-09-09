@@ -1,6 +1,12 @@
 # Three-plane Radius implementation
 
-Status: Approved - Preparing
+Status: Validated (bootstrap infrastructure only)
+
+Current gate: bootstrap source corrections F003-F006 are implemented,
+fix-reviewed, and pass renewed ARM what-if/validation.
+The first real ARM what-if reproduced F003 before any resource creation.
+Application SQL/API phase is committed (`b0a5f4a`) but Azure runtime acceptance
+has not occurred. Do not treat that commit as a deployment result.
 
 ## Authorization and context
 
@@ -66,6 +72,25 @@ No broad deletes, global kubeconfig changes, public databases, or public Radius
 administrative API. Runtime identities cannot grant Azure roles.
 Full teardown is part of acceptance; expensive resources are not left running
 by default. Key Vault purge protection remains enabled.
+
+## 7. Validation Proof
+
+2026-09-09T08:19:28Z: `uv run python scripts/validate-bootstrap.py` passed
+the bundled Bicep compile, real `az deployment sub what-if`, and
+`az deployment sub validate`. Exact template and parameter hashes are stored
+in `.state/azure/validation.json` and checked again before creation.
+What-if cannot calculate some not-yet-created identity-based role-assignment
+IDs; these are reported as unsupported preview details, not deployment proof.
+
+F003/F004 fix walkthrough: compiled resource scopes are correct, federation
+loops serial, 10 compiled-contract tests and 3 setup tests passed.
+F005 fix security review: no remaining vulnerability in exact per-plane
+Key Vault object grants. F006 restart fix reviews and script regression pass.
+Live creation/import/identity projection remain explicit deployment gates.
+
+This validation authorizes only the bootstrap infrastructure deployment.
+The provisioning image currently has a package-CDN TLS download failure;
+application deployment must wait for a verified successful image build.
 
 ## Verification
 

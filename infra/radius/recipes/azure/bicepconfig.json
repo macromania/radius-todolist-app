@@ -1,0 +1,8 @@
+{
+  "experimentalFeaturesEnabled": {
+    "extensibility": true
+  },
+  "extensions": {
+    "kubernetes": "builtin:"
+  }
+}

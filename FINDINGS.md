@@ -31,11 +31,12 @@ created by this phase. Both final F001 fix reviews reported no findings.
 |---|---|---|---|---|---|---|
 | F001 | 0 | Medium correctness | `scripts/project.py` | 84-90 (initial) | Operator Graph lookup used the global tenant instead of the project subscription | Resolved; live preflight, 4 tests, rubber-duck and security fix reviews passed |
 | F002 | 1 | Deployment blocker | Azure PostgreSQL regional capability | n/a | Subscription cannot provision PostgreSQL in East US 2 or West US 2 | Resolved for preflight: Central US capability checks and both fix reviews passed; actual provisioning remains a phase gate |
-| F003 | 1 | High correctness | `infra/bootstrap/azure.bicep` | 144-156, 245-247 (initial) | Compiled module scopes include invalid loop expressions in non-loop references | Fix in progress |
-| F004 | 1 | High correctness | `infra/bootstrap/federation.bicep` | 11 (initial) | Concurrent writes to one identity's federated credentials can return 409 | Fix in progress |
-| F005 | 1 | High security | `infra/bootstrap/platform-access.bicep` | 150-167 (initial) | Tenant-reachable gateway/issuer identities can read or replace other planes' certificates in the shared vault | Fix in progress: exact per-plane object scopes |
+| F003 | 1 | High correctness | `infra/bootstrap/azure.bicep` | 144-156, 245-247 (initial) | Compiled module scopes include invalid loop expressions in non-loop references | Resolved: compiled-contract tests, fix walkthrough, real ARM what-if/validate pass |
+| F004 | 1 | High correctness | `infra/bootstrap/federation.bicep` | 11 (initial) | Concurrent writes to one identity's federated credentials can return 409 | Fixed with serial loops; fix walkthrough passes, live deployment pending |
+| F005 | 1 | High security | `infra/bootstrap/platform-access.bicep` | 150-167 (initial) | Tenant-reachable gateway/issuer identities can read or replace other planes' certificates in the shared vault | Resolved in source: exact object grants, both fix reviews pass; live cross-plane denial still required |
 | F006 | 1 | High correctness | `scripts/install-radius.py` | 38-59 (initial) | Existing workload-identity label means a patch does not restart pods after identity annotations | Fixed; explicit rollout restart, regression, and both fix reviews passed; live pod projection remains a deployment gate |
 | F007 | 2 | Medium correctness | `src/plane_demo/control_api.py` | 35-52 (initial) | A delayed older-version success hides failure of the current desired version | Resolved: reproduced before fix, 37 related real-PostgreSQL integration tests passed after, both fix reviews clean |
+| F008 | 3 | High correctness | `infra/radius/apps/challenge.bicep`, `workload.bicep` | initial workload integration | Challenge responder correctly returns 404 at /livez, so an inherited HTTP probe would restart it | Changed challenge to TCP probe; provisioner also explicitly Recreate; live rendering and fix reviews pending |
 
 F001 first correction (`az rest --subscription`) failed the fix walkthrough:
 Azure CLI's Graph request path can still acquire the default tenant's token.
@@ -56,6 +57,10 @@ The initial source compiles but has not been deployed. Rubber-duck review
 identified F003/F004/F006; security review identified F005 with confidence 9/10.
 These are being fixed before deployment. The shared certificate vault remains
 one project vault; certificate access will be scoped to each plane's objects.
+
+| # | Severity | File | Lines | Vulnerability | Confidence |
+|---|----------|------|-------|---------------|------------|
+| 1 | 🟠 HIGH | `infra/bootstrap/platform-access.bicep` | 150-167 (initial) | Vault-wide gateway/issuer access permits cross-plane certificate access | 9/10 |
 
 ## Phase 2 - Application source review
 

@@ -1,0 +1,72 @@
+namespace: Demo.Platform
+types:
+  gateways:
+    description: A recipe-backed plane gateway; Azure uses Application Gateway, not the stock Envoy renderer.
+    apiVersions:
+      "2025-08-01-preview":
+        schema:
+          type: object
+          properties:
+            environment:
+              type: string
+            application:
+              type: string
+            apiService:
+              type: string
+              description: Name of the Radius API container resource, used as its pod label selector.
+              pattern: "^[a-z][a-z0-9-]{0,62}$"
+            apiPort:
+              type: integer
+              minimum: 1
+              maximum: 65535
+            challengeService:
+              type: string
+              description: Radius challenge responder container resource; every non-token path must return 404.
+              pattern: "^[a-z][a-z0-9-]{0,62}$"
+            challengePort:
+              type: integer
+              minimum: 1
+              maximum: 65535
+            phase:
+              type: string
+              enum:
+                - challenge
+                - https
+            hostname:
+              type: string
+              description: Optional Azure DNS label preference, not a custom domain or a guessed FQDN.
+              pattern: "^$|^[a-z][a-z0-9-]{1,61}[a-z0-9]$"
+            certificateSecretUri:
+              type: string
+              description: Required for Azure https phase; versionless Key Vault secret URI. Never certificate bytes.
+              pattern: "^$|^https://[a-zA-Z0-9-]+\\.vault\\.azure\\.net/secrets/[a-zA-Z0-9-]+/?$"
+            host:
+              type: string
+              description: Actual provider-returned DNS hostname.
+              readOnly: true
+            url:
+              type: string
+              readOnly: true
+            gatewayId:
+              type: string
+              readOnly: true
+            apiBackendService:
+              type: string
+              readOnly: true
+            challengeBackendService:
+              type: string
+              readOnly: true
+            apiBackendIp:
+              type: string
+              readOnly: true
+            challengeBackendIp:
+              type: string
+              readOnly: true
+          required:
+            - environment
+            - application
+            - apiService
+            - apiPort
+            - challengeService
+            - challengePort
+            - phase

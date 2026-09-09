@@ -65,3 +65,19 @@ available, AKS 1.35.7 is supported, Managed Redis is listed, and DSv5/regional
 capacity is 100 cores with zero in use. Preflight now rejects an empty PostgreSQL
 capability result instead of deploying into a known-restricted region.
 This supersedes D001's initial region while preserving its subscription.
+
+## D009 - Isolated tool and registry configuration
+
+Keep Azure CLI in its own container virtual environment: its pinned SDK versions
+conflict with the certificate SDK versions. Use fully resolved dependency files.
+Use project-specific Docker credentials; the global credential helper stalled
+public image resolution. Never modify the user's global Docker configuration.
+Exclude state, kubeconfigs, keys, and credentials from Docker build contexts.
+
+## D010 - Certificate ownership and staging
+
+Keep one project Key Vault, but restrict each gateway and issuer to its own
+deterministic certificate/account objects. A child identity must not read or
+replace other planes' certificates. Keep staging and production issuance
+distinguishable in certificate tags, and never reuse a staging certificate as
+the final trusted-HTTPS certificate.

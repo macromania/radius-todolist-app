@@ -1,0 +1,47 @@
+namespace: Demo.Platform
+types:
+  postgreSqlDatabases:
+    description: A private PostgreSQL server and database. Setup credentials are only for an initialization Job.
+    apiVersions:
+      "2025-08-01-preview":
+        schema:
+          type: object
+          properties:
+            environment:
+              type: string
+            application:
+              type: string
+            databaseName:
+              type: string
+              pattern: "^[a-z][a-z0-9_]{0,62}$"
+            host:
+              type: string
+              readOnly: true
+            port:
+              type: integer
+              readOnly: true
+            database:
+              type: string
+              readOnly: true
+            username:
+              type: string
+              description: Setup login; never mount its password in a public API or reconciler.
+              readOnly: true
+            password:
+              type: string
+              description: Protected setup credential emitted through result.secrets, not ordinary resource values.
+              readOnly: true
+              x-radius-sensitive: true
+            tlsRequired:
+              type: boolean
+              readOnly: true
+            serverId:
+              type: string
+              readOnly: true
+            setupSecretName:
+              type: string
+              description: Initialization-only Secret in the resource's runtime namespace. Delete after setup and scrub again after Recipe reapply.
+              readOnly: true
+          required:
+            - environment
+            - databaseName

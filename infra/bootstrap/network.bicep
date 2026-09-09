@@ -1,0 +1,285 @@
+param prefix string
+param location string
+@description('Ordered roles, including management at index zero. Address allocations must not be reordered after deployment.')
+param slots array
+param tags object
+@description('Use a run-unique salt when a purge-protected vault from a previous run is still soft-deleted.')
+param nameSalt string
+
+resource egressIp 'Microsoft.Network/publicIPAddresses@2024-07-01' = {
+  name: 'pip-${prefix}-egress'
+  location: location
+  tags: tags
+  sku: {
+    name: 'Standard'
+  }
+  properties: {
+    publicIPAllocationMethod: 'Static'
+    publicIPAddressVersion: 'IPv4'
+  }
+}
+
+resource nat 'Microsoft.Network/natGateways@2024-07-01' = {
+  name: 'nat-${prefix}'
+  location: location
+  tags: tags
+  sku: {
+    name: 'Standard'
+  }
+  properties: {
+    idleTimeoutInMinutes: 10
+    publicIpAddresses: [
+      {
+        id: egressIp.id
+      }
+    ]
+  }
+}
+
+resource gatewayNsg 'Microsoft.Network/networkSecurityGroups@2024-07-01' = {
+  name: 'nsg-${prefix}-gateways'
+  location: location
+  tags: tags
+  properties: {
+    securityRules: [
+      {
+        name: 'PublicHttpHttps'
+        properties: {
+          priority: 100
+          direction: 'Inbound'
+          access: 'Allow'
+          protocol: 'Tcp'
+          sourceAddressPrefix: 'Internet'
+          sourcePortRange: '*'
+          destinationAddressPrefix: '*'
+          destinationPortRanges: [
+            '80'
+            '443'
+          ]
+        }
+      }
+      {
+        name: 'GatewayManagement'
+        properties: {
+          priority: 110
+          direction: 'Inbound'
+          access: 'Allow'
+          protocol: 'Tcp'
+          sourceAddressPrefix: 'GatewayManager'
+          sourcePortRange: '*'
+          destinationAddressPrefix: '*'
+          destinationPortRange: '65200-65535'
+        }
+      }
+      {
+        name: 'GatewayHealth'
+        properties: {
+          priority: 120
+          direction: 'Inbound'
+          access: 'Allow'
+          protocol: '*'
+          sourceAddressPrefix: 'AzureLoadBalancer'
+          sourcePortRange: '*'
+          destinationAddressPrefix: '*'
+          destinationPortRange: '*'
+        }
+      }
+    ]
+  }
+}
+
+var nodeSubnets = [for (slot, i) in slots: {
+  name: 'snet-${slot}-nodes'
+  properties: {
+    addressPrefix: '10.64.${i}.0/24'
+    natGateway: {
+      id: nat.id
+    }
+  }
+}]
+var gatewaySubnets = [for (slot, i) in slots: {
+  name: 'snet-${slot}-gateway'
+  properties: {
+    addressPrefix: '10.64.${16 + i}.0/24'
+    networkSecurityGroup: {
+      id: gatewayNsg.id
+    }
+  }
+}]
+var endpointSubnets = [for (slot, i) in slots: {
+  name: 'snet-${slot}-endpoints'
+  properties: {
+    addressPrefix: '10.64.${32 + i}.0/27'
+    privateEndpointNetworkPolicies: 'Disabled'
+  }
+}]
+var postgresSubnets = [for (slot, i) in slots: {
+  name: 'snet-${slot}-postgresql'
+  properties: {
+    addressPrefix: '10.64.${48 + i}.0/27'
+    delegations: [
+      {
+        name: 'postgresql'
+        properties: {
+          serviceName: 'Microsoft.DBforPostgreSQL/flexibleServers'
+        }
+      }
+    ]
+  }
+}]
+
+resource vnet 'Microsoft.Network/virtualNetworks@2024-07-01' = {
+  name: 'vnet-${prefix}'
+  location: location
+  tags: tags
+  properties: {
+    addressSpace: {
+      addressPrefixes: [
+        '10.64.0.0/16'
+      ]
+    }
+    subnets: concat(nodeSubnets, gatewaySubnets, endpointSubnets, postgresSubnets)
+  }
+}
+
+var zoneNames = [
+  '${prefix}.postgres.database.azure.com'
+  'privatelink.redis.azure.net'
+  'privatelink.vaultcore.azure.net'
+]
+
+resource zones 'Microsoft.Network/privateDnsZones@2024-06-01' = [for name in zoneNames: {
+  name: name
+  location: 'global'
+  tags: tags
+}]
+
+resource links 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01' = [for (name, i) in zoneNames: {
+  parent: zones[i]
+  name: 'link-${prefix}'
+  location: 'global'
+  tags: tags
+  properties: {
+    registrationEnabled: false
+    virtualNetwork: {
+      id: vnet.id
+    }
+  }
+}]
+
+resource registry 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
+  name: 'acr${replace(prefix, '-', '')}${uniqueString(subscription().id, nameSalt)}'
+  location: location
+  tags: tags
+  sku: {
+    name: 'Standard'
+  }
+  properties: {
+    adminUserEnabled: false
+    publicNetworkAccess: 'Enabled'
+  }
+}
+
+resource vault 'Microsoft.KeyVault/vaults@2024-11-01' = {
+  name: 'kv-${take(prefix, 7)}-${uniqueString(subscription().id, nameSalt)}'
+  location: location
+  tags: tags
+  properties: {
+    tenantId: subscription().tenantId
+    sku: {
+      family: 'A'
+      name: 'standard'
+    }
+    enableRbacAuthorization: true
+    enableSoftDelete: true
+    enablePurgeProtection: true
+    softDeleteRetentionInDays: 7
+    publicNetworkAccess: 'Disabled'
+    networkAcls: {
+      bypass: 'None'
+      defaultAction: 'Deny'
+    }
+  }
+}
+
+resource vaultEndpoint 'Microsoft.Network/privateEndpoints@2024-07-01' = {
+  name: 'pe-${prefix}-vault'
+  location: location
+  tags: tags
+  properties: {
+    customNetworkInterfaceName: 'nic-${prefix}-vault'
+    subnet: {
+      id: resourceId('Microsoft.Network/virtualNetworks/subnets', vnet.name, 'snet-management-endpoints')
+    }
+    privateLinkServiceConnections: [
+      {
+        name: 'vault'
+        properties: {
+          privateLinkServiceId: vault.id
+          groupIds: [
+            'vault'
+          ]
+        }
+      }
+    ]
+  }
+}
+
+resource vaultNic 'Microsoft.Network/networkInterfaces@2024-07-01' existing = {
+  name: 'nic-${prefix}-vault'
+}
+resource vaultNicTags 'Microsoft.Resources/tags@2021-04-01' = {
+  scope: vaultNic
+  name: 'default'
+  properties: {
+    tags: tags
+  }
+  dependsOn: [
+    vaultEndpoint
+  ]
+}
+
+resource vaultZoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-07-01' = {
+  parent: vaultEndpoint
+  name: 'default'
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'vault'
+        properties: {
+          privateDnsZoneId: zones[2].id
+        }
+      }
+    ]
+  }
+}
+
+output foundation object = {
+  virtualNetworkId: vnet.id
+  virtualNetworkName: vnet.name
+  egressIp: egressIp.properties.ipAddress
+  egressIpId: egressIp.id
+  registryId: registry.id
+  registryName: registry.name
+  registryLoginServer: registry.properties.loginServer
+  vaultId: vault.id
+  vaultName: vault.name
+  vaultUri: vault.properties.vaultUri
+  postgresqlDnsZoneId: zones[0].id
+  redisDnsZoneId: zones[1].id
+  vaultDnsZoneId: zones[2].id
+}
+
+output allocations array = [for (slot, i) in slots: {
+  slot: slot
+  certificateName: 'gateway-${slot}'
+  acmeStateSecretName: 'acme-${slot}'
+  nodeSubnetId: resourceId('Microsoft.Network/virtualNetworks/subnets', vnet.name, 'snet-${slot}-nodes')
+  nodeSubnetName: 'snet-${slot}-nodes'
+  gatewaySubnetId: resourceId('Microsoft.Network/virtualNetworks/subnets', vnet.name, 'snet-${slot}-gateway')
+  gatewaySubnetCidr: '10.64.${16 + i}.0/24'
+  privateEndpointSubnetId: resourceId('Microsoft.Network/virtualNetworks/subnets', vnet.name, 'snet-${slot}-endpoints')
+  postgresqlSubnetId: resourceId('Microsoft.Network/virtualNetworks/subnets', vnet.name, 'snet-${slot}-postgresql')
+  apiPrivateIp: '10.64.${i}.240'
+  challengePrivateIp: '10.64.${i}.241'
+}]
