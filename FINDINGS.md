@@ -294,3 +294,21 @@ On the Linux image, `/var/run` aliases `/run`. Both paths are now canonicalized;
 the mount boundary, identity checks, and symlink-escape refusal remain. Thirty
 runner tests and both fix reviews passed. No tenant was created by that failed
 startup.
+
+### Dedicated harness identity correction
+
+The second live harness Job authenticated, then failed before tenant creation:
+the coordinator could read AKS but received `AuthorizationFailed` on Application
+Gateway and delegated PostgreSQL subnet reads. These are exporter requirements,
+not runtime provisioning requirements. Bootstrap now assigns a separate harness
+identity project-scoped Reader and AKS cluster access, federated only to its own
+management-cluster service account. The launcher selects and validates that
+identity; missing metadata or reuse of the coordinator fails before execution.
+Coordinator grants and runtime images are unchanged.
+
+The focused harness and compiled-infrastructure suite passed 149 tests and
+72 subtests, including emitted role assignments, federation, actual launcher
+resource selection, and login/identity guards. Rubber-duck and security fix
+reviews found no actionable issues. Real bootstrap what-if and ARM validation
+passed at 2026-09-09T17:46:04Z. Deployment and renewed live acceptance are pending;
+neither failed harness startup created tenants.

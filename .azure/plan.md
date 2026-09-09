@@ -1,6 +1,6 @@
 # Three-plane Radius deployment checkpoint
 
-Status: Validated (reorganized management application; live acceptance pending).
+Status: Validated (dedicated harness identity; live acceptance pending).
 Full API-driven onboarding, outage acceptance, local deployment, and final
 teardown remain open. A source-layout change is not a new deployment result.
 
@@ -46,6 +46,18 @@ and parameter hashes in `.state/azure/validation.json`; changed hashes require
 validation again. Never infer deployment success from compilation or Job submission.
 
 ## 7. Validation Proof
+
+2026-09-09T17:46:04Z: the dedicated harness identity passed
+`uv run --no-sync python operations/validate-bootstrap.py` (bundled Bicep compile,
+subscription what-if, and ARM validate). `.state/azure/validation.json` records
+the exact current template/parameter hashes. What-if reports two explicit
+creates, 84 deploy entries, 122 unsupported expansions, and 19 ignored entries;
+it does not provide a complete role-assignment diff. Compiled contract tests
+check the exact harness grants. No deletions were proposed. Subscription auth
+is valid, and subscription policy assignments were read without modification.
+Ruff and the focused harness/compiled-infrastructure suite passed 149 tests
+and 72 subtests. Both fix reviews were clean. Live harness access and tenant
+acceptance remain to be observed after bootstrap.
 
 For layout commit `43b24fc`, `make check` passed 320 offline tests and 47
 subtests, all 22 Bicep files, three extensions, Ruff, and ShellCheck. Fifty

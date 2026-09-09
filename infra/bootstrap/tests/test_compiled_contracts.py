@@ -77,6 +77,8 @@ class CompiledInfrastructureTests(unittest.TestCase):
     def test_management_scopes_and_group_dependencies_are_explicit(self):
         names = {
             "coordinator-identity",
+            "harness-identity",
+            "harness-federation",
             "management-cluster",
             "management-radius-federation",
             "management-issuer-federation",
@@ -95,6 +97,43 @@ class CompiledInfrastructureTests(unittest.TestCase):
                 self.assertNotRegex(json.dumps(body), BARE_COPY_INDEX)
         for key in ("coordinatorIdentity", "managementCluster"):
             self.assertNotRegex(json.dumps(self.bootstrap["outputs"][key]), BARE_COPY_INDEX)
+
+    def test_harness_identity_has_project_reads_and_cluster_access_only(self):
+        modules = {
+            item.get("copy", {}).get("name", item["name"]): item
+            for item in resources(self.bootstrap)
+            if item["type"] == "Microsoft.Resources/deployments"
+        }
+        identity = modules["harness-identity"]
+        self.assertEqual(identity["properties"]["parameters"]["purpose"]["value"], "harness")
+        self.assertIn("harnessIdentity", self.bootstrap["outputs"]["foundation"]["value"])
+        self.assertEqual(
+            modules["harness-federation"]["properties"]["parameters"]["bindings"]["value"],
+            [
+                {
+                    "name": "demo-harness",
+                    "subject": "system:serviceaccount:radplanes-management-management:harness",
+                }
+            ],
+        )
+        for name in ("appAccess", "harness-platform-read"):
+            assignments = modules[name]["properties"]["parameters"]["assignments"]["value"]
+            harness = [a for a in assignments if "'harness-identity'" in a["principalId"]]
+            self.assertEqual(len(harness), 1)
+            self.assertEqual(harness[0]["roleDefinitionGuid"], "[variables('reader')]")
+            self.assertEqual(harness[0]["principalType"], "ServicePrincipal")
+            self.assertIn("rg-{0}", modules[name]["resourceGroup"])
+        cluster = modules["clusterAccess"]["properties"]["parameters"]["assignments"]["value"]
+        roles = re.findall(
+            r"'harness-identity'\).*?'roleDefinitionGuid', variables\('([^']+)'\)", cluster
+        )
+        self.assertCountEqual(roles, ["clusterUser", "clusterAdmin", "reader"])
+        self.assertEqual(
+            self.bootstrap["variables"]["reader"], "acdd72a7-3385-48ef-bd42-f606fba81ae7"
+        )
+        self.assertEqual(
+            self.bootstrap["variables"]["clusterAdmin"], "b1ff04bb-8a4e-4dc4-8eb5-8693973ce19b"
+        )
 
     def test_child_identity_module_keeps_child_and_management_references_distinct(self):
         module = next(

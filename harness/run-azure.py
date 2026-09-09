@@ -18,7 +18,7 @@ import time
 from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE = Path("/workspace")
@@ -132,7 +132,32 @@ def configuration(path):
             == f"/subscriptions/{SUBSCRIPTION}/resourceGroups/rg-radplanes-{slot}-app",
             "allocation_mismatch",
         )
+    harness_identity(config)
     return config
+
+
+def harness_identity(config):
+    identity = config["foundation"].get("harnessIdentity")
+    expected_id = (
+        f"/subscriptions/{SUBSCRIPTION}/resourceGroups/{GROUP}/providers/"
+        "Microsoft.ManagedIdentity/userAssignedIdentities/id-radplanes-harness"
+    )
+    require(
+        isinstance(identity, dict) and identity.get("id") == expected_id,
+        "harness_identity_required",
+    )
+    for field in ("clientId", "principalId"):
+        value = identity.get(field)
+        try:
+            valid = isinstance(value, str) and str(UUID(value)) == value
+        except ValueError:
+            valid = False
+        require(valid, "harness_identity_invalid")
+    require(
+        identity["clientId"] != config["coordinatorIdentity"]["clientId"],
+        "harness_identity_must_be_separate",
+    )
+    return identity
 
 
 BOOTSTRAP = r"""import fcntl, hashlib, json, os, pathlib, subprocess, sys
@@ -183,6 +208,7 @@ except Exception:
 
 def resources(config, name, bundle, commit, mode):
     metadata = {"namespace": NAMESPACE, "labels": LABELS}
+    identity = harness_identity(config)
     bootstrap = {
         key: config[key] for key in ("foundation", "coordinatorIdentity", "managementCluster")
     }
@@ -210,6 +236,18 @@ def resources(config, name, bundle, commit, mode):
             "resources": {"requests": {"storage": "8Gi"}},
         },
     }
+    service_account = {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "metadata": {
+            **metadata,
+            "name": "harness",
+            "annotations": {
+                "azure.workload.identity/client-id": identity["clientId"],
+                "azure.workload.identity/tenant-id": config["foundation"]["tenantId"],
+            },
+        },
+    }
     job = {
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -220,7 +258,7 @@ def resources(config, name, bundle, commit, mode):
             "template": {
                 "metadata": {"labels": {**LABELS, "azure.workload.identity/use": "true"}},
                 "spec": {
-                    "serviceAccountName": "provisioner",
+                    "serviceAccountName": "harness",
                     "restartPolicy": "Never",
                     "terminationGracePeriodSeconds": 150,
                     "securityContext": {
@@ -265,7 +303,7 @@ def resources(config, name, bundle, commit, mode):
             },
         },
     }
-    return [pvc, cm, job]
+    return [pvc, cm, service_account, job]
 
 
 def invoke(remote_command, *extra):
@@ -345,7 +383,8 @@ def launch(config, name, mode, inspected, commit):
     )
     invoke(
         f"kubectl apply --server-side --field-manager=radplanes-harness -f {manifest.name}",
-        "--file", str(manifest),
+        "--file",
+        str(manifest),
     )
     return {
         "outcome": "submitted_not_completed",
@@ -366,7 +405,7 @@ def authenticate(config, env):
                 "login",
                 "--service-principal",
                 "--username",
-                config["coordinatorIdentity"]["clientId"],
+                harness_identity(config)["clientId"],
                 "--tenant",
                 config["foundation"]["tenantId"],
                 "--federated-token",
@@ -461,7 +500,7 @@ def in_cluster(config, mode, commit):
         "in_cluster_namespace_required",
     )
     require(
-        os.environ.get("AZURE_CLIENT_ID") == config["coordinatorIdentity"]["clientId"]
+        os.environ.get("AZURE_CLIENT_ID") == harness_identity(config)["clientId"]
         and os.environ.get("AZURE_TENANT_ID") == config["foundation"]["tenantId"]
         and os.environ.get("EXPECTED_SOURCE_COMMIT") == commit,
         "workload_identity_or_source_mismatch",

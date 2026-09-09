@@ -43,6 +43,7 @@ var requiredTags = union(tags, {
 })
 var slots = concat(['management'], childSlots)
 var contributor = 'b24988ac-6180-42a0-ab88-20f7382dd24c'
+var reader = 'acdd72a7-3385-48ef-bd42-f606fba81ae7'
 var clusterUser = '4abbcc35-e782-43d8-92c5-2d3f1bd2253f'
 var clusterAdmin = 'b1ff04bb-8a4e-4dc4-8eb5-8693973ce19b'
 var radiusAccounts = [
@@ -202,6 +203,19 @@ module coordinator './coordinator.bicep' = {
     clusterGroups
   ]
 }
+module harness './coordinator.bicep' = {
+  name: 'harness-identity'
+  scope: resourceGroup('rg-${prefix}-management-cluster')
+  params: {
+    prefix: prefix
+    location: location
+    tags: requiredTags
+    purpose: 'harness'
+  }
+  dependsOn: [
+    clusterGroups
+  ]
+}
 module network './network.bicep' = {
   name: 'network'
   scope: resourceGroup('rg-${prefix}-platform')
@@ -244,6 +258,11 @@ module appAccess './resource-group-access.bicep' = [for (slot, i) in slots: {
         principalType: 'ServicePrincipal'
         roleDefinitionGuid: contributor
       }
+      {
+        principalId: harness.outputs.identity.principalId
+        principalType: 'ServicePrincipal'
+        roleDefinitionGuid: reader
+      }
     ]
   }
   dependsOn: [
@@ -274,6 +293,21 @@ module clusterAccess './resource-group-access.bicep' = [for (slot, i) in slots: 
         principalId: coordinator.outputs.identity.principalId
         principalType: 'ServicePrincipal'
         roleDefinitionGuid: clusterAdmin
+      }
+      {
+        principalId: harness.outputs.identity.principalId
+        principalType: 'ServicePrincipal'
+        roleDefinitionGuid: clusterUser
+      }
+      {
+        principalId: harness.outputs.identity.principalId
+        principalType: 'ServicePrincipal'
+        roleDefinitionGuid: clusterAdmin
+      }
+      {
+        principalId: harness.outputs.identity.principalId
+        principalType: 'ServicePrincipal'
+        roleDefinitionGuid: reader
       }
     ], i == 0 ? [] : [
       {
@@ -374,6 +408,40 @@ module coordinatorFederation './federation.bicep' = {
   ]
 }
 
+module harnessPlatformAccess './resource-group-access.bicep' = {
+  name: 'harness-platform-read'
+  scope: resourceGroup('rg-${prefix}-platform')
+  params: {
+    assignments: [
+      {
+        principalId: harness.outputs.identity.principalId
+        principalType: 'ServicePrincipal'
+        roleDefinitionGuid: reader
+      }
+    ]
+  }
+  dependsOn: [
+    platformGroup
+  ]
+}
+module harnessFederation './federation.bicep' = {
+  name: 'harness-federation'
+  scope: resourceGroup('rg-${prefix}-management-cluster')
+  params: {
+    identityName: last(split(harness.outputs.identity.id, '/'))
+    issuer: management.outputs.oidcIssuer
+    bindings: [
+      {
+        name: 'demo-harness'
+        subject: 'system:serviceaccount:radplanes-management-management:harness'
+      }
+    ]
+  }
+  dependsOn: [
+    clusterGroups
+  ]
+}
+
 output foundation object = union(network.outputs.foundation, {
   projectName: projectName
   subscriptionId: subscription().subscriptionId
@@ -383,6 +451,7 @@ output foundation object = union(network.outputs.foundation, {
   kubernetesVersion: kubernetesVersion
   nodeVmSize: nodeVmSize
   nodeCount: nodeCount
+  harnessIdentity: harness.outputs.identity
   roleDefinitionIds: {
     certificateImporter: issuerRole.id
     acmeStateWriter: acmeStateRole.id

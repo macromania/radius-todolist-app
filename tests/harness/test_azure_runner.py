@@ -65,6 +65,14 @@ def configuration():
             "registryLoginServer": "demoregistry.azurecr.io",
             "egressIp": "5.6.7.8",
             "authorizedIpRanges": ["5.6.7.8/32"],
+            "harnessIdentity": {
+                "id": prefix
+                + runner.GROUP
+                + "/providers/Microsoft.ManagedIdentity/userAssignedIdentities/"
+                "id-radplanes-harness",
+                "clientId": "22222222-2222-4222-8222-222222222222",
+                "principalId": "33333333-3333-4333-8333-333333333333",
+            },
         },
         "allocations": allocations,
         "coordinatorIdentity": {"clientId": client},
@@ -127,7 +135,7 @@ class AzureRunnerTests(unittest.TestCase):
                 os.environ,
                 {
                     "CONFIRM_AZURE": "yes",
-                    "AZURE_CLIENT_ID": self.config["coordinatorIdentity"]["clientId"],
+                    "AZURE_CLIENT_ID": self.config["foundation"]["harnessIdentity"]["clientId"],
                     "AZURE_TENANT_ID": self.config["foundation"]["tenantId"],
                     "AZURE_FEDERATED_TOKEN_FILE": str(self.token),
                     "HARNESS_LOCK_FD": str(self.lock),
@@ -208,15 +216,43 @@ class AzureRunnerTests(unittest.TestCase):
             with self.assertRaisesRegex(runner.HarnessError, "tracked_state_refused"):
                 runner.source_commit()
 
-    def test_job_has_only_private_harness_volume_and_existing_identity(self):
-        pvc, cm, job = runner.resources(
+    def test_missing_foreign_or_coordinator_harness_identity_fails_before_commands(self):
+        for identity in (
+            None,
+            {},
+            {**self.config["foundation"]["harnessIdentity"], "id": "/foreign"},
+            {**self.config["foundation"]["harnessIdentity"], "principalId": "invalid"},
+            {
+                **self.config["foundation"]["harnessIdentity"],
+                "clientId": self.config["coordinatorIdentity"]["clientId"],
+            },
+        ):
+            self.config["foundation"]["harnessIdentity"] = identity
+            self.config_path.write_text(json.dumps(self.config))
+            with self.assertRaises(runner.HarnessError):
+                runner.configuration(self.config_path)
+            self.config = configuration()
+        self.run.assert_not_called()
+
+    def test_job_has_only_private_harness_volume_and_dedicated_identity(self):
+        pvc, cm, service_account, job = runner.resources(
             self.config, "demo-acceptance-test", b"bundle", COMMIT, "all"
         )
         self.assertEqual(pvc["metadata"]["name"], "harness-state")
         self.assertEqual(pvc["spec"]["storageClassName"], "radplanes-provisioner")
         self.assertEqual(pvc["spec"]["resources"]["requests"]["storage"], "8Gi")
         pod = job["spec"]["template"]["spec"]
-        self.assertEqual(pod["serviceAccountName"], "provisioner")
+        self.assertEqual(pod["serviceAccountName"], "harness")
+        self.assertEqual(service_account["metadata"]["name"], "harness")
+        self.assertEqual(
+            service_account["metadata"]["annotations"],
+            {
+                "azure.workload.identity/client-id": self.config["foundation"]["harnessIdentity"][
+                    "clientId"
+                ],
+                "azure.workload.identity/tenant-id": self.config["foundation"]["tenantId"],
+            },
+        )
         self.assertEqual(pod["securityContext"]["runAsUser"], 10001)
         self.assertEqual(pod["securityContext"]["fsGroup"], 10001)
         self.assertEqual(pod["securityContext"]["fsGroupChangePolicy"], "OnRootMismatch")
@@ -448,6 +484,10 @@ class AzureRunnerTests(unittest.TestCase):
             self.token.write_text(token)
             runner.authenticate(self.config, env)
             argv = self.run.call_args.args[0]
+            self.assertEqual(
+                argv[argv.index("--username") + 1],
+                self.config["foundation"]["harnessIdentity"]["clientId"],
+            )
             self.assertEqual(argv[argv.index("--federated-token") + 1], token)
             self.assertEqual(self.run.call_args.kwargs["stdout"], subprocess.DEVNULL)
             self.assertEqual(self.run.call_args.kwargs["stderr"], subprocess.DEVNULL)
@@ -695,6 +735,11 @@ class AzureRunnerTests(unittest.TestCase):
         )
 
     def test_namespace_or_identity_mismatch_never_authenticates(self):
+        with patch.dict(
+            os.environ, {"AZURE_CLIENT_ID": self.config["coordinatorIdentity"]["clientId"]}
+        ):
+            with self.assertRaisesRegex(runner.HarnessError, "identity_or_source_mismatch"):
+                runner.in_cluster(self.config, "all", COMMIT)
         for variable in ("AZURE_CLIENT_ID", "AZURE_TENANT_ID", "EXPECTED_SOURCE_COMMIT"):
             with patch.dict(os.environ, {variable: "foreign"}):
                 with self.assertRaisesRegex(runner.HarnessError, "identity_or_source_mismatch"):

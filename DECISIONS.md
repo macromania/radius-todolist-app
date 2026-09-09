@@ -179,8 +179,21 @@ changed from 403 to 200 after that exact grant.
 ## D022 - Keep network-dependent demo execution in the harness
 
 When the laptop cannot reach AKS directly, run the existing harness in a
-management-cluster Job using the already assigned coordinator identity and
+management-cluster Job using a dedicated harness identity and
 verified tool image. Supply committed source through a Git bundle so provenance
 remains real. Keep its state separate from operator and runtime-provisioner
 state. This adds no application plane, VPN, or jump host, and does not change
 the child-initiated reconciliation or outage contract.
+
+## D023 - Separate harness inspection from runtime provisioning
+
+The coordinator's AKS bootstrap permissions do not include Application Gateway
+or delegated-subnet reads. Give the opt-in harness its own workload-federated
+identity: Reader on project app/cluster/platform groups and AKS Cluster User
+plus AKS RBAC Cluster Admin on the allocated cluster groups. These cluster
+permissions support trusted-operator Secret export, pod inspection, and custom
+Cilium outage policies; they are not a tenant isolation boundary. Grant no
+direct Azure resource writes, role delegation, or Key Vault data access to this
+identity. Keep the coordinator's existing runtime grants unchanged. The harness
+must refuse missing identity configuration rather than fall back to coordinator
+or human credentials.

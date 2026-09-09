@@ -44,8 +44,13 @@ This submits, but does not await, a `demo-acceptance-*` Job in management throug
 AKS Run Command. It requires a clean committed checkout and matching
 `images.json` references with `content_verified: true`. The verified provisioner
 image supplies tools; a checked Git bundle supplies harness source. No harness
-code is added to runtime images. The existing `provisioner` service account
-authenticates through workload federation. Only the separate `harness-state`
+code is added to runtime images. The dedicated `harness` service account
+authenticates as `foundation.harnessIdentity` through workload federation.
+Bootstrap grants it project-scoped metadata reads and AKS cluster access for
+Secret export, workload inspection, and Cilium fault policies. It is trusted
+operator tooling, not runtime or tenant authorization. Coordinator permissions
+are unchanged; the launcher refuses a missing or reused coordinator identity.
+Only the separate `harness-state`
 PVC retains exported keys, kubeconfigs, evidence, and `azure/harness/termination.json`.
 The launcher never mounts operator/provisioner state. `--name` accepts a bounded
 `demo-acceptance` suffix; `--config` defaults to `.state/azure/provisioning.json`.
