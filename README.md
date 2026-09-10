@@ -4,7 +4,8 @@ Management, control, and data run in separate Kubernetes clusters. Radius
 provisions the child clusters and their applications. **Azure onboarding and
 functional behavior are proven in separately scoped runs:** two shared tenants,
 one isolated tenant, configuration/counter isolation, and both parent outages.
-Redis cleanup tracking and final teardown remain open; local is not implemented.
+The corrected Redis create/tag/delete lifecycle is also proven. Final Azure
+teardown remains open; local is not implemented.
 
 This pass organizes the repository, not the application design. SQL,
 authentication, provisioning, and reconciliation simplification are deferred

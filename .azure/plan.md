@@ -1,8 +1,9 @@
 # Three-plane Radius deployment checkpoint
 
-Status: Validated (F059 region-response fix reviewed; candidate image rebuild next).
+Status: Validated (fresh Redis lifecycle verified; final Azure teardown next).
 Fresh admission and existing-tenant functional/outage proof are recorded
-separately. Redis lifecycle correction, final teardown, and local remain open.
+separately. Fresh Redis lifecycle and unchanged-resource postconditions are
+verified. Final Azure teardown and local remain open.
 
 ## Scope and authorization
 
@@ -65,6 +66,16 @@ and parameter hashes in `.state/azure/validation.json`; changed hashes require
 validation again. Never infer deployment success from compilation or Job submission.
 
 ## 7. Validation Proof
+
+2026-09-10T10:13:38Z: fresh Redis creation, real metadata tagging twice,
+idempotence, supported stored tracking, and Radius deletion are verified.
+The all-in-one gate stopped only on the CLI's empty-application SecretStore
+preflight bug; its failed record remains unchanged. Reviewed native Radius
+owner-API cleanup then verified auth/backing-Secret absence, fresh Azure
+cache/endpoint/NIC absence, and unchanged existing-resource fingerprints.
+No active tenant configuration changed. The remaining Azure step is the
+authorized whole-environment teardown, including explicit treatment of old
+records that still track the former tag extension.
 
 2026-09-10T07:57:49Z: `uv run --no-sync python
 operations/validate-bootstrap.py` passed real ARM what-if and validation with

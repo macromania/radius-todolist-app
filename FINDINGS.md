@@ -80,12 +80,13 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F051 | 4 | High correctness | `harness/test-e2e.py` | paused_reconciler | A 30-second drain deadline leaves no room for the Pod's own 30-second shutdown grace and controller latency | Resolved: bounded grace-aware drain, regressions/review, and live shared-b readiness while data paused followed by restored application proof |
 | F052 | 4 | External interruption | Azure governance automation | 2026-09-10T00:06Z | All five project AKS clusters and three PostgreSQL servers were stopped during acceptance despite requested tags | Normal scoped restoration, preserved interrupted state, and reviewed owner-ordered reset completed; all three fresh operations then succeeded; governance controls unchanged |
 | F053 | reset | External metadata change | Two management state disks | 2026-09-10T00:55Z | State disks lost required tags after preview, so strict cleanup stopped before mutations | Exact PV/PVC/CSI ownership verified; only required tags merged, properties preserved; reviewed reset and exact disk absence subsequently verified |
-| F054 | reset | High correctness | `infra/radius/recipes/azure/redis.bicep` | result.resources | Radius cannot resolve a deletion API version for tracked Microsoft.Resources/tags metadata | Tag extension removed; bounded metadata Job under existing Radius identity wired into both data deployment phases; 514 tests/245 subtests and both fix reviews pass; fresh lifecycle gate pending |
+| F054 | reset | High correctness | `infra/radius/recipes/azure/redis.bicep` | result.resources | Radius cannot resolve a deletion API version for tracked Microsoft.Resources/tags metadata | Resolved for fresh resources: real create/tag/idempotence/tracking and Radius deletion passed; final native-owner cleanup and unchanged-resource postconditions verified; old deployed records still require explicit cleanup |
 | F055 | 4 | High correctness | `harness/test-e2e.py` | initial endpoint discovery | A 30-second endpoint-export wait is shorter than the five-cluster exporter's actual 90-second scan | Resolved: bounded discovery, 90-second-delay regression, unchanged convergence deadlines, 185 tests/211 subtests, clean fix reviews, and live existing-tenant verification passed |
 | F056 | lifecycle gate | Medium observability | One-off F054 gate | command logging | Setting the command logger to CRITICAL hid the first gate's already-redacted failure diagnostics | Resolved: standard ERROR diagnostics, 165 focused tests, clean direct walkthrough/security review; next live attempt exposed the actual F057 error |
 | F057 | lifecycle gate | Medium correctness | One-off F054 gate | group-show preflight | The wrapper supplied `--group` while the caller also supplied a positional group name, which Radius rejects | Resolved: duplicate removed, explicit scope retained, run-path regression/reviews passed; live group-show now succeeds |
 | F058 | lifecycle gate | Medium correctness | One-off F054 gate | group-ID comparison | Radius returns lowercase `resourcegroups`, which failed a case-sensitive comparison with `resourceGroups` | Resolved: actual ID verified, existing comparison helper reused, foreign-group regression/reviews passed; create5 passed Radius preflight |
-| F059 | lifecycle gate | High correctness | `redis_nic_tags.py` | location validation | Managed Redis returns `Central US`, not `centralus`, so the new helper rejects the correctly owned cache before tagging | Actual response/region alias verified; exact two-name handling, 237 focused tests, direct walkthrough/security review pass; rebuilt image and live lifecycle proof pending |
+| F059 | lifecycle gate | High correctness | `redis_nic_tags.py` | location validation | Managed Redis returns `Central US`, not `centralus`, so the new helper rejects the correctly owned cache before tagging | Resolved: actual response/alias verified, guards/regressions/reviews passed, rebuilt image inspected, real baseline and fresh NIC tagging/idempotence passed |
+| F060 | lifecycle gate | Medium compatibility | Radius 0.60.2 CLI | unbound SecretStore deletion | `resource delete` tries to parse the generated empty application string before calling the deletion API | Reviewed native Radius owner-API cleanup passed; Radius auth/backing Secret absent and all lifecycle postconditions verified; reusable gate correction being finalized |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -924,3 +925,50 @@ All 21 gate tests passed against the newly verified manifest. The regenerated
 hash is `fe3198c4e5173d4b569451152c2ea9dabf799218b5dd8c2720ea453a9aef6732`;
 no previous image's runtime code was overlaid. Live lifecycle proof remains
 pending, and the working tenant configuration is unchanged.
+
+`create6` proved the F054/F059 core behavior: a fresh Radius-created cache
+`amr-shexztagitn52`, successful NIC tagging through the real helper twice,
+idempotence, unchanged existing-resource fingerprints, and four unique tracked
+resource IDs with no `Microsoft.Resources/tags`. Radius then deleted the fresh
+Redis resource, application, and environment. Independent Azure inventory
+confirmed the new cache/private endpoint/NIC absent; Radius lists confirmed
+the Redis/application/environment absent.
+
+The Job failed only at the last registry-auth SecretStore cleanup (F060).
+Its actual resource has `application: ""`; the pinned CLI's
+[`extractEnvironmentAndApplicationIDs`](https://github.com/radius-project/radius/blob/v0.60.2/pkg/cli/cmd/resource/delete/delete.go)
+parses any non-null value as an ID before invoking deletion. The empty string
+therefore fails in the client, not in Radius's resource lifecycle. The only
+remaining gate record is `redis-lifecycle-registry-auth`, whose verified
+output is exactly its same-named Kubernetes Secret in `radius-system`.
+
+The reviewed `f054-finish` Job uses the authenticated native Radius API
+documented by the pinned SDK's Kubernetes transport. It validates the exact
+owner/type/output, the original cluster and existing-application fingerprints,
+and absence of the former gate owners before deleting that one auth resource.
+It does not edit Radius storage, change application fields, delete Azure
+resources directly, or delete the backing Kubernetes Secret itself. It waits
+for Radius and backing-Secret absence, then runs the original Azure
+absence/fingerprint probes. Its direct walkthrough and independent security
+review were clean. The original `create6` result remains failed; final cleanup
+and postconditions will be a separate evidence record.
+
+`f054-finish` completed at 10:13:38Z. Its result is
+`lifecycle_postconditions_verified`: the exact Radius auth record and backing
+Secret are gone, all three fresh Azure resource IDs are absent, and the
+original cluster UID, Radius projection, and existing cache/endpoint/NIC
+fingerprints are unchanged. This completes the F054 fresh-resource lifecycle
+proof without rewriting `create6` as a passing all-in-one run. The old deployed
+Redis records still contain their original unsupported tag metadata; removing
+those during final teardown is a separate explicit owner-cleanup operation.
+
+Final teardown now has five temporary Reader assignments on the exact live
+AKS managed-node groups and one `radius-reset` federation for the existing
+harness identity. Reader's actual permission is `*/read`, with no data actions;
+no Contributor/Owner or subscription-wide grant was added. Seven no-cloud
+guard tests, the direct walkthrough, and independent security review passed.
+Independent readback verified the exact five new assignments and federation,
+with the original 21 grants and original federation unchanged. The protected
+`final-cleanup-access.json` journal records every intended/created ID and the
+baseline before mutations. Remove these exact temporary entries after the
+Radius-only phase and verify their absence before bootstrap teardown.

@@ -337,3 +337,15 @@ other tags and network properties, read the tags back, and wait for actual Job
 success. Failures remain visible for explicit operator cleanup. Existing
 Radius records containing the old tag extension are not repaired by this
 source change; prove the new create/tag/delete lifecycle on a fresh resource.
+
+## D037 - Keep deletion with Radius when its CLI preflight is broken
+
+Radius 0.60.2's generic delete command rejects a generated SecretStore's empty
+application ID before sending DELETE. For that verified gate resource, use
+the authenticated native Radius resource API after checking exact ownership,
+output references, and former-owner absence. Wait for the Radius resource and
+its backing Secret to disappear, then verify the surrounding resources.
+
+This is a specific client compatibility correction, not a general force-delete
+fallback. Do not alter stored ownership fields, edit Radius's backing store,
+or bypass its resource lifecycle by directly deleting the Kubernetes Secret.
