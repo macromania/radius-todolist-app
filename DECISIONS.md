@@ -272,3 +272,12 @@ grace plus 30 seconds of controller margin when pausing it. Validate that grace
 before changing replicas and restore the same Deployment in `finally`.
 Do not force-delete Pods or weaken the independent 30-second outage catch-up
 requirement to accommodate normal Kubernetes shutdown.
+
+## D031 - Keep governance controls separate from test recovery
+
+Treat an external cluster stop as an interruption, not an application failure.
+The requested resource tags are not a guarantee against every governance action.
+Do not modify automation or policy to keep tests running. For this authorized
+deployment, use ordinary start operations only on verified project clusters,
+then inspect recorded state. Never convert interrupted work into success or
+automatically replay it; repeated stops require an approved uninterrupted window.

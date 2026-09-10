@@ -78,6 +78,7 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F049 | reset | Medium security | `.state/azure/radius-reset-execute.json` | 81 (initial) | Generated executor still references old immutable bootstrap after source guard repair | Original manifest archived; new preview/execute references repaired immutable payload, compared byte-for-byte and checked for unconditional guards; final review clean |
 | F050 | 4 | High correctness | `harness/test-e2e.py` | IDENTITY_PROBE | Attribute-based Redis TLS detection rejects a real verified TLS socket | Resolved: negotiated-socket detection, optimization-safe PING, actual live probe pass, bounded first-verification continuation and both fix reviews pass |
 | F051 | 4 | High correctness | `harness/test-e2e.py` | paused_reconciler | A 30-second drain deadline leaves no room for the Pod's own 30-second shutdown grace and controller latency | Validated configured grace plus 30-second margin; UID/restoration guards and outage deadlines unchanged; regressions and fix review pass |
+| F052 | 4 | External interruption | Azure governance automation | 2026-09-10T00:06Z | All five project AKS clusters were stopped during acceptance despite requested tags | Attributed to governance application, not demo identities; ordinary starts requested only for verified project clusters, no policy/automation change; results pending inspection |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -608,3 +609,20 @@ The direct walkthrough and security review were clean; 168 harness tests and
 162 subtests passed, including full-grace shutdown, custom grace, timeout
 restoration, and invalid metadata before mutation. Live continuation remains
 to verify the corrected pause before the remaining scenario.
+
+### External AKS stop during acceptance
+
+The acceptance monitor lost Run Command access because management AKS was
+stopping, not because it read a failed harness result. Azure Activity Log
+attributes the stop at 2026-09-10T00:06:02Z to the application
+`MCAPSGovernance-AutomationApp`, not the operator, coordinator, harness, or
+Radius identities. All five project clusters, including both newly created
+isolated clusters, were Stopped/Succeeded and retained `SecurityControl=Ignore`.
+Those tags did not prevent this separate power action.
+
+Exact cluster IDs and ownership tags were rechecked before ordinary start
+operations were requested for the five project clusters. No governance
+automation, Azure Policy, permissions, or tags were changed. After restart,
+inspect actual operations, harness evidence, and any fault restoration state;
+do not automatically replay or relabel an interrupted provisioning operation.
+The available metadata does not yet establish whether acceptance completed.

@@ -1,6 +1,6 @@
 # Three-plane Radius deployment checkpoint
 
-Status: Validated (first tenant proved; corrected harness continuation next).
+Status: Validated (acceptance interrupted by external cluster stop; restoration in progress).
 Full API-driven onboarding, outage acceptance, local deployment, and final
 teardown remain open. A source-layout change is not a new deployment result.
 
