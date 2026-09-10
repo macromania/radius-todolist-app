@@ -1,6 +1,6 @@
 # Three-plane Radius deployment checkpoint
 
-Status: Validated (external interruption restored; controlled five-cluster reset in progress).
+Status: Validated (fresh management deploying with parent-only Redis lifecycle Recipe).
 Full API-driven onboarding, outage acceptance, local deployment, and final
 teardown remain open. A source-layout change is not a new deployment result.
 
@@ -8,15 +8,12 @@ teardown remain open. A source-layout change is not a new deployment result.
 
 The user approved implementation, real Azure deployment, automatic parent
 commits, and phase/fix verification with rubber-duck and security reviews on
-2026-09-09. The first real shared tenant reached control HTTPS, then failed
-during data deployment. F044/F045 are corrected in `ad031e2`; its rebuilt
-images passed in-cluster source/artifact checks, and the updated Redis Recipe
-is published and locked. The reviewed reset completed after explicit recovery
-of the failed Recipe's orphan resources. Fresh management is verified and the
-first fresh tenant provisioned and applied its configuration. Acceptance then
-stopped on a false TLS measurement; the corrected probe passed against the
-actual verified Redis TLS connection. Continue the remaining checks without
-reprovisioning that tenant or rewriting its failed harness evidence.
+2026-09-09. Two shared tenants, reuse, and immediate-child readiness were
+proved before governance automation interrupted isolated onboarding. Failure
+evidence was preserved; no interrupted operation was replayed or relabeled.
+The controlled reset now has independent Azure absence proof. F054's
+parent-only Redis lifecycle Recipe is published and locked; runtime images
+remain the inspected `ad031e2` artifacts. A new full run is required.
 Deeper SQL/code simplification remains deferred until end-to-end proof.
 
 Use the explicitly scoped subscription
@@ -46,11 +43,12 @@ three state volumes, and exact Azure disks were removed after UID/ownership and
 archive checks. Temporary reset access was revoked. Do not replay the failed
 operation or bulk-delete local state.
 
-`.state/azure/provisioning-next.json` validates against the inspected images and
-locked Recipes; it was activated only after reset verification. Management
-deployment, endpoint/worker readiness, and empty initial tenant state are proved.
-Wait for the fresh three-tenant and outage outcome before starting local
-implementation. The bootstrap uses standalone Bicep through the scoped
+`.state/azure/provisioning-lifecycle-fixed.json` is the next candidate with the
+new locked Redis lifecycle Recipe and inspected images. It was activated after
+the latest old-state disk clearance was verified. `deploy-management-lifecycle`
+is running. Prove fresh management, then
+the complete three-tenant and outage scenario before local implementation.
+The bootstrap uses standalone Bicep through the scoped
 Azure CLI; application deployment uses Radius and its per-cluster Recipes.
 
 Before any later cloud deployment, set the workflow status to
@@ -60,6 +58,22 @@ and parameter hashes in `.state/azure/validation.json`; changed hashes require
 validation again. Never infer deployment success from compilation or Job submission.
 
 ## 7. Validation Proof
+
+2026-09-10T03:46:34Z: real bootstrap what-if and ARM validation passed again
+with the same exact template and parameter hashes. No bootstrap mutation is
+needed. `make check` passed 420 tests and 196 subtests, all 22 Bicep files,
+three generated extensions, Ruff, and ShellCheck; 50 live-dependency tests
+were explicitly skipped.
+
+`provisioning-lifecycle-fixed.json` matches the locked Recipe manifest and
+inspected images. All non-archive image inputs still match their actual image
+hashes, and the regenerated extension payload bytes match the inspected
+archive members. The reset is independently verified: no child AKS/node groups
+or app-group resources remain; management/foundation remain. All five temporary
+Reader grants and the reset federation are absent. The old application
+namespace and its three exact state disks are removed, with interruption
+evidence archived. Fresh management and a new full acceptance run are next;
+the interrupted operation is not resumed.
 
 2026-09-09T19:30:26Z: renewed
 `uv run --no-sync python operations/validate-bootstrap.py` passed real ARM

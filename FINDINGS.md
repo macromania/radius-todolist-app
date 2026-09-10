@@ -694,3 +694,21 @@ absent. The normal remaining-cleanup preview then passed and
 `governance-reset-execute3` is running the unchanged owner-ordered path for
 the remaining control applications, three children, and management application.
 The empty-child recovery remains recorded separately from normal app deletion.
+
+The remaining normal cleanup completed. Independent queries verified every
+child AKS/node group and all five app-group resource sets absent, while
+management and the foundation remained. All five temporary Reader leases and
+the reset federation were removed without changing original harness access.
+The exact old management application namespace was then removed with a UID
+precondition, after its terminal workloads, three PVC/PV bindings, and archived
+evidence were verified. Its three Azure state disks are also confirmed absent.
+
+The next release checkpoint passed 420 tests and 196 subtests, 22 Bicep files,
+three generated extensions, Ruff, and ShellCheck; 50 dependency tests were
+explicitly skipped. Actual ARM validation passed at 2026-09-10T03:46:34Z with
+unchanged foundation input hashes. The candidate's image/Recipe references,
+actual image source hashes, and regenerated extension payload bytes were
+rechecked. Fresh management and full acceptance remain the next live gates.
+The verified candidate is now active and `deploy-management-lifecycle` is
+running with a new operator-state volume. No old tenant operation, runtime
+marker, credential file, or harness evidence was replayed into the fresh run.
