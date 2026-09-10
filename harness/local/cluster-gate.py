@@ -211,20 +211,30 @@ def executor_pod(commands: Commands) -> dict:
 
 
 def create_child(commands: Commands, pod: dict) -> str:
+    def submit_and_wait() -> None:
+        deadline = time.monotonic() + 900
+        url = "/apis/api.ucp.dev/v1alpha3" + RESOURCE_ID + "?api-version=2025-08-01-preview"
+        commands.run(
+            kube("replace", "--raw", url, "-f", str(STATE / "prepared/child.json")),
+            timeout=60,
+        )
+        while time.monotonic() < deadline:
+            current = resource(commands)
+            if time.monotonic() >= deadline:
+                break
+            if current.get("id", "").lower() != RESOURCE_ID.lower():
+                raise LocalError("Radius creation returned a different resource identity")
+            state = current.get("properties", {}).get("provisioningState")
+            if state == "Succeeded":
+                return
+            if state not in {"Accepted", "Creating", "Updating"}:
+                raise LocalError(f"Radius child creation did not succeed: {state}")
+            time.sleep(2)
+        raise LocalError("Child creation deadline exceeded; Radius execution may continue")
+
     observed = ""
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        creation = pool.submit(
-            commands.run,
-            rad(
-                "resource",
-                "create",
-                "Demo.Platform/clusters",
-                "shared-control",
-                "--from-file",
-                str(STATE / "prepared/child.json"),
-            ),
-            timeout=900,
-        )
+        creation = pool.submit(submit_and_wait)
         while not creation.done():
             output = commands.run(
                 kube(

@@ -88,8 +88,9 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F059 | lifecycle gate | High correctness | `redis_nic_tags.py` | location validation | Managed Redis returns `Central US`, not `centralus`, so the new helper rejects the correctly owned cache before tagging | Resolved: actual response/alias verified, guards/regressions/reviews passed, rebuilt image inspected, real baseline and fresh NIC tagging/idempotence passed |
 | F060 | lifecycle gate | Medium compatibility | Radius 0.60.2 CLI | unbound SecretStore deletion | `resource delete` tries to parse the generated empty application string before calling the deletion API | Resolved: reviewed native owner-API cleanup and actual postconditions passed; gate helper finalized with 46 tests and clean direct walkthrough/security review |
 | F061 | final cleanup | Medium correctness | Shared empty-owner recovery helper | managed-node inventory | The copied one-off helper queried a deleted node group after its temporary Reader grant was correctly removed with it | Resolved: existing live-AKS-first pattern retained every live ownership check; no extra grants; direct walkthrough/security review and actual corrected preview passed |
-| F062 | 5 | High security | `harness/local/cluster-gate.py` | 645-655 (initial) | Secret-denial checks changed the target namespace but always impersonated `default:default`, missing the protected namespaces' default accounts | Corrected subject/target matrix covers three default accounts, two protected namespaces, and get/list/watch; 18 actual-entrypoint refusal cases and independent fix review pass; live enforcement still pending |
-| F063 | 5 | High security | `operations/local/bootstrap.py`, local cluster Recipe | kubeadm patches | kind 0.31 emits kubeadm v1beta3, so v1beta4 patches were ignored: management Secret encryption was inactive and the child SAN patch would also miss | Both patches now match v1beta3; early harmless-Secret ciphertext proof gates bootstrap readiness; 56 local tests/two Terraform mocks and fix reviews pass; scoped fresh-bootstrap correction pending |
+| F062 | 5 | High security | `harness/local/cluster-gate.py` | 645-655 (initial) | Secret-denial checks changed the target namespace but always impersonated `default:default`, missing the protected namespaces' default accounts | Resolved: corrected source/target/get-list-watch matrix, 18 entrypoint refusal cases, clean fix review, and live denial checks passed before child submission |
+| F063 | 5 | High security | `operations/local/bootstrap.py`, local cluster Recipe | kubeadm patches | kind 0.31 emits kubeadm v1beta3, so v1beta4 patches were ignored: management Secret encryption was inactive and the child SAN patch would also miss | Management encryption resolved by reviewed fresh bootstrap and actual ciphertext proof before Radius; child SAN schema/loopback names corrected and mock-tested, live child TLS proof pending |
+| F064 | 5 | High correctness | `harness/local/cluster-gate.py` | custom-resource submission | Generic `rad resource create` sends the legacy API version, so the custom cluster's 2025 API rejects it before provisioning | Use the exact authenticated Radius PUT with explicit registered version, then poll actual provisioning while observing the executor; 58 local tests and fix review pass; live retry pending |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -1169,3 +1170,27 @@ skips, and both Terraform mock tests after the final patch/SAN correction.
 The final security follow-up confirmed that preserving the loopback SANs does
 not weaken the child's explicit CA/name verification. Existing inspected
 images are unchanged; only bootstrap and published Recipe source changed.
+
+The exact failed management node was removed through kind after reviewed
+ownership/no-child/no-state checks. Non-secret failure records are retained
+under `history/unencrypted-20260910T163442Z`; the old key and kubeconfig were
+removed only after node absence and unchanged-other-container proof. Fresh
+bootstrap then passed the harmless-Secret ciphertext check, and Radius
+installation passed its actual encryption, socket/daemon, binary, and module
+service checks. No image rebuild or live API-server patch was substituted.
+
+The first child request, run `47e45daf2919`, passed the live Secret-denial checks
+but was rejected by Radius: the generic create CLI selected
+`2023-10-01-preview`, while `Demo.Platform/clusters` registers
+`2025-08-01-preview` (F064). No child container or Terraform state was created.
+The gate now submits once through the authenticated native Radius API with
+the exact version, retains all absence/identity checks, and waits for actual
+`Succeeded` state while observing the kind-provider process. HTTP acceptance
+alone cannot pass; failed/unknown states and the 900-second deadline stop the
+gate without replay or automatic cleanup. Read/list/delete retain their
+version-discovering CLI paths.
+
+All 58 local Python tests pass, including exact PUT routing, accepted/creating
+state polling, terminal failure propagation, and pre-creation security refusals.
+The direct walkthrough traced the pinned CLI client, and the independent
+security fix review was clean. The original rejected run remains failed.

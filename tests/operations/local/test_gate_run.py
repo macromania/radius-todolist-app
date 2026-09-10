@@ -92,6 +92,8 @@ class GateCommands:
         self.state_uid = "offline-state-uid"
         self.emit_process = True
         self.allowed_secret_reads = set()
+        self.creation_state = "Succeeded"
+        self.creation_states = []
 
     def run(self, args, **kwargs):
         self.calls.append((args, kwargs))
@@ -114,10 +116,6 @@ class GateCommands:
                     ]
                 )
         if args[0] == "rad":
-            if "create" in args:
-                self.created = True
-                self.observed.wait(timeout=1)
-                return ""
             if "delete" in args:
                 self.created = False
                 return ""
@@ -128,7 +126,11 @@ class GateCommands:
                     {
                         "id": common.RESOURCE_ID,
                         "properties": {
-                            "provisioningState": "Succeeded",
+                            "provisioningState": (
+                                self.creation_states.pop(0)
+                                if self.creation_states
+                                else self.creation_state
+                            ),
                             "clusterId": f"kind://{common.CHILD}",
                             "clusterName": common.CHILD,
                             "bootstrapAccessRef": (
@@ -139,6 +141,15 @@ class GateCommands:
                 )
         if args[0] != "kubectl":
             raise AssertionError(f"Unexpected command: {args}")
+        if "replace" in args and "--raw" in args:
+            assert args[args.index("--raw") + 1] == (
+                "/apis/api.ucp.dev/v1alpha3"
+                + common.RESOURCE_ID
+                + "?api-version=2025-08-01-preview"
+            )
+            self.created = True
+            self.observed.wait(timeout=1)
+            return '{"properties":{"provisioningState":"Accepted"}}'
         if "etcdctl" in args:
             return json.dumps(
                 {
@@ -303,13 +314,14 @@ def test_complete_gate_entrypoint_wires_invocation_state_tls_workload_and_radius
     assert not gate_commands.created
     assert not gate_commands.objects
     commands = [args for args, _ in gate_commands.calls]
-    create = next(i for i, a in enumerate(commands) if a[0] == "rad" and "create" in a)
+    create = next(i for i, a in enumerate(commands) if a[0] == "kubectl" and "replace" in a)
     delete = next(i for i, a in enumerate(commands) if a[0] == "rad" and "delete" in a)
     assert any(a[-1] == gate.PROCESS_PROBE for a in commands[create:delete])
     assert sum("etcdctl" in a for a in commands) == 3
     assert not any(a[0] == "kind" for a in commands)
     assert not any("--force" in a or "rm" in a for a in commands)
     assert "--yes" in commands[delete]
+    assert any(args[0] == "rad" and "show" in args for args in commands[create:delete])
 
 
 def test_child_failure_stays_failed_and_explicit_cleanup_does_not_relabel_success(
@@ -346,7 +358,10 @@ def test_secret_access_by_any_checked_default_account_blocks_creation(
         in record["error"]
     )
     assert not gate_commands.created
-    assert not any(args[0] == "rad" and "create" in args for args, _ in gate_commands.calls)
+    assert not any(
+        (args[0] == "rad" and "create" in args) or (args[0] == "kubectl" and "replace" in args)
+        for args, _ in gate_commands.calls
+    )
 
 
 def test_state_metadata_alone_never_passes_without_observed_execution(local_state, gate_commands):
@@ -362,7 +377,28 @@ def test_state_metadata_alone_never_passes_without_observed_execution(local_stat
 def test_existing_child_is_not_automatically_adopted(local_state, gate_commands):
     gate_commands.created = True
     assert gate.main(["run", "--execute"]) == 1
-    assert not any(a[0] == "rad" and "create" in a for a, _ in gate_commands.calls)
+    assert not any(
+        (a[0] == "rad" and "create" in a) or (a[0] == "kubectl" and "replace" in a)
+        for a, _ in gate_commands.calls
+    )
+
+
+def test_api_acceptance_does_not_hide_failed_radius_provisioning(local_state, gate_commands):
+    gate_commands.creation_state = "Failed"
+    assert gate.main(["run", "--execute"]) == 1
+    record = json.loads(next((local_state / "runs").glob("*.json")).read_text())
+    assert record["status"] == "failed"
+    assert "Radius child creation did not succeed: Failed" in record["error"]
+    assert not any(a[0] == "rad" and "delete" in a for a, _ in gate_commands.calls)
+
+
+def test_gate_waits_for_provisioning_after_native_api_acceptance(local_state, gate_commands):
+    gate_commands.creation_states = ["Accepted", "Creating", "Succeeded"]
+    assert gate.main(["run", "--execute"]) == 0
+    assert gate_commands.creation_states == []
+    commands = [args for args, _ in gate_commands.calls]
+    assert sum(args[0] == "kubectl" and "replace" in args for args in commands) == 1
+    assert sum(args[0] == "rad" and "show" in args for args in commands) >= 3
 
 
 @pytest.mark.parametrize(

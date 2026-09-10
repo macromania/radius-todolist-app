@@ -1,9 +1,10 @@
 # Local milestone 5: one-child feasibility gate
 
 **Status: source and native images are validated; live feasibility is not yet proven.**
-The first management installation stopped on an actual encryption check and is
-being corrected through an explicit, ownership-checked fresh bootstrap. No child
-cluster was created. The parent must complete the stages below. This is
+The first management installation stopped on an actual encryption check. A
+reviewed fresh bootstrap now passes encryption and Radius/socket checks. The
+first child request was rejected on an API-version mismatch before creation;
+its corrected versioned submission is awaiting live proof. This is
 not the full local tenant demo or a `LocalProvider`. Azure is closed and must not
 be recreated for this gate.
 
@@ -35,6 +36,10 @@ for this gate. The Recipe emits `kind://<cluster-name>`, the cluster name, and
 The three application declarations and `modules/child-cluster.bicep` are unchanged.
 The harness submits the custom type directly rather than adding a gate branch to
 those application declarations.
+The generic create CLI uses the legacy API version, so child creation uses an
+authenticated native Radius PUT with the registered `2025-08-01-preview`
+version. The gate still waits for actual provisioning completion and observes
+the executor; it does not equate HTTP acceptance with a ready cluster.
 
 There is no host-side child `kind create`, Terraform apply, or child `kind delete`.
 Management Radius's long-lived **`dynamic-rp`** runs Terraform. The separate
