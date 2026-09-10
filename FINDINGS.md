@@ -80,7 +80,8 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F051 | 4 | High correctness | `harness/test-e2e.py` | paused_reconciler | A 30-second drain deadline leaves no room for the Pod's own 30-second shutdown grace and controller latency | Resolved: bounded grace-aware drain, regressions/review, and live shared-b readiness while data paused followed by restored application proof |
 | F052 | 4 | External interruption | Azure governance automation | 2026-09-10T00:06Z | All five project AKS clusters and three PostgreSQL servers were stopped during acceptance despite requested tags | Services restored by normal scoped starts, evidence recovered; two shared operations succeeded and isolated operation correctly interrupted; controlled reset for fresh proof in progress |
 | F053 | reset | External metadata change | Two management state disks | 2026-09-10T00:55Z | State disks lost required tags after preview, so strict cleanup stopped before mutations | Exact live PV/PVC/CSI ownership verified; only required tags merged back, SKU/size/identity preserved, safety review clean; renewed preview required |
-| F054 | reset | High correctness | `infra/radius/recipes/azure/redis.bicep` | result.resources | Radius cannot resolve a deletion API version for tracked Microsoft.Resources/tags metadata | Parent-only lifecycle roots retain all creation/tagging, avoid redundant child deletes; compiled regression and both fix reviews pass; fresh publication/execution required |
+| F054 | reset | High correctness | `infra/radius/recipes/azure/redis.bicep` | result.resources | Radius cannot resolve a deletion API version for tracked Microsoft.Resources/tags metadata | Reopened by live evidence: explicit parent-only output does not exclude implicit template resources; tag application must move outside the tracked Recipe path before final lifecycle proof |
+| F055 | 4 | High correctness | `harness/test-e2e.py` | initial endpoint discovery | A 30-second endpoint-export wait is shorter than the five-cluster exporter's actual 90-second scan | Bounded initial discovery and explicitly scoped existing-tenant verification implemented; 185 harness tests/211 subtests and both fix reviews pass; live verification pending |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -720,3 +721,44 @@ read-only query confirmed zero tenants and operations. The new full
 `demo-acceptance-lifecycle` run uses source `147c739` with no continuation flag.
 Its first operation `60ed95e4-ac7e-4b45-9ff7-dac0f0c43574` entered cluster
 provisioning at 04:19:34Z. Full tenant/outage success remains unproven.
+
+All three fresh provisioning operations subsequently succeeded. The isolated
+control record was ready at 05:53:57Z; its ConfigMap was created at 05:53:58Z
+and control received `config_applied` at 05:53:58.851Z. The harness nevertheless
+timed out at 05:54:27Z because the isolated endpoint had not yet been exported.
+The recorded exporter scans were about 90 seconds apart, with the last scan
+still observing the gateway's preceding state. This is F055, not slow runtime
+configuration convergence. Keep the working tenants and fix initial discovery;
+do not rebuild their infrastructure or weaken the 30-second outage requirement.
+
+Live inspection also corrected the earlier F054 assumption. Radius 0.60
+[appends implicitly created template resources](https://github.com/radius-project/radius/blob/v0.60.2/pkg/recipes/driver/bicep/bicep.go#L402-L458)
+to the explicit output list. The fresh isolated Redis record therefore still
+has `radiusManaged: true` for the tag extension and child resources, despite
+the parent-only explicit list. The source/compile change alone was insufficient
+and is not a completed lifecycle fix. This must be corrected before final
+cleanup proof; no current working resource is being reprovisioned for that
+investigation.
+
+F055 now separates a pair's initial endpoint discovery (300 seconds total) from
+ordinary client, application-convergence, and outage-recovery checks (30
+seconds). Missing export state may wait; authentication, ownership, and schema
+errors remain fatal. Regression coverage includes a 90-second export delay,
+the shared discovery budget, and the unchanged convergence deadline.
+
+The new `verify-existing` mode in both harness entrypoints performs no tenant
+creation or admission pause. Its evidence explicitly declares
+`scope: existing-tenants-only` and `admission_checks_performed: false`. It
+validates the three successful operations and current topology, then runs
+configuration/counter/authentication, timeline/idempotency, and both outage
+checks. It rejects continuation input and cannot overwrite existing evidence.
+The failed fresh run remains `acceptance-f4de91a0617c4cafa41b9b78536416a6`;
+its genuine admission/reuse/immediate-child results are not relabeled as a
+complete pass.
+
+All 185 harness tests and 211 subtests passed, with Ruff and whitespace checks.
+Independent F055 rubber-duck and security reviews found no issues. The
+walkthrough checked actual API contracts and run-path dispatch, not just helper
+tests. The security review retained the documented trusted-operator and
+namespace Secret-reader limitations. No image or runtime deployment changes
+are needed for this harness-only verification; its live result remains open.

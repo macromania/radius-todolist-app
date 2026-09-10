@@ -293,12 +293,13 @@ governance controls or repeatedly fight external writes.
 
 ## D033 - Track independently owned Recipe lifecycle roots
 
-The Redis Recipe reports the cache and private endpoint to Radius for deletion.
-Their database, NIC, DNS zone group, and tags remain declared for creation but
-are removed by Azure with the parents. Do not register virtual tag metadata as
-an independent lifecycle resource: Radius 0.60 cannot resolve its deletion API
-version. Avoid redundant parent/child deletes without hiding any independent
-resource that needs cleanup.
+The desired lifecycle roots are the cache and private endpoint, but live
+verification disproved the assumption that the explicit output list controls
+all tracking. Radius 0.60 also adds every implicitly created template resource.
+Removing a tag extension from the output list alone does not remove it from
+managed state. Keep this correction visible: virtual tag metadata needs a
+separate application mechanism that does not become an unsupported Recipe
+deletion target. Verify actual stored tracking, not only compiled outputs.
 
 ## D034 - Dispose of unusable metadata only through a verified lifecycle owner
 
@@ -308,3 +309,17 @@ owner only after verifying its Azure app group empty, exact cluster ownership,
 and the known terminal metadata that cannot be deleted normally. Keep this an
 explicit reviewed recovery, not an automatic cleanup bypass or a claim that
 the original application deletion succeeded.
+
+## D035 - Separate discovery from convergence and label existing-state proof
+
+Allow up to 300 seconds for the initial export of a successfully provisioned
+pair's endpoints. The exporter reads five clusters serially; that administrative
+discovery is not application convergence. Keep normal API and applied-state
+checks, including outage recovery, bounded to 30 seconds.
+
+When admission already succeeded but harness discovery failed, keep the working
+tenants. An explicit `verify-existing` run creates no tenants and claims no
+fresh admission, historical reuse, or paused-admission proof. It checks current
+topology, configuration, counters, authentication, timelines, idempotency, and
+both outages. Keep the original failed admission record unchanged and report
+the two evidence scopes separately rather than inventing a general resume path.

@@ -441,6 +441,11 @@ class Runner:
             "started_at": faults.utc_now(),
             "events": [],
         }
+        if mode == "verify-existing":
+            require(
+                not self.path.exists() and not self.path.is_symlink(), "acceptance_output_exists"
+            )
+            self.record.update(scope="existing-tenants-only", admission_checks_performed=False)
         names = configuration.current().get("tenants", {})
         self.names = [
             names.get(key, default)
@@ -595,7 +600,7 @@ class Runner:
         kube.verify_scope()
         return kube
 
-    def client(self, target: str):
+    def client(self, target: str, *, timeout=30):
         def exported():
             try:
                 return self.apis.client(target)
@@ -604,7 +609,17 @@ class Runner:
                     raise
                 return None
 
-        return until(exported, timeout=30, clock=self.clock, sleep=self.sleep)[0]
+        return until(exported, timeout=timeout, clock=self.clock, sleep=self.sleep)[0]
+
+    def wait_initial_exports(self, pair: str):
+        deadline = self.clock() + 300
+        try:
+            for role in ("control", "data"):
+                self.client(f"{role}:{pair}", timeout=max(0, deadline - self.clock()))
+        except AcceptanceError as error:
+            if str(error) != "convergence_deadline_exceeded":
+                raise
+            raise AcceptanceError("initial_export_discovery_timeout") from None
 
     def wait_ready(self, tenant: str):
         management = self.client("management")
@@ -883,6 +898,7 @@ class Runner:
             else self.onboard(first, "shared", check_busy=True)
         )
         require(first_status["pair_id"] == "shared", "shared_pair_assignment_changed")
+        self.wait_initial_exports("shared")
         self.applied(first, **(self.expectations[first] if self.continue_first_from else {}))
         initial_inventory = self.pair_inventory()["shared"]
         shared_instances = self.workload_evidence("shared")
@@ -910,17 +926,52 @@ class Runner:
             self.workload_evidence("shared") == shared_instances,
             "shared_cluster_or_datastore_changed",
         )
-        require(
-            first_status["control_url"] == second_status["control_url"]
-            and first_status["data_url"] == second_status["data_url"],
-            "shared_urls_changed",
-        )
+        self.check_shared_pair()
 
         isolated_status = self.onboard(isolated, "isolated")
         isolated_pair = isolated_status["pair_id"]
         require(isolated_pair != "shared", "isolated_pair_not_dedicated")
+        self.wait_initial_exports(isolated_pair)
         self.applied(isolated)
         isolated_instances = self.workload_evidence(isolated_pair)
+        self.check_pair_isolation(isolated_pair, shared_instances, isolated_instances)
+        self.check_configuration_and_idempotency()
+
+    def verify_existing(self):
+        for tenant in self.names:
+            value = self.wait_ready(tenant)
+            require(
+                value.get("tenant_id") == tenant
+                and value.get("isolation") == ("isolated" if tenant == self.names[2] else "shared")
+                and isinstance(value.get("operation_id"), str)
+                and str(UUID(value["operation_id"])) == value["operation_id"],
+                "existing_tenant_identity_mismatch",
+            )
+            self.wait_operation(value["operation_id"])
+        self.check_shared_pair()
+        isolated_pair = self.tenants[self.names[2]]["pair_id"]
+        require(isolated_pair and isolated_pair != "shared", "isolated_pair_not_dedicated")
+        for pair in ("shared", isolated_pair):
+            self.wait_initial_exports(pair)
+        for tenant in self.names:
+            self.applied(tenant)
+        shared_instances = self.workload_evidence("shared")
+        isolated_instances = self.workload_evidence(isolated_pair)
+        self.check_pair_isolation(isolated_pair, shared_instances, isolated_instances)
+        self.check_configuration_and_idempotency()
+
+    def check_shared_pair(self):
+        first, second = [self.tenants[tenant] for tenant in self.names[:2]]
+        require(first["pair_id"] == second["pair_id"] == "shared", "shared_pair_assignment_changed")
+        require(
+            all(
+                isinstance(first.get(key), str) and first[key] and first[key] == second.get(key)
+                for key in ("control_url", "data_url")
+            ),
+            "shared_urls_changed",
+        )
+
+    def check_pair_isolation(self, isolated_pair, shared_instances, isolated_instances):
         inventory = self.pair_inventory()
         cluster_ids = [
             inventory[pair][key]
@@ -946,6 +997,8 @@ class Runner:
             isolated=isolated_instances,
             cluster_uids=cluster_uids,
         )
+
+    def check_configuration_and_idempotency(self):
         self.check_updates_and_counters()
         before = self.collect_timelines()
         self.sleep(15)
@@ -1283,7 +1336,7 @@ class Runner:
             self.record["source"] = faults.source_metadata()
             if self.continue_first_from is not None:
                 self.load_first_admission()
-            if self.mode in {"outages", "all"}:
+            if self.mode in {"outages", "all", "verify-existing"}:
                 require(
                     self.configuration.environment == "azure", "local_fault_strategy_unimplemented"
                 )
@@ -1292,13 +1345,15 @@ class Runner:
             self.management_image()
             if self.mode in {"scenario", "all"}:
                 self.scenario()
+            elif self.mode == "verify-existing":
+                self.verify_existing()
             else:
                 for tenant in self.names:
                     self.wait_ready(tenant)
                     self.applied(tenant)
                 for pair in {value["pair_id"] for value in self.tenants.values()}:
                     self.workload_evidence(pair)
-            if self.mode in {"outages", "all"}:
+            if self.mode in {"outages", "all", "verify-existing"}:
                 self.management_outage()
                 self.control_outage()
                 self.collect_timelines()
@@ -1318,7 +1373,9 @@ class Runner:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--mode", choices=("scenario", "outages", "all"), default="all")
+    parser.add_argument(
+        "--mode", choices=("scenario", "outages", "all", "verify-existing"), default="all"
+    )
     parser.add_argument(
         "--continue-first-from", help="Protected failed first-admission evidence only"
     )

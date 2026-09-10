@@ -282,7 +282,7 @@ class AzureRunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(runner.HarnessError, "source_configmap_too_large"):
             runner.resources(self.config, "demo-acceptance-test", b"x" * 700_000, COMMIT, "all")
 
-    def launch(self, *, inspected=True, jobs=None, continue_first_from=None):
+    def launch(self, *, inspected=True, jobs=None, continue_first_from=None, mode="all"):
         (self.state / "images.json").write_text(
             json.dumps(
                 {
@@ -311,7 +311,7 @@ class AzureRunnerTests(unittest.TestCase):
             ) as invoke,
         ):
             result = runner.launch(
-                self.config, "demo-acceptance-test", "all", inspected, COMMIT, continue_first_from
+                self.config, "demo-acceptance-test", mode, inspected, COMMIT, continue_first_from
             )
         return result, git, invoke
 
@@ -335,6 +335,35 @@ class AzureRunnerTests(unittest.TestCase):
             base64.b64decode(manifest["items"][1]["binaryData"]["source.bundle"]),
             b"actual-head-bundle",
         )
+
+    def test_verify_existing_host_forwards_mode_through_resources(self):
+        result, _, _ = self.launch(mode="verify-existing")
+        self.assertEqual(result["mode"], "verify-existing")
+        self.assertEqual(result["outcome"], "submitted_not_completed")
+        manifest = json.loads((self.state / "harness/demo-acceptance-test.json").read_text())
+        command = manifest["items"][3]["spec"]["template"]["spec"]["containers"][0]["command"]
+        self.assertEqual(command[-1], "verify-existing")
+        self.assertNotIn("--continue-first-from", command)
+
+    def test_both_launcher_cli_paths_accept_verify_existing_without_proof_import(self):
+        for in_cluster in (False, True):
+            with (
+                self.subTest(in_cluster=in_cluster),
+                patch.object(runner, "source_commit", return_value=COMMIT),
+                patch.object(runner, "TERMINATION", self.root / "termination"),
+                patch.object(
+                    runner,
+                    "in_cluster" if in_cluster else "launch",
+                    return_value={"outcome": "passed", "mode": "verify-existing"},
+                ) as execute,
+                redirect_stdout(io.StringIO()),
+            ):
+                argv = ["--execute", "--mode", "verify-existing"]
+                if in_cluster:
+                    argv.append("--in-cluster")
+                self.assertEqual(runner.main(argv), 0)
+                self.assertEqual(execute.call_args.args[1 if in_cluster else 2], "verify-existing")
+                self.assertIsNone(execute.call_args.args[-1])
 
     def test_continuation_host_forwards_pvc_path_without_reading_or_bundling_evidence(self):
         self.assertFalse((self.root / PRIOR_EVIDENCE).exists())
@@ -360,6 +389,7 @@ class AzureRunnerTests(unittest.TestCase):
             (PRIOR_EVIDENCE.replace("c" * 32, "c" * 33), "all"),
             (PRIOR_EVIDENCE.replace(".json", ".json;echo"), "all"),
             (PRIOR_EVIDENCE, "outages"),
+            (PRIOR_EVIDENCE, "verify-existing"),
         ):
             with (
                 self.subTest(path=path, mode=mode),
@@ -441,7 +471,7 @@ class AzureRunnerTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 runner.main([])
 
-    def bootstrap(self, *, bad_digest=False, bad_commit=False, continue_first_from=None):
+    def bootstrap(self, *, bad_digest=False, bad_commit=False, continue_first_from=None, mode=None):
         bundle_dir = self.root / "bundle"
         bundle_dir.mkdir()
         (bundle_dir / "source.bundle").write_bytes(b"bundle")
@@ -477,7 +507,7 @@ class AzureRunnerTests(unittest.TestCase):
                     "bootstrap.py",
                     COMMIT,
                     "bad" if bad_digest else hashlib.sha256(b"bundle").hexdigest(),
-                    "all" if continue_first_from else "outages",
+                    mode or ("all" if continue_first_from else "outages"),
                     *(
                         ["--continue-first-from", continue_first_from]
                         if continue_first_from
@@ -494,6 +524,14 @@ class AzureRunnerTests(unittest.TestCase):
             except SystemExit as error:
                 self.assertEqual(error.code, 1)
         return key, execute, output.getvalue()
+
+    def test_bootstrap_forwards_verify_existing_to_in_cluster_cli(self):
+        _, execute, output = self.bootstrap(mode="verify-existing")
+        self.assertEqual(output, "")
+        self.assertEqual(
+            execute.call_args.args[1][-4:],
+            ["--in-cluster", "--mode", "verify-existing", "--execute"],
+        )
 
     def test_bootstrap_forwards_continuation_to_in_cluster_cli(self):
         _, execute, output = self.bootstrap(continue_first_from=PRIOR_EVIDENCE)
@@ -670,6 +708,11 @@ class AzureRunnerTests(unittest.TestCase):
                         "source": {"commit": COMMIT, "worktree_dirty": False},
                         "started_at": now,
                         "finished_at": now,
+                        **(
+                            {"scope": "existing-tenants-only", "admission_checks_performed": False}
+                            if mode == "verify-existing"
+                            else {}
+                        ),
                     }
                 )
             )
@@ -711,6 +754,39 @@ class AzureRunnerTests(unittest.TestCase):
         result, _ = self.flow(continue_first_from=PRIOR_EVIDENCE)
         self.assertEqual(result["outcome"], "passed")
         self.assertEqual(self.popen.call_count, 2)
+
+    def test_in_cluster_forwards_verify_existing_and_verifies_fresh_scoped_evidence(self):
+        result, _ = self.flow(mode="verify-existing")
+        self.assertEqual(result["outcome"], "passed")
+        self.assertEqual(result["mode"], "verify-existing")
+        self.assertEqual(self.popen.call_count, 2)
+        evidence = self.root / result["evidence"]
+        original = json.loads(evidence.read_text())
+        output = self.state / "summary.json"
+        output.write_text(
+            json.dumps(
+                {
+                    "outcome": "passed",
+                    "mode": "verify-existing",
+                    "evidence": str(evidence),
+                }
+            )
+        )
+        for changes in (
+            {"scope": None},
+            {"scope": "fresh-onboarding"},
+            {"admission_checks_performed": True},
+            {"admission_checks_performed": None},
+            {"admission_checks_performed": 0},
+            {"source": {"commit": "b" * 40, "worktree_dirty": False}},
+            {"started_at": "2000-01-01T00:00:00+00:00"},
+        ):
+            with self.subTest(changes=changes):
+                evidence.write_text(json.dumps({**original, **changes}))
+                with self.assertRaises(runner.HarnessError):
+                    runner.verify_evidence(
+                        output, "verify-existing", COMMIT, datetime.now(UTC).timestamp() - 10
+                    )
 
     def test_pass_requires_scenario_exit_and_matching_fresh_evidence(self):
         result, _ = self.flow(mode="outages", exporter_code=0)

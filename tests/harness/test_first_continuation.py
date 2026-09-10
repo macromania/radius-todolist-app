@@ -15,7 +15,7 @@ import test_azure_runner as azure
 module, faults, Error = base.runner_module, base.faults, base.Error
 
 
-class FirstContinuationTests(base.StateCase):
+class HarnessRunCase(base.StateCase):
     def setUp(self):
         super().setUp()
         self.project = self.root.resolve()
@@ -276,6 +276,19 @@ class FirstContinuationTests(base.StateCase):
             value.control_poll_observed = Mock(return_value=True)
             value.assert_updates_survived_poll = Mock(wraps=value.assert_updates_survived_poll)
             value.management_outage, value.control_outage = Mock(), Mock()
+            for name in (
+                "scenario",
+                "verify_existing",
+                "onboard",
+                "wait_ready",
+                "wait_operation",
+                "wait_initial_exports",
+                "applied",
+                "check_shared_pair",
+                "check_pair_isolation",
+                "check_configuration_and_idempotency",
+            ):
+                setattr(value, name, Mock(wraps=getattr(value, name)))
             return value
 
         def git(argv):
@@ -291,16 +304,19 @@ class FirstContinuationTests(base.StateCase):
         self.started = datetime.now(UTC).timestamp()
         with (
             patch.object(module, "Runner", side_effect=build),
-            patch.object(module, "paused_reconciler", side_effect=self.pause),
+            patch.object(module, "paused_reconciler", side_effect=self.pause) as pause,
             patch.object(module, "source_hashes", return_value={"source.py": "c" * 64}),
             patch.object(faults, "command", side_effect=git),
             patch.object(faults, "source_metadata", return_value=self.current_source),
             redirect_stdout(io.StringIO()) as output,
         ):
+            self.pause_context = pause
             code = module.main(argv)
         self.summary = json.loads(output.getvalue())
         return code
 
+
+class FirstContinuationTests(HarnessRunCase):
     def assert_completed_scenario(self):
         original = self.previous.read_bytes()
         self.assertEqual(self.exercise(), 0, self.summary)

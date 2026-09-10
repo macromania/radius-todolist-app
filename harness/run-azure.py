@@ -508,6 +508,12 @@ def verify_evidence(output, mode, commit, started):
         <= time.time(),
         "acceptance_evidence_failed",
     )
+    if mode == "verify-existing":
+        require(
+            value.get("scope") == "existing-tenants-only"
+            and value.get("admission_checks_performed") is False,
+            "existing_tenant_evidence_scope_invalid",
+        )
     return str(evidence.relative_to(ROOT))
 
 
@@ -642,7 +648,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=ROOT / ".state/azure/provisioning.json")
     parser.add_argument("--name", default="demo-acceptance-" + uuid4().hex[:12])
-    parser.add_argument("--mode", choices=("all", "scenario", "outages"), default="all")
+    parser.add_argument(
+        "--mode", choices=("all", "scenario", "outages", "verify-existing"), default="all"
+    )
     parser.add_argument(
         "--continue-first-from", help="Prior evidence path on the harness-state PVC"
     )

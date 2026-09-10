@@ -410,12 +410,14 @@ result contains host/port/username and **`tls: true`** in `values`, and
 connection named lowercase `redis`. Use the generated URL once, or decode the
 standalone password exactly once. Never decode the whole URL.
 
-Its lifecycle output lists only the cache and private endpoint. Azure removes
-the database and the endpoint's NIC, DNS zone group, and tags with those parents.
-The child declarations still create/configure/tag everything; they are not
-independent cleanup targets. In particular, Radius 0.60 cannot discover a
-deletion API version for `Microsoft.Resources/tags`. Listing that metadata
-resource makes Radius deletion time out even after the Azure resources are gone.
+Its explicit lifecycle output lists the cache and private endpoint, but Radius
+also records implicitly created template resources. Live inspection confirmed
+that the current tag extension remains a managed cleanup target; this is an
+open F054 correction, not a solved lifecycle contract. Radius 0.60 cannot
+discover a deletion API version for `Microsoft.Resources/tags`, so tag
+application must be separated from the tracked Recipe path. Azure still owns
+the database and endpoint-generated NIC/DNS children; do not assume the output
+list alone overrides Radius's actual tracking.
 
 ### Gateway details
 

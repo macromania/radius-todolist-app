@@ -16,8 +16,9 @@ uv run python -m unittest discover -s tests/harness -p 'test_*.py'
 uv run python harness/test-e2e.py --config .state/azure/acceptance.json --mode all --execute
 ```
 
-Modes are `scenario`, `outages`, and `all` (default). Evidence includes the mode;
-`scenario` alone is not outage acceptance. The application/SQL/Radius application
+Modes are `scenario`, `outages`, `all` (default), and `verify-existing`.
+Evidence includes the mode; `scenario` alone is not outage acceptance, and
+`verify-existing` is not fresh onboarding proof. The application/SQL/Radius application
 and acceptance-script worktree must be clean, and deployed source hashes must
 match it. Results include UTC times, source commit, image IDs, full parent API
 timelines, versions/counters, cluster UIDs, and authenticated datastore endpoint
@@ -58,8 +59,58 @@ Only the separate `harness-state`
 PVC retains exported keys, kubeconfigs, evidence, and `azure/harness/termination.json`.
 The launcher never mounts operator/provisioner state. `--name` accepts a bounded
 `demo-acceptance` suffix; `--config` defaults to `.state/azure/provisioning.json`.
-Modes remain `all`, `scenario`, and `outages`. The exporter must support the
+All four modes are available through this launcher. The exporter must support the
 requested 10,800-second watch timeout before this Job can pass.
+
+### Initial export discovery versus convergence
+
+After a newly provisioned pair's onboarding operation succeeds, `scenario`/`all`
+wait up to **300 seconds total per pair** for its control and data API exports.
+The same discovery wait runs for the first pair in a first-tenant continuation
+and at `verify-existing` startup, after current operations succeed. This covers
+slow exporter scans; it neither provisions resources nor retries failed API
+requests. Only unpublished endpoints/missing exported state are awaited.
+Authentication, ownership, configuration, and other errors fail immediately.
+Discovery exhaustion is `initial_export_discovery_timeout`.
+
+Only after discovery do the existing **30-second applied-configuration checks**
+start. Export discovery does not count as data convergence time. General client
+waits and `outages` mode are unchanged, and scoped-outage recovery still uses its
+original absolute 30-second deadline without a new discovery grace period.
+No configurable timeout or general retry mechanism is added.
+
+### Verify already-existing tenants
+
+```sh
+uv run python harness/test-e2e.py --config .state/azure/acceptance.json \
+  --mode verify-existing --execute
+
+# Through the existing in-cluster launcher, with the usual deployment guards:
+CONFIRM_AZURE=yes uv run python harness/run-azure.py \
+  --images-inspected --mode verify-existing --execute
+```
+
+This explicit mode writes a new record with `mode: verify-existing`,
+`scope: existing-tenants-only`, and `admission_checks_performed: false`.
+It cannot be combined with `--continue-first-from` and imports no prior proof.
+Existing failed records remain failed and unchanged.
+
+All three configured tenants must exist, become management-ready, and have
+successful current operations. Their exports and current applied configurations
+are checked before mutations. The first two must share pair `shared` and control/
+data URLs; the isolated tenant must use another pair. The normal provenance and
+isolation checks still require four distinct child ARM cluster IDs, five distinct
+live cluster UIDs, and different PostgreSQL/Redis endpoints across the pairs.
+The same configuration updates, exact counter increments, auth checks, timelines,
+poll idempotency, both scoped outages, and final timelines then run.
+
+The current configuration versions and counter values are the starting baseline;
+they are not reset. This mode makes no `POST /tenants` requests and does not pause
+the data reconciler for second-tenant admission. It proves neither historical
+HTTP 202/409/503 behavior nor historical resource reuse/no-resource-creation.
+Those proofs remain in their original evidence scope. The launcher still requires
+fresh timestamps, clean current source, and the explicit existing-only scope in
+the final evidence before reporting this mode passed.
 
 ### Continue only a previously admitted first tenant
 

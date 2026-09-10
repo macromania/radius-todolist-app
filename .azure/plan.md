@@ -1,6 +1,6 @@
 # Three-plane Radius deployment checkpoint
 
-Status: Validated (fresh management verified; full parent-lifecycle acceptance running).
+Status: Validated (fresh onboarding succeeded; existing-tenant verification next).
 Full API-driven onboarding, outage acceptance, local deployment, and final
 teardown remain open. A source-layout change is not a new deployment result.
 
@@ -12,8 +12,10 @@ commits, and phase/fix verification with rubber-duck and security reviews on
 proved before governance automation interrupted isolated onboarding. Failure
 evidence was preserved; no interrupted operation was replayed or relabeled.
 The controlled reset now has independent Azure absence proof. F054's
-parent-only Redis lifecycle Recipe is published and locked; runtime images
-remain the inspected `ad031e2` artifacts. A new full run is required.
+parent-only Redis lifecycle Recipe is published and locked, but live tracking
+disproved that fix's completeness: implicit tag resources are still tracked.
+Runtime images remain the inspected `ad031e2` artifacts. Fresh onboarding
+succeeded for all three tenants; F055 export discovery blocked later acceptance.
 Deeper SQL/code simplification remains deferred until end-to-end proof.
 
 Use the explicitly scoped subscription
@@ -47,8 +49,12 @@ operation or bulk-delete local state.
 new locked Redis lifecycle Recipe and inspected images. It was activated after
 the latest old-state disk clearance was verified. `deploy-management-lifecycle`
 completed and passed HTTPS/authentication and empty-state checks.
-`demo-acceptance-lifecycle` is running the complete fresh three-tenant and
-outage scenario; wait for its proof before local implementation.
+`demo-acceptance-lifecycle` failed on F055 after all three provisioning
+operations succeeded. Keep its failed evidence and the working tenants. The
+reviewed harness-only `verify-existing` run will check current state and both
+outages without replaying admission or claiming fresh admission proof. F054's
+actual tracking/lifecycle correction remains separate and open. Wait for Azure
+functional proof before local implementation.
 The bootstrap uses standalone Bicep through the scoped
 Azure CLI; application deployment uses Radius and its per-cluster Recipes.
 
@@ -59,6 +65,11 @@ and parameter hashes in `.state/azure/validation.json`; changed hashes require
 validation again. Never infer deployment success from compilation or Job submission.
 
 ## 7. Validation Proof
+
+The F055 harness-only change passed 185 tests and 211 subtests, Ruff, whitespace
+checks, and independent rubber-duck/security reviews. No bootstrap inputs,
+runtime images, or deployed applications changed. The existing ARM validation
+below remains applicable; this harness Job does not redeploy infrastructure.
 
 2026-09-10T03:46:34Z: real bootstrap what-if and ARM validation passed again
 with the same exact template and parameter hashes. No bootstrap mutation is
