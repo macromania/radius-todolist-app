@@ -688,3 +688,9 @@ is now removing only that empty child through the management Radius cluster
 resource. It does not edit Radius storage, force resource state, or directly
 delete AKS. Its immutable bootstrap and recovery code were checked against the
 reviewed bytes before execution; completion remains to be verified.
+That recovery completed through management Radius. Independent Azure queries
+confirmed the shared data AKS, its node group, and its app-group resources
+absent. The normal remaining-cleanup preview then passed and
+`governance-reset-execute3` is running the unchanged owner-ordered path for
+the remaining control applications, three children, and management application.
+The empty-child recovery remains recorded separately from normal app deletion.
