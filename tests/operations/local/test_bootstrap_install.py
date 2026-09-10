@@ -1,3 +1,4 @@
+import base64
 import json
 from unittest.mock import Mock
 
@@ -137,9 +138,19 @@ def test_inspected_image_must_match_current_architecture_and_id(local_state, mon
         images.require_inspection(commands)
 
 
+def test_unverified_management_marker_blocks_installation(local_state):
+    common.write_private(local_state / "management-created.json", {"nodeId": "management-id"})
+    commands = Mock()
+    with pytest.raises(common.LocalError, match="no successful Secret-encryption proof"):
+        bootstrap.verify_management(commands)
+    commands.json.assert_not_called()
+
+
+@pytest.mark.parametrize("encrypted", [True, False])
 def test_capacity_and_all_ports_are_recorded_before_management_create(
     local_state,
     monkeypatch,
+    encrypted,
 ):
     calls = []
     held = [Mock() for _ in range(10)]
@@ -174,7 +185,22 @@ def test_capacity_and_all_ports_are_recorded_before_management_create(
                 "NetworkSettings": {"Networks": {"kind": {"IPAddress": "172.18.0.2"}}},
             }
         ],
+        {
+            "kvs": [
+                {
+                    "value": base64.b64encode(
+                        b"k8s:enc:aescbc:v1:local-key:probe" if encrypted else b"plaintext-probe"
+                    ).decode()
+                }
+            ]
+        },
     ]
+    if not encrypted:
+        with pytest.raises(common.LocalError, match="not encrypted"):
+            bootstrap.create(commands, "/var/run/docker.sock")
+        assert not (local_state / "management-created.json").exists()
+        assert not any("delete" in args for args in calls)
+        return
     bootstrap.create(commands, "/var/run/docker.sock")
     creation = next(args for args in calls if args[0] == "kind" and "create" in args)
     assert common.MANAGEMENT in creation
@@ -198,3 +224,14 @@ def test_capacity_and_all_ports_are_recorded_before_management_create(
     encryption = yaml.safe_load((local_state / "management/encryption.yaml").read_text())
     assert encryption["resources"][0]["providers"][0]["aescbc"]
     assert (local_state / "management/encryption.yaml").stat().st_mode & 0o777 == 0o600
+    assert (
+        json.loads((local_state / "management-created.json").read_text())[
+            "secretEncryptionVerified"
+        ]
+        is True
+    )
+    assert any("create" in args and "radplanes-encryption-probe" in args for args in calls)
+    assert any("delete" in args and "radplanes-encryption-probe" in args for args in calls)
+    assert (
+        "/registry/secrets/default/radplanes-encryption-probe" in (commands.json.call_args.args[0])
+    )

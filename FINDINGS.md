@@ -89,6 +89,7 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F060 | lifecycle gate | Medium compatibility | Radius 0.60.2 CLI | unbound SecretStore deletion | `resource delete` tries to parse the generated empty application string before calling the deletion API | Resolved: reviewed native owner-API cleanup and actual postconditions passed; gate helper finalized with 46 tests and clean direct walkthrough/security review |
 | F061 | final cleanup | Medium correctness | Shared empty-owner recovery helper | managed-node inventory | The copied one-off helper queried a deleted node group after its temporary Reader grant was correctly removed with it | Resolved: existing live-AKS-first pattern retained every live ownership check; no extra grants; direct walkthrough/security review and actual corrected preview passed |
 | F062 | 5 | High security | `harness/local/cluster-gate.py` | 645-655 (initial) | Secret-denial checks changed the target namespace but always impersonated `default:default`, missing the protected namespaces' default accounts | Corrected subject/target matrix covers three default accounts, two protected namespaces, and get/list/watch; 18 actual-entrypoint refusal cases and independent fix review pass; live enforcement still pending |
+| F063 | 5 | High security | `operations/local/bootstrap.py`, local cluster Recipe | kubeadm patches | kind 0.31 emits kubeadm v1beta3, so v1beta4 patches were ignored: management Secret encryption was inactive and the child SAN patch would also miss | Both patches now match v1beta3; early harmless-Secret ciphertext proof gates bootstrap readiness; 56 local tests/two Terraform mocks and fix reviews pass; scoped fresh-bootstrap correction pending |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -1134,3 +1135,37 @@ The integrated `make check` passed 576 tests and 245 subtests, with 50 explicit
 dependency skips, all Bicep/type checks, both Terraform mock-provider tests,
 Ruff, and ShellCheck. The CI change adds only checksum-pinned Terraform setup
 and the same Make entrypoint; it adds no cloud credentials or live provisioning.
+
+The native arm64 executor/operator images were built and inspected. The derived
+`/dynamic-rp` binary matches the pinned upstream bytes; UID 65532, Docker
+29.2.1, Terraform 1.15.8, Radius 0.60.2, and kubectl 1.35.7 passed actual
+execution checks. Management kind bootstrap then succeeded, and Radius's
+management-only overlay proved the same Docker daemon and inspected binary.
+Installation stopped on the required real etcd encryption check.
+
+F063 is a live schema mismatch, not a missing Secret: the Secret existed but
+its stored value lacked the encrypted prefix. The API server had no encryption
+flag, and its generated `/kind/kubeadm.conf` used v1beta3 with map-shaped
+`extraArgs`. The pinned kind source confirms that template even for Kubernetes
+1.35. Both the management encryption and child SAN patches now use v1beta3.
+The child SAN list preserves kind's loopback names as well as the explicit
+internal name, so applying the patch does not break the provider's host-facing
+readiness connection.
+Management also creates a harmless probe Secret and verifies its actual etcd
+ciphertext before publishing bootstrap readiness or allowing Radius installation.
+An old readiness marker without that proof is refused.
+
+All 56 local Python tests and both Terraform mock tests passed after the fix.
+The direct walkthrough checked actual generated configuration and pinned kind
+source; the independent security fix review was clean. No Terraform state or
+child cluster was created. A separately reviewed reset preview verified the
+exact failed management Docker ID, no children/state, and unchanged pre-existing
+containers. Only that operator-owned bootstrap will be removed and recreated
+with a fresh key; failed non-secret records are archived and no plaintext Secret
+contents or etcd dump are exported.
+
+The complete check passed 578 tests and 245 subtests, 50 explicit dependency
+skips, and both Terraform mock tests after the final patch/SAN correction.
+The final security follow-up confirmed that preserving the loopback SANs does
+not weaken the child's explicit CA/name verification. Existing inspected
+images are unchanged; only bootstrap and published Recipe source changed.

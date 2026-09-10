@@ -164,7 +164,10 @@ def test_management_and_executor_mount_only_the_socket_and_protected_encryption_
     assert config["networking"] == {"apiServerAddress": "127.0.0.1", "apiServerPort": 35495}
     assert config["nodes"][0]["extraPortMappings"][0]["hostPort"] == 35490
     patch = yaml.safe_load(config["nodes"][0]["kubeadmConfigPatches"][0])
-    assert patch["apiServer"]["extraArgs"][0]["name"] == "encryption-provider-config"
+    assert patch["apiVersion"] == "kubeadm.k8s.io/v1beta3"
+    assert patch["apiServer"]["extraArgs"] == {
+        "encryption-provider-config": "/etc/kubernetes/radplanes/encryption.yaml"
+    }
     overlay = yaml.safe_load((ROOT / "operations/local/dynamic-rp-overlay.yaml").read_text())
     assert overlay["metadata"] == {"name": "dynamic-rp", "namespace": "radius-system"}
     spec = overlay["spec"]["template"]["spec"]

@@ -62,15 +62,10 @@ def management_config(encryption_path: str, vm_socket: str) -> dict:
         raise LocalError("Only the Docker Desktop VM /var/run/docker.sock candidate is supported")
     encryption_in_node = "/etc/kubernetes/radplanes/encryption.yaml"
     patch = {
-        "apiVersion": "kubeadm.k8s.io/v1beta4",
+        "apiVersion": "kubeadm.k8s.io/v1beta3",
         "kind": "ClusterConfiguration",
         "apiServer": {
-            "extraArgs": [
-                {
-                    "name": "encryption-provider-config",
-                    "value": encryption_in_node,
-                }
-            ],
+            "extraArgs": {"encryption-provider-config": encryption_in_node},
             "extraVolumes": [
                 {
                     "name": "radplanes-encryption",
@@ -221,6 +216,21 @@ def create(commands: Commands, vm_socket: str) -> None:
         )
     )
     commands.run(kube("wait", "--for=condition=Ready", "nodes", "--all", "--timeout=300s"))
+    commands.run(
+        kube(
+            "-n",
+            "default",
+            "create",
+            "secret",
+            "generic",
+            "radplanes-encryption-probe",
+            "--from-literal=probe=before-sensitive-state",
+        )
+    )
+    verify_encryption(commands, "default", "radplanes-encryption-probe")
+    commands.run(
+        kube("-n", "default", "delete", "secret", "radplanes-encryption-probe", "--wait=true")
+    )
     write_private(
         STATE / "management-created.json",
         {
@@ -228,6 +238,7 @@ def create(commands: Commands, vm_socket: str) -> None:
             "context": CONTEXT,
             "nodeId": node["Id"],
             "nodeAddress": address,
+            "secretEncryptionVerified": True,
             "createdAt": datetime.now(UTC).isoformat(),
         },
     )
@@ -235,6 +246,8 @@ def create(commands: Commands, vm_socket: str) -> None:
 
 def verify_management(commands: Commands) -> dict:
     owned = json.loads((STATE / "management-created.json").read_text())
+    if owned.get("secretEncryptionVerified") is not True:
+        raise LocalError("Management bootstrap has no successful Secret-encryption proof")
     node = commands.json(docker("inspect", "--type", "container", f"{MANAGEMENT}-control-plane"))[0]
     node_address(node, MANAGEMENT)
     if node["Id"] != owned["nodeId"]:

@@ -62,6 +62,16 @@ run "bounded_recipe_contract" {
   }
 
   assert {
+    condition     = yamldecode(kind_cluster.child.kind_config[0].node[0].kubeadm_config_patches[0]).apiVersion == "kubeadm.k8s.io/v1beta3"
+    error_message = "The patch must match kind 0.31's generated kubeadm API, including on Kubernetes 1.35."
+  }
+
+  assert {
+    condition     = yamldecode(kind_cluster.child.kind_config[0].node[0].kubeadm_config_patches[0]).apiServer.certSANs == ["localhost", "127.0.0.1", "radplanes-local-shared-control"]
+    error_message = "Preserve kind's loopback names alongside the child's verified internal TLS name."
+  }
+
+  assert {
     condition     = kind_cluster.child.kind_config[0].node[0].extra_port_mappings[0].host_port == 35491
     error_message = "The gateway must use the shared-control reservation."
   }

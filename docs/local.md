@@ -1,8 +1,9 @@
 # Local milestone 5: one-child feasibility gate
 
-**Status: implemented and validated offline; live feasibility is not yet proven.**
-No management/child kind cluster or derived image was created by this implementation
-pass. The parent must review, build, inspect, and execute the stages below. This is
+**Status: source and native images are validated; live feasibility is not yet proven.**
+The first management installation stopped on an actual encryption check and is
+being corrected through an explicit, ownership-checked fresh bootstrap. No child
+cluster was created. The parent must complete the stages below. This is
 not the full local tenant demo or a `LocalProvider`. Azure is closed and must not
 be recreated for this gate.
 
@@ -140,7 +141,11 @@ private key.** `sensitive()` limits expression disclosure; it does not encrypt
 state, and the provider's own computed credentials are not marked sensitive.
 
 Management's Kubernetes API encrypts Secrets in etcd using a generated AES-CBC
-key held in a mode-0600 project file under mode-0700 state directories. The gate
+key held in a mode-0600 project file under mode-0700 state directories. kind 0.31
+generates kubeadm v1beta3 even for Kubernetes 1.35, so both encryption and child
+certificate-SAN patches must match that API and its map-shaped `extraArgs`.
+Bootstrap verifies a harmless Secret's actual ciphertext before reporting ready
+or permitting Radius installation. The gate
 reads the actual etcd value through the scoped etcd Pod and verifies the encryption
 prefix, both for the Radius encryption-key Secret and the Recipe's state/access
 Secrets. These are read-only backing-store checks, never edits. Default service

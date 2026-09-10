@@ -19,10 +19,10 @@ resource "kind_cluster" "child" {
         "radplanes.local/slot" = "shared-control"
       }
       kubeadm_config_patches = [yamlencode({
-        apiVersion = "kubeadm.k8s.io/v1beta4"
+        apiVersion = "kubeadm.k8s.io/v1beta3"
         kind       = "ClusterConfiguration"
         apiServer = {
-          certSANs = [local.cluster_name]
+          certSANs = ["localhost", "127.0.0.1", local.cluster_name]
         }
       })]
 

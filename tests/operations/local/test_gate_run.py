@@ -267,7 +267,10 @@ class GateCommands:
 @pytest.fixture
 def gate_commands(local_state, monkeypatch):
     commands = GateCommands()
-    common.write_private(local_state / "management-created.json", {"nodeId": "management-id"})
+    common.write_private(
+        local_state / "management-created.json",
+        {"nodeId": "management-id", "secretEncryptionVerified": True},
+    )
     inputs = prepare.prepare()
     common.write_private(local_state / "installed.json", inputs)
     monkeypatch.setattr(gate, "require_inspection", Mock())
