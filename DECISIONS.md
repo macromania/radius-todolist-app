@@ -299,3 +299,12 @@ are removed by Azure with the parents. Do not register virtual tag metadata as
 an independent lifecycle resource: Radius 0.60 cannot resolve its deletion API
 version. Avoid redundant parent/child deletes without hiding any independent
 resource that needs cleanup.
+
+## D034 - Dispose of unusable metadata only through a verified lifecycle owner
+
+Do not edit Radius's backing store to clear a stuck record. During whole-demo
+reset, an empty child may be removed through its management Radius cluster
+owner only after verifying its Azure app group empty, exact cluster ownership,
+and the known terminal metadata that cannot be deleted normally. Keep this an
+explicit reviewed recovery, not an automatic cleanup bypass or a claim that
+the original application deletion succeeded.

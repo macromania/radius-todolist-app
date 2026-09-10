@@ -677,3 +677,14 @@ The direct walkthrough and independent security fix review were clean.
 Existing canceled metadata still references the old output and requires an
 explicit, separately verified cleanup action; changing source does not repair
 that deployed record.
+
+The corrected Recipe is published and tag-locked as
+`redis:src-7e3cabeb0c5bdd2b0e26`, digest
+`sha256:e3cc6f3fb59d8bbf331f060d2d9f52175aa1565ed0e16e365f97463c41966cea`.
+An explicit recovery preview verified the old data app has exactly one
+canceled Redis record, its Azure app group is actually empty, and its child
+cluster has the expected management Radius owner. A reviewed one-off helper
+is now removing only that empty child through the management Radius cluster
+resource. It does not edit Radius storage, force resource state, or directly
+delete AKS. Its immutable bootstrap and recovery code were checked against the
+reviewed bytes before execution; completion remains to be verified.
