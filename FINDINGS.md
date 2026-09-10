@@ -82,6 +82,9 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F053 | reset | External metadata change | Two management state disks | 2026-09-10T00:55Z | State disks lost required tags after preview, so strict cleanup stopped before mutations | Exact PV/PVC/CSI ownership verified; only required tags merged, properties preserved; reviewed reset and exact disk absence subsequently verified |
 | F054 | reset | High correctness | `infra/radius/recipes/azure/redis.bicep` | result.resources | Radius cannot resolve a deletion API version for tracked Microsoft.Resources/tags metadata | Tag extension removed; bounded metadata Job under existing Radius identity wired into both data deployment phases; 514 tests/245 subtests and both fix reviews pass; fresh lifecycle gate pending |
 | F055 | 4 | High correctness | `harness/test-e2e.py` | initial endpoint discovery | A 30-second endpoint-export wait is shorter than the five-cluster exporter's actual 90-second scan | Resolved: bounded discovery, 90-second-delay regression, unchanged convergence deadlines, 185 tests/211 subtests, clean fix reviews, and live existing-tenant verification passed |
+| F056 | lifecycle gate | Medium observability | One-off F054 gate | command logging | Setting the command logger to CRITICAL hid the first gate's already-redacted failure diagnostics | Resolved: standard ERROR diagnostics, 165 focused tests, clean direct walkthrough/security review; next live attempt exposed the actual F057 error |
+| F057 | lifecycle gate | Medium correctness | One-off F054 gate | group-show preflight | The wrapper supplied `--group` while the caller also supplied a positional group name, which Radius rejects | Resolved: duplicate removed, explicit scope retained, run-path regression/reviews passed; live group-show now succeeds |
+| F058 | lifecycle gate | Medium correctness | One-off F054 gate | group-ID comparison | Radius returns lowercase `resourcegroups`, which failed a case-sensitive comparison with `resourceGroups` | Actual ID verified read-only; existing case-insensitive helper applied; 21 tests including foreign-group refusal and clean direct walkthrough/security review; create5 live retry pending |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -824,3 +827,65 @@ deploy-to-Job call path, image copy/dependency paths, completion, cleanup, and
 failure behavior. The new image's actual contents/SDK execution and fresh
 Redis creation, tagging, stored tracking, and deletion still require live
 proof. Do not redeploy the working Redis records to attempt metadata migration.
+
+The corrected Recipe is published and locked as
+`redis:src-9e30d7ddd853894146c0`, digest
+`sha256:6600de781e06b4045addd066de24c5656b1326b5504a4db225c96a3bddb5ab2b`.
+Both images were built from `1b26a76`, then inspected in tokenless AKS Jobs:
+23 API and 54 provisioner source/artifact hashes matched, including the new
+helper, dependency manifests, and generated extension payloads. Both ran as
+UID 10001, and the API image excluded privileged provider/operations code.
+The exact candidate references and checks are in protected `images.json`;
+the active configuration and running applications still use the prior images.
+
+A separate read-only Job at 08:09:29Z executed the inspected image's actual
+workload-identity SDK under isolated-data's existing `applications-rp` account.
+Federated token exchange and an authenticated ARM GET verified the allocated
+resource group and required tags. It performed no ARM mutation. This proves
+the real SDK/identity path before the fresh lifecycle gate; it does not yet
+prove NIC tag merging or Redis deletion.
+
+The first submitted fresh lifecycle Job, `f054-redis-lifecycle-create2`, failed
+at 09:10:33Z before the `baseline_verified` phase and before the Recipe-create
+call. No Redis lifecycle result is claimed. The one-off gate had raised the
+standard command logger threshold to CRITICAL, hiding its redacted diagnostic
+and leaving only `command_failed` (F056). Restore ERROR logging rather than
+guessing at the cause or changing Azure permissions. Preserve the failed Job
+and its immutable payload; regenerate a new named payload after review.
+
+F056 passed 165 focused tests, the direct rubber-duck walkthrough, and an
+independent security review. The regenerated `create3` attempt exposed the
+actual preflight error: Radius rejects a group name supplied both positionally
+and through `--group`. This is F057; no Azure permission change is needed.
+The wrapper already supplies the exact group, so remove only the duplicate
+positional argument. The expected Radius group-ID assertion remains mandatory.
+Add a regression through the actual execute/read/command wrapper path, not
+only a mock of the high-level read. Both failed attempts and their immutable
+payloads remain evidence, not successful lifecycle runs.
+
+The initial lifecycle helper's independent preparation reviews were clean and
+its 18 offline tests passed, but those mocks did not catch the duplicate
+group argument. F057 adds the missing real-wrapper assertion; all 19 gate
+tests now pass. The direct fix walkthrough and independent security review
+found no issues. `f054-redis-lifecycle-create4` was regenerated from the
+reviewed sources and submitted at 09:18:26Z. Its UID is
+`2e828bbb-9539-46db-9cbb-73afd8eda01f`; the immutable candidate configuration
+hash remains `f3b4efc1b40038b9a19c9aaefe6ef774f1bce3182085c3f226d2b1693ba9d8b0`.
+The API/runtime images and active tenant environment configuration have not
+changed during these gate-only corrections. Actual lifecycle success remains
+pending the Job and absence checks, not its submission.
+
+`create4` then stopped on the group-ID comparison. A scoped read-only Job
+verified the expected cluster UID and returned the actual Radius group ID:
+`/planes/radius/local/resourcegroups/radplanes`. Only path-segment casing
+differs from the expected ID (F058). Use the gate's existing case-insensitive
+ID helper, already used for its other Radius/ARM IDs; do not relax the group
+name, workspace, cluster UID, or subscription checks. Add both actual-casing
+acceptance and foreign-group rejection coverage before another fresh payload.
+
+All 21 gate tests passed after F058, including actual execute/read/command
+construction and refusal of a different group before mutations. The direct
+rubber-duck and independent security fix reviews were clean. The regenerated
+`f054-redis-lifecycle-create5` Job started at 09:24:03Z with UID
+`33eea4ff-fdc1-4d2d-a581-121910fd2ac5`. Its candidate remains isolated from the
+active tenant configuration. No failed gate record has been relabeled.

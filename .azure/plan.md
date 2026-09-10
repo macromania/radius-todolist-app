@@ -79,6 +79,25 @@ fresh resource using the existing isolated-data allocation and Radius identity.
 Image-content/SDK inspection and actual create/tag/track/delete proof remain
 required before treating F054 as resolved.
 
+The `1b26a76` image builds completed. Actual tokenless AKS inspection matched
+23 API and 54 provisioner files/artifacts, confirmed UID 10001 and API
+privilege exclusions, and imported Azure Identity 1.25.2/HTTPX 0.28.1 from the
+candidate. At 08:09:29Z, a separate read-only Job used the existing
+isolated-data Radius workload identity for real token exchange and an ARM
+resource-group GET. Candidate image and Recipe references are verified;
+fresh NIC tag application, stored tracking, and deletion remain the next gate.
+
+The one-off lifecycle gate's preparation reviews passed. Its first attempts
+failed before Recipe creation on a duplicate Radius group argument; suppressed
+diagnostics were also corrected. F056/F057 retain the failed payloads and
+record fix reviews and 19 gate regressions. The regenerated immutable
+`create4` then exposed a case-sensitive group-ID comparison (F058); a scoped
+read-only Job confirmed the actual ID. The existing case-insensitive ID helper,
+21 gate tests, and both fix reviews now cover that response and foreign-group
+refusal. `f054-redis-lifecycle-create5` is running from the inspected image,
+with no change to existing tenant applications. Do not treat submission as
+lifecycle or teardown proof.
+
 2026-09-10T07:03:57Z: `verify-existing` run
 `80a3a427f3874169b6604800dd05580e`, source `3c66555`, passed functional,
 topology/isolation, authentication, timeline/idempotency, and both real parent
