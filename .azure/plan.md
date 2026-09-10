@@ -1,8 +1,8 @@
 # Three-plane Radius deployment checkpoint
 
-Status: Validated (fresh onboarding succeeded; existing-tenant verification next).
-Full API-driven onboarding, outage acceptance, local deployment, and final
-teardown remain open. A source-layout change is not a new deployment result.
+Status: Validated (Azure functional proof passed; Redis lifecycle correction next).
+Fresh admission and existing-tenant functional/outage proof are recorded
+separately. Redis lifecycle correction, final teardown, and local remain open.
 
 ## Scope and authorization
 
@@ -51,10 +51,10 @@ the latest old-state disk clearance was verified. `deploy-management-lifecycle`
 completed and passed HTTPS/authentication and empty-state checks.
 `demo-acceptance-lifecycle` failed on F055 after all three provisioning
 operations succeeded. Keep its failed evidence and the working tenants. The
-reviewed harness-only `verify-existing` run will check current state and both
-outages without replaying admission or claiming fresh admission proof. F054's
-actual tracking/lifecycle correction remains separate and open. Wait for Azure
-functional proof before local implementation.
+reviewed harness-only `verify-existing` run passed current-state and both outage
+checks without replaying admission or claiming fresh admission proof. F054's
+actual tracking/lifecycle correction and final cleanup remain open before local
+implementation.
 The bootstrap uses standalone Bicep through the scoped
 Azure CLI; application deployment uses Radius and its per-cluster Recipes.
 
@@ -65,6 +65,15 @@ and parameter hashes in `.state/azure/validation.json`; changed hashes require
 validation again. Never infer deployment success from compilation or Job submission.
 
 ## 7. Validation Proof
+
+2026-09-10T07:03:57Z: `verify-existing` run
+`80a3a427f3874169b6604800dd05580e`, source `3c66555`, passed functional,
+topology/isolation, authentication, timeline/idempotency, and both real parent
+outages. Both fault records confirm restoration within 10 seconds; overall
+report/catch-up recovery remained under 30 seconds. Independent live AKS reads
+at 07:08:24Z found no fault policies and all shared control/data workloads
+available. Both functional-phase reviews were clean. `FINDINGS.md` records
+the evidence scopes/hashes; the earlier fresh run remains failed.
 
 The F055 harness-only change passed 185 tests and 211 subtests, Ruff, whitespace
 checks, and independent rubber-duck/security reviews. No bootstrap inputs,

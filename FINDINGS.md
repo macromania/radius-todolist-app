@@ -78,10 +78,10 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F049 | reset | Medium security | `.state/azure/radius-reset-execute.json` | 81 (initial) | Generated executor still references old immutable bootstrap after source guard repair | Original manifest archived; new preview/execute references repaired immutable payload, compared byte-for-byte and checked for unconditional guards; final review clean |
 | F050 | 4 | High correctness | `harness/test-e2e.py` | IDENTITY_PROBE | Attribute-based Redis TLS detection rejects a real verified TLS socket | Resolved: negotiated-socket detection, optimization-safe PING, actual live probe pass, bounded first-verification continuation and both fix reviews pass |
 | F051 | 4 | High correctness | `harness/test-e2e.py` | paused_reconciler | A 30-second drain deadline leaves no room for the Pod's own 30-second shutdown grace and controller latency | Resolved: bounded grace-aware drain, regressions/review, and live shared-b readiness while data paused followed by restored application proof |
-| F052 | 4 | External interruption | Azure governance automation | 2026-09-10T00:06Z | All five project AKS clusters and three PostgreSQL servers were stopped during acceptance despite requested tags | Services restored by normal scoped starts, evidence recovered; two shared operations succeeded and isolated operation correctly interrupted; controlled reset for fresh proof in progress |
-| F053 | reset | External metadata change | Two management state disks | 2026-09-10T00:55Z | State disks lost required tags after preview, so strict cleanup stopped before mutations | Exact live PV/PVC/CSI ownership verified; only required tags merged back, SKU/size/identity preserved, safety review clean; renewed preview required |
+| F052 | 4 | External interruption | Azure governance automation | 2026-09-10T00:06Z | All five project AKS clusters and three PostgreSQL servers were stopped during acceptance despite requested tags | Normal scoped restoration, preserved interrupted state, and reviewed owner-ordered reset completed; all three fresh operations then succeeded; governance controls unchanged |
+| F053 | reset | External metadata change | Two management state disks | 2026-09-10T00:55Z | State disks lost required tags after preview, so strict cleanup stopped before mutations | Exact PV/PVC/CSI ownership verified; only required tags merged, properties preserved; reviewed reset and exact disk absence subsequently verified |
 | F054 | reset | High correctness | `infra/radius/recipes/azure/redis.bicep` | result.resources | Radius cannot resolve a deletion API version for tracked Microsoft.Resources/tags metadata | Reopened by live evidence: explicit parent-only output does not exclude implicit template resources; tag application must move outside the tracked Recipe path before final lifecycle proof |
-| F055 | 4 | High correctness | `harness/test-e2e.py` | initial endpoint discovery | A 30-second endpoint-export wait is shorter than the five-cluster exporter's actual 90-second scan | Bounded initial discovery and explicitly scoped existing-tenant verification implemented; 185 harness tests/211 subtests and both fix reviews pass; live verification pending |
+| F055 | 4 | High correctness | `harness/test-e2e.py` | initial endpoint discovery | A 30-second endpoint-export wait is shorter than the five-cluster exporter's actual 90-second scan | Resolved: bounded discovery, 90-second-delay regression, unchanged convergence deadlines, 185 tests/211 subtests, clean fix reviews, and live existing-tenant verification passed |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -762,3 +762,47 @@ walkthrough checked actual API contracts and run-path dispatch, not just helper
 tests. The security review retained the documented trusted-operator and
 namespace Secret-reader limitations. No image or runtime deployment changes
 are needed for this harness-only verification; its live result remains open.
+
+### Azure functional proof, 2026-09-10
+
+`demo-acceptance-existing` completed successfully. Its committed-source run
+`80a3a427f3874169b6604800dd05580e` ran from 06:56:55Z to 07:03:57Z,
+after source `3c66555` was committed at 06:54:36Z. This is explicitly
+**existing-tenants-only**, not a fresh all-mode pass. The earlier failed
+`f4de91a0617c4cafa41b9b78536416a6` retains genuine admission, shared reuse,
+paused-data immediate-child readiness, and all three successful operation
+observations. Its bytes and failed outcome are unchanged.
+
+The new run verified four distinct child AKS resource IDs and five cluster
+UIDs; shared versus isolated PostgreSQL/Redis instances; actual Redis TLS;
+configuration, onboarding-ID and counter isolation; negative authentication;
+complete paginated timelines; and idempotency across polling intervals.
+Both parent faults blocked fresh and already-open database connections while
+the child's local database path stayed available. Data continued serving and
+incrementing counters for ten calls over 66 seconds in each fault.
+
+| Measured outcome | Result |
+|---|---|
+| Management-link reporting recovery, including restoration | 16.225 seconds |
+| Control-link latest-only catch-up, including restoration | 9.361 seconds |
+| Data API replacement while control PostgreSQL was blocked | 6.684 seconds; configuration/counter retained |
+| Fault policy restoration | 9.961 / 9.250 seconds; original policy sets preserved |
+| Latest-only control recovery | Version 4 to 6; no intermediate version-5 application |
+
+Both fault records say `verified_and_restored`, with successful restored
+connection probes and exact original/restored policy equality. Independent
+live AKS queries at 07:08:24Z confirmed no remaining fault policies and all six
+shared control/data Deployments available. The protected
+`functional-evidence-archive/` contains the three new records and unchanged
+failed predecessor. Acceptance SHA-256:
+`b75695073d4fb7d328d4705642be45ce40fb199ed4b4ea136f954844db46231b`.
+Management/control fault SHA-256:
+`65e690342e8949a266ec51c8e6e2c5f95e7d6b467bf478ee10675ef4af334952` /
+`2b2537b59afaebfdac306fe41b7483f29740e443474dd7ec178bd27b7412775b`.
+Predecessor SHA-256:
+`997109b3e0f3c8f14028a1bdd51948729aed3491720aa83973cb73834adb091d`.
+
+Independent functional-phase rubber-duck and security reviews found no issues
+within these evidence scopes. They did not claim a fresh all-mode pass, HA,
+production authentication isolation, Azure teardown, or local acceptance.
+F054 and whole-environment cleanup remain open before the local phase.

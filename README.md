@@ -1,9 +1,10 @@
 # Radius three-plane tenant demo
 
 Management, control, and data run in separate Kubernetes clusters. Radius
-provisions the child clusters and their applications. **This is an implementation
-in progress:** Azure integration gates passed; full tenant onboarding, outage
-acceptance, and the local environment are not yet proven.
+provisions the child clusters and their applications. **Azure onboarding and
+functional behavior are proven in separately scoped runs:** two shared tenants,
+one isolated tenant, configuration/counter isolation, and both parent outages.
+Redis cleanup tracking and final teardown remain open; local is not implemented.
 
 This pass organizes the repository, not the application design. SQL,
 authentication, provisioning, and reconciliation simplification are deferred
@@ -35,7 +36,8 @@ Management's `ready` means control created its tenant record. Control's `applied
 means data wrote its ConfigMap. Neither is a transitive application-health
 assertion. Control owns subsequent configuration changes. Data must keep serving
 its last applied configuration while its parent is unreachable, then catch up
-to the latest version. Live outage proof is still pending.
+to the latest version. Azure demonstrated both parent-link outages, including
+a data API restart while control PostgreSQL was unreachable.
 
 ## Repository map
 
@@ -106,6 +108,9 @@ That target **submits** the operator Job; verify its completion separately.
 There is no implemented local deployment target or automatic certificate-renewal
 target. The [Azure contract](docs/azure-infrastructure.md) describes the
 integration gates; [FINDINGS.md](FINDINGS.md) records what actually ran.
+The fresh admission run stopped on harness endpoint discovery after all three
+operations succeeded. A separate `verify-existing` run passed the remaining
+functional and outage checks; it does not claim another fresh admission.
 
 The harness remains explicit:
 
@@ -148,11 +153,10 @@ directories; `make` places those under project-local `TMPDIR`. `.azure/plan.md`
 is short deployment-workflow metadata, not another architecture document.
 Generated credentials, caches, and evidence are not source or image inputs.
 
-The layout changed Python entrypoints and container helper paths. Existing
-images and evidence prove their original source, not this layout. Before a new
-deployment, rebuild/inspect images and regenerate any explicit
+The deployed images were inspected for the grouped entrypoints and helper paths.
+Before a later runtime change, rebuild/inspect images and regenerate any explicit
 `certificateCommand` override to use `/app/operations/run-certificate-job.py`.
-This layout pass does not rewrite live state or update running workloads.
+Source changes alone do not update immutable deployment inputs or running images.
 
 ```sh
 make clean-plan
