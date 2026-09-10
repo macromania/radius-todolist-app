@@ -281,3 +281,12 @@ Do not modify automation or policy to keep tests running. For this authorized
 deployment, use ordinary start operations only on verified project clusters,
 then inspect recorded state. Never convert interrupted work into success or
 automatically replay it; repeated stops require an approved uninterrupted window.
+
+## D032 - Repair ownership metadata only with independent proof
+
+If external writes remove a required tag, keep cleanup fail-closed. A missing
+tag is not permission to adopt a resource. For a state disk, verify the exact
+live namespace, PVC/PV UIDs, CSI handle, StorageClass, and Azure disk identity
+before a narrowly scoped repair. Merge only the requested ownership tags,
+preserve other properties and tags, and verify the result. Do not change
+governance controls or repeatedly fight external writes.

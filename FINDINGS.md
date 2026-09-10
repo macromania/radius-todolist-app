@@ -77,8 +77,9 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F048 | reset | Medium security | `.state/azure/remove-orphaned-redis.py` | 14-68 (initial) | Python optimization removes assert-based deletion safety checks | Unconditional require checks and guarded mutation path replace assertions; normal/optimized run-path cases and final fix reviews pass |
 | F049 | reset | Medium security | `.state/azure/radius-reset-execute.json` | 81 (initial) | Generated executor still references old immutable bootstrap after source guard repair | Original manifest archived; new preview/execute references repaired immutable payload, compared byte-for-byte and checked for unconditional guards; final review clean |
 | F050 | 4 | High correctness | `harness/test-e2e.py` | IDENTITY_PROBE | Attribute-based Redis TLS detection rejects a real verified TLS socket | Resolved: negotiated-socket detection, optimization-safe PING, actual live probe pass, bounded first-verification continuation and both fix reviews pass |
-| F051 | 4 | High correctness | `harness/test-e2e.py` | paused_reconciler | A 30-second drain deadline leaves no room for the Pod's own 30-second shutdown grace and controller latency | Validated configured grace plus 30-second margin; UID/restoration guards and outage deadlines unchanged; regressions and fix review pass |
-| F052 | 4 | External interruption | Azure governance automation | 2026-09-10T00:06Z | All five project AKS clusters were stopped during acceptance despite requested tags | Attributed to governance application, not demo identities; ordinary starts requested only for verified project clusters, no policy/automation change; results pending inspection |
+| F051 | 4 | High correctness | `harness/test-e2e.py` | paused_reconciler | A 30-second drain deadline leaves no room for the Pod's own 30-second shutdown grace and controller latency | Resolved: bounded grace-aware drain, regressions/review, and live shared-b readiness while data paused followed by restored application proof |
+| F052 | 4 | External interruption | Azure governance automation | 2026-09-10T00:06Z | All five project AKS clusters and three PostgreSQL servers were stopped during acceptance despite requested tags | Services restored by normal scoped starts, evidence recovered; two shared operations succeeded and isolated operation correctly interrupted; controlled reset for fresh proof in progress |
+| F053 | reset | External metadata change | Two management state disks | 2026-09-10T00:55Z | State disks lost required tags after preview, so strict cleanup stopped before mutations | Exact live PV/PVC/CSI ownership verified; only required tags merged back, SKU/size/identity preserved, safety review clean; renewed preview required |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -626,3 +627,34 @@ automation, Azure Policy, permissions, or tags were changed. After restart,
 inspect actual operations, harness evidence, and any fault restoration state;
 do not automatically replay or relabel an interrupted provisioning operation.
 The available metadata does not yet establish whether acceptance completed.
+
+All five clusters subsequently returned Running/Succeeded. The three project
+PostgreSQL servers were also found Stopped and were restored to Ready using
+normal start operations after ownership checks; gateways remained Running.
+The persisted operation table shows shared-a and shared-b succeeded, while
+isolated-c correctly became `interrupted` at `control-certificate` with
+`provisioner_restarted`. That state was not rewritten or replayed.
+
+Recovered evidence `acceptance-32518dd5a31445bca734523eb2862fe3.json` (SHA-256
+`779ad71d470d1e314e5a8a62770c31799c7e25435c38441b4c78e15074e206d2`)
+proves the corrected pause, shared-b readiness while data was paused,
+subsequent application, and unchanged shared infrastructure before isolated
+admission. It then records `operator_interrupted`; no fault files exist.
+All five token-free cleanup targets and three failed acceptance records are
+archived under protected `governance-interruption-archive`.
+
+A reviewed five-cluster owner-ordered reset preview passed. Its execution
+stopped before deletion when two state disks no longer had the required tags.
+Live PV/PVC/CSI bindings prove they are the known operator-state and
+harness-state volumes. Disk activity shows a write by the same governance
+application at 00:55:46-50Z; both disks now use Standard_LRS rather than the
+StorageClass's StandardSSD_LRS setting. No intent is inferred from that change.
+Only the original three ownership tags were merged back after independent
+ownership checks; actual disk unique IDs, sizes, and current SKU were verified
+unchanged. No policy, automation, or ownership guard was weakened. The direct
+walkthrough and tag-repair security review were clean. The renewed strict
+cleanup preview must pass before retrying the reset.
+That renewed preview passed with every managed node group inspected and no
+ownership bypass. `governance-reset-execute2` is running the same reviewed
+immutable source. Completion, temporary access removal, and fresh state are
+still required before the next full acceptance attempt.
