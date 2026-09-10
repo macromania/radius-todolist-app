@@ -80,7 +80,7 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F051 | 4 | High correctness | `harness/test-e2e.py` | paused_reconciler | A 30-second drain deadline leaves no room for the Pod's own 30-second shutdown grace and controller latency | Resolved: bounded grace-aware drain, regressions/review, and live shared-b readiness while data paused followed by restored application proof |
 | F052 | 4 | External interruption | Azure governance automation | 2026-09-10T00:06Z | All five project AKS clusters and three PostgreSQL servers were stopped during acceptance despite requested tags | Normal scoped restoration, preserved interrupted state, and reviewed owner-ordered reset completed; all three fresh operations then succeeded; governance controls unchanged |
 | F053 | reset | External metadata change | Two management state disks | 2026-09-10T00:55Z | State disks lost required tags after preview, so strict cleanup stopped before mutations | Exact PV/PVC/CSI ownership verified; only required tags merged, properties preserved; reviewed reset and exact disk absence subsequently verified |
-| F054 | reset | High correctness | `infra/radius/recipes/azure/redis.bicep` | result.resources | Radius cannot resolve a deletion API version for tracked Microsoft.Resources/tags metadata | Reopened by live evidence: explicit parent-only output does not exclude implicit template resources; tag application must move outside the tracked Recipe path before final lifecycle proof |
+| F054 | reset | High correctness | `infra/radius/recipes/azure/redis.bicep` | result.resources | Radius cannot resolve a deletion API version for tracked Microsoft.Resources/tags metadata | Tag extension removed; bounded metadata Job under existing Radius identity wired into both data deployment phases; 514 tests/245 subtests and both fix reviews pass; fresh lifecycle gate pending |
 | F055 | 4 | High correctness | `harness/test-e2e.py` | initial endpoint discovery | A 30-second endpoint-export wait is shorter than the five-cluster exporter's actual 90-second scan | Resolved: bounded discovery, 90-second-delay regression, unchanged convergence deadlines, 185 tests/211 subtests, clean fix reviews, and live existing-tenant verification passed |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
@@ -806,3 +806,21 @@ Independent functional-phase rubber-duck and security reviews found no issues
 within these evidence scopes. They did not claim a fresh all-mode pass, HA,
 production authentication isolation, Azure teardown, or local acceptance.
 F054 and whole-environment cleanup remain open before the local phase.
+
+F054's revised source removes the NIC tag extension and existing-NIC lookup
+from the Recipe. The actual data deployment path now invokes a metadata Job
+after both challenge and HTTPS deployments. It uses only the existing
+per-plane Radius identity and app-group grant. The helper checks exact Radius
+ownership, resource-group/cache/private-endpoint/subnet/NIC relationships,
+merges required tags, verifies the readback and unchanged network properties,
+and returns success only through the completed Job. No new role grant,
+human token, Recipe-state edit, or old-resource migration is included.
+
+`make check` passed 514 tests and 245 subtests, all 22 Bicep files, three
+generated extensions, Ruff, and ShellCheck; 50 opt-in dependency tests were
+explicitly skipped. Independent F054 security and rubber-duck reviews found no
+issues. The walkthrough checked the pinned Radius/ARM contracts, actual
+deploy-to-Job call path, image copy/dependency paths, completion, cleanup, and
+failure behavior. The new image's actual contents/SDK execution and fresh
+Redis creation, tagging, stored tracking, and deletion still require live
+proof. Do not redeploy the working Redis records to attempt metadata migration.

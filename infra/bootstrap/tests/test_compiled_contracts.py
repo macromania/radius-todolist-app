@@ -61,18 +61,22 @@ class CompiledInfrastructureTests(unittest.TestCase):
         cls.postgresql_recipe = compile_template("infra/radius/recipes/azure/postgresql.bicep")
         cls.redis_recipe = compile_template("infra/radius/recipes/azure/redis.bicep")
 
-    def test_existing_redis_nic_waits_for_private_endpoint_before_radius_reads_it(self):
+    def test_redis_recipe_emits_no_nic_or_tags_extension_for_radius_to_track(self):
         template = self.redis_recipe
-        nic = template["resources"]["endpointNic"]
-        self.assertIs(nic["existing"], True)
-        self.assertEqual(nic["dependsOn"], ["endpoint"])
-        self.assertEqual(template["resources"]["endpointNicTags"]["dependsOn"], ["endpoint"])
+        self.assertNotIn("endpointNic", template["resources"])
+        self.assertNotIn("endpointNicTags", template["resources"])
         self.assertEqual(
-            template["resources"]["endpointNicTags"]["properties"]["tags"],
-            "[variables('requiredTags')]",
+            {resource["type"] for resource in nested_resources(template)},
+            {
+                "Microsoft.Cache/redisEnterprise",
+                "Microsoft.Cache/redisEnterprise/databases",
+                "Microsoft.Network/privateEndpoints",
+                "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+            },
         )
+        self.assertNotIn("Microsoft.Resources/tags", json.dumps(template))
 
-    def test_redis_cleanup_tracks_only_independent_parent_resources(self):
+    def test_redis_explicit_roots_do_not_replace_native_resource_lifecycle_tracking(self):
         template = self.redis_recipe
         self.assertEqual(
             template["outputs"]["result"]["value"]["resources"],
@@ -82,8 +86,22 @@ class CompiledInfrastructureTests(unittest.TestCase):
                 "format('pe-{0}', variables('cacheName')))]",
             ],
         )
-        for child in ("database", "endpointNicTags", "zoneGroup"):
+        for child in ("database", "zoneGroup"):
             self.assertIn(child, template["resources"])
+        self.assertEqual(template["outputs"]["result"]["type"], "secureObject")
+        values = template["outputs"]["result"]["value"]
+        self.assertIs(values["values"]["tls"], True)
+        self.assertEqual(values["values"]["port"], 10000)
+        self.assertNotIn("password", values["values"])
+        self.assertIn("uriComponent(", values["secrets"]["password"])
+        self.assertEqual(
+            template["resources"]["cache"]["properties"]["publicNetworkAccess"],
+            "Disabled",
+        )
+        self.assertEqual(template["resources"]["cache"]["properties"]["minimumTlsVersion"], "1.2")
+        self.assertEqual(
+            template["resources"]["database"]["properties"]["clientProtocol"], "Encrypted"
+        )
 
     def test_bootstrap_has_no_unbound_copy_indices(self):
         assert_bound_copy_indices(self.bootstrap)

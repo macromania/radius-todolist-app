@@ -411,13 +411,19 @@ connection named lowercase `redis`. Use the generated URL once, or decode the
 standalone password exactly once. Never decode the whole URL.
 
 Its explicit lifecycle output lists the cache and private endpoint, but Radius
-also records implicitly created template resources. Live inspection confirmed
-that the current tag extension remains a managed cleanup target; this is an
-open F054 correction, not a solved lifecycle contract. Radius 0.60 cannot
-discover a deletion API version for `Microsoft.Resources/tags`, so tag
-application must be separated from the tracked Recipe path. Azure still owns
-the database and endpoint-generated NIC/DNS children; do not assume the output
-list alone overrides Radius's actual tracking.
+also records implicitly created template resources. The Recipe therefore must
+not declare `Microsoft.Resources/tags`: Radius 0.60 cannot discover that
+metadata resource's deletion API version. A post-deploy Job uses the existing
+per-plane Radius identity to merge and verify tags on the exact generated NIC
+after proving its cache/private-endpoint/subnet ownership links. See
+[the metadata contract](provisioning.md). No coordinator tag grant is added.
+Azure still owns the database and endpoint-generated NIC/DNS children.
+
+This corrects the source, not existing Radius metadata. The deployed old records
+still track the tag extension, and removing it through redeployment may invoke
+the same failing garbage collection. F054 remains open until a fresh
+create/tag/stored-tracking/delete gate passes; explicit output lists and
+compile-only checks are not lifecycle proof.
 
 ### Gateway details
 

@@ -66,23 +66,6 @@ resource endpoint 'Microsoft.Network/privateEndpoints@2024-07-01' = {
     ]
   }
 }
-resource endpointNic 'Microsoft.Network/networkInterfaces@2024-07-01' existing = {
-  name: 'nic-${cacheName}'
-  // Radius reads existing resources eagerly, including ones only used as tag scopes.
-  dependsOn: [
-    endpoint
-  ]
-}
-resource endpointNicTags 'Microsoft.Resources/tags@2021-04-01' = {
-  scope: endpointNic
-  name: 'default'
-  properties: {
-    tags: requiredTags
-  }
-  dependsOn: [
-    endpoint
-  ]
-}
 resource zoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-07-01' = {
   parent: endpoint
   name: 'default'
@@ -100,7 +83,7 @@ resource zoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024
 
 @secure()
 output result object = {
-  // Azure removes the database and endpoint-owned NIC, DNS group, and tags with these parents.
+  // Radius also tracks emitted resources. NIC metadata is applied outside this Recipe.
   resources: [
     cache.id
     endpoint.id

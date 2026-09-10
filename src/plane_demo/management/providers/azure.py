@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from plane_demo.management.providers.commands import (
     write_private,
 )
 from plane_demo.management.providers.credentials import Credentials, database_dsn
+from plane_demo.management.providers.redis_nic_tags import BASE_TAGS, ERRORS, Target, same_id
 from plane_demo.management.provisioning import (
     Cluster,
     OperatorConfig,
@@ -124,7 +126,7 @@ class AzureProvider:
                 timeout=120,
             )
 
-    def rad(self, slot: str, *args: str, workspace: bool = True):
+    def rad(self, slot: str, *args: str, workspace: bool = True, timeout: int | None = None):
         context, kubeconfig = self.paths(slot)
         command = ["rad", "--config", str(self.radius_config), *args]
         if workspace:
@@ -132,9 +134,16 @@ class AzureProvider:
         return self.commands.run(
             command,
             env=self.commands.radius_environment(kubeconfig, context),
+            **({"timeout": timeout} if timeout is not None else {}),
         )
 
-    def kubectl(self, slot: str, *args: str, stdin: str | None = None):
+    def kubectl(
+        self,
+        slot: str,
+        *args: str,
+        stdin: str | None = None,
+        timeout: int | None = None,
+    ):
         context, kubeconfig = self.paths(slot)
         return self.commands.run(
             [
@@ -143,24 +152,57 @@ class AzureProvider:
                 str(kubeconfig),
                 "--context",
                 context,
+                *([f"--request-timeout={timeout}s"] if timeout is not None else []),
                 *args,
             ],
             stdin=stdin,
+            **({"timeout": timeout} if timeout is not None else {}),
         )
 
-    def kube_get(self, slot: str, namespace: str, kind: str, name: str):
+    def kube_get(
+        self,
+        slot: str,
+        namespace: str,
+        kind: str,
+        name: str,
+        *,
+        timeout: int | None = None,
+    ):
         output = self.kubectl(
-            slot, "-n", namespace, "get", kind, name, "--ignore-not-found", "-o", "json"
+            slot,
+            "-n",
+            namespace,
+            "get",
+            kind,
+            name,
+            "--ignore-not-found",
+            "-o",
+            "json",
+            **({"timeout": timeout} if timeout is not None else {}),
         )
         return json.loads(output) if output else None
 
-    def apply(self, slot: str, resources: dict | list, *, create: bool = False) -> None:
+    def apply(
+        self,
+        slot: str,
+        resources: dict | list,
+        *,
+        create: bool = False,
+        timeout: int | None = None,
+    ) -> None:
         payload = (
             {"apiVersion": "v1", "kind": "List", "items": resources}
             if isinstance(resources, list)
             else resources
         )
-        self.kubectl(slot, "create" if create else "apply", "-f", "-", stdin=json.dumps(payload))
+        self.kubectl(
+            slot,
+            "create" if create else "apply",
+            "-f",
+            "-",
+            stdin=json.dumps(payload),
+            **({"timeout": timeout} if timeout is not None else {}),
+        )
 
     def verify_recipes(self) -> None:
         for recipe in self.config.recipes.values():
@@ -529,7 +571,15 @@ class AzureProvider:
             f"@{path}",
         )
 
-    def resource(self, slot: str, kind: str, name: str, application: str) -> dict:
+    def resource(
+        self,
+        slot: str,
+        kind: str,
+        name: str,
+        application: str,
+        *,
+        timeout: int | None = None,
+    ) -> dict:
         output = self.rad(
             slot,
             "resource",
@@ -542,6 +592,7 @@ class AzureProvider:
             application,
             "--output",
             "json",
+            **({"timeout": timeout} if timeout is not None else {}),
         )
         try:
             properties = json.loads(output)["properties"]
@@ -1104,6 +1155,183 @@ class AzureProvider:
             raise ProvisioningError("invalid_certificate_uri")
         return expected
 
+    def tag_redis_nic(
+        self,
+        slot: str,
+        *,
+        resource_name: str = "redis",
+        application: str = "data",
+        environment: str | None = None,
+    ) -> dict:
+        allocation = self.config.allocation(slot)
+        foundation = self.config.foundation
+        scope = "/planes/radius/local/resourceGroups/radplanes/providers/"
+        target_data = {
+            "slot": slot,
+            "subscription_id": foundation["subscriptionId"],
+            "tenant_id": foundation["tenantId"],
+            "client_id": allocation["identities"]["radius"]["clientId"],
+            "resource_group": allocation["appResourceGroup"],
+            "subnet_id": allocation["privateEndpointSubnetId"],
+            "location": foundation["location"],
+            "resource_id": scope + f"Applications.Datastores/redisCaches/{resource_name}",
+            "environment_id": scope + f"Applications.Core/environments/{environment or slot}",
+            "application_id": scope + f"Applications.Core/applications/{application}",
+            "tags": {**plain(foundation["tags"]), **BASE_TAGS},
+        }
+        target = Target.parse(target_data)
+        properties = self.resource(slot, "redis", resource_name, application, timeout=30)
+        if (
+            properties.get("provisioningState") != "Succeeded"
+            or not same_id(properties.get("environment"), target.environment_id)
+            or not same_id(properties.get("application"), target.application_id)
+        ):
+            raise ProvisioningError("redis_nic_radius_not_ready")
+        namespace, account, job_name = "radius-system", "applications-rp", "redis-nic-tags"
+        service_account = self.kube_get(slot, namespace, "serviceaccount", account, timeout=15)
+        if not isinstance(service_account, dict) or not isinstance(
+            service_account.get("metadata"), dict
+        ):
+            raise ProvisioningError("redis_nic_identity_mismatch")
+        metadata = service_account["metadata"]
+        annotations = metadata.get("annotations", {})
+        if (
+            not isinstance(annotations, dict)
+            or metadata.get("name") != account
+            or metadata.get("namespace") != namespace
+            or annotations.get("azure.workload.identity/client-id") != target.client_id
+            or annotations.get("azure.workload.identity/tenant-id") != target.tenant_id
+        ):
+            raise ProvisioningError("redis_nic_identity_mismatch")
+        if self.kube_get(slot, namespace, "job", job_name, timeout=15):
+            raise ProvisioningError("redis_nic_job_exists")
+        job = self.job(
+            namespace,
+            job_name,
+            self.config.images["provisioner"],
+            ["python", "-m", "plane_demo.management.providers.redis_nic_tags"],
+            account,
+        )
+        job["spec"]["activeDeadlineSeconds"] = 180
+        template = job["spec"]["template"]
+        template["metadata"]["labels"].update(
+            {
+                "azure.workload.identity/use": "true",
+                "plane-demo/slot": slot,
+            }
+        )
+        template["spec"]["containers"][0].update(
+            {
+                "terminationMessagePolicy": "File",
+                "env": [
+                    {"name": "REDIS_NIC_TAG_TARGET", "value": json.dumps(target_data)},
+                    {
+                        "name": "POD_NAMESPACE",
+                        "valueFrom": {"fieldRef": {"fieldPath": "metadata.namespace"}},
+                    },
+                    {
+                        "name": "POD_SERVICE_ACCOUNT",
+                        "valueFrom": {"fieldRef": {"fieldPath": "spec.serviceAccountName"}},
+                    },
+                ],
+            }
+        )
+        self.apply(slot, job, create=True, timeout=15)
+        deadline, uid = time.monotonic() + 200, None
+        while time.monotonic() < deadline:
+            current = self.kube_get(slot, namespace, "job", job_name, timeout=15)
+            if time.monotonic() >= deadline:
+                raise ProvisioningError("redis_nic_timeout")
+            if not current or not current.get("metadata", {}).get("uid"):
+                raise ProvisioningError("redis_nic_job_missing")
+            current_uid = current["metadata"]["uid"]
+            if uid is not None and current_uid != uid:
+                raise ProvisioningError("redis_nic_job_replaced")
+            uid = current_uid
+            status = current.get("status", {})
+            if status.get("succeeded") == 1 or status.get("failed"):
+                break
+            time.sleep(2)
+        else:
+            raise ProvisioningError("redis_nic_timeout")
+        pods = json.loads(
+            self.kubectl(
+                slot,
+                "-n",
+                namespace,
+                "get",
+                "pods",
+                "-l",
+                f"job-name={job_name}",
+                "-o",
+                "json",
+                timeout=15,
+            )
+        )
+        results = []
+        for pod in pods["items"]:
+            if not any(
+                owner.get("uid") == uid
+                and owner.get("kind") == "Job"
+                and owner.get("name") == job_name
+                and owner.get("controller") is True
+                for owner in pod["metadata"].get("ownerReferences", [])
+            ):
+                continue
+            for container in pod.get("status", {}).get("containerStatuses", []):
+                terminated = container.get("state", {}).get("terminated", {})
+                if container.get("name") == job_name and terminated:
+                    if status.get("succeeded") == 1 and (
+                        pod.get("status", {}).get("phase") != "Succeeded"
+                        or terminated.get("exitCode") != 0
+                    ):
+                        raise ProvisioningError("redis_nic_job_output_invalid")
+                    try:
+                        results.append(json.loads(terminated.get("message", "")))
+                    except ValueError:
+                        raise ProvisioningError("redis_nic_job_output_invalid") from None
+        if len(results) != 1 or not isinstance(results[0], dict):
+            raise ProvisioningError(
+                "redis_nic_job_failed"
+                if status.get("succeeded") != 1
+                else "redis_nic_job_output_invalid"
+            )
+        result = results[0]
+        if status.get("succeeded") != 1:
+            code = result.get("error_code")
+            raise ProvisioningError(
+                code if isinstance(code, str) and code in ERRORS else "redis_nic_job_failed"
+            )
+        if set(result) != {"cacheId", "privateEndpointId", "nicId"}:
+            raise ProvisioningError("redis_nic_job_output_invalid")
+        target.owned_id(result["cacheId"], "Microsoft.Cache/redisEnterprise")
+        target.owned_id(result["privateEndpointId"], "Microsoft.Network/privateEndpoints")
+        target.owned_id(result["nicId"], "Microsoft.Network/networkInterfaces")
+        cache_name = result["cacheId"].rsplit("/", 1)[1]
+        if (
+            not re.fullmatch(r"amr-[a-z0-9]{13}", cache_name)
+            or not same_id(
+                result["privateEndpointId"],
+                f"{target.group_id}/providers/Microsoft.Network/privateEndpoints/pe-{cache_name}",
+            )
+            or not same_id(
+                result["nicId"],
+                f"{target.group_id}/providers/Microsoft.Network/networkInterfaces/nic-{cache_name}",
+            )
+        ):
+            raise ProvisioningError("redis_nic_job_output_invalid")
+        self.kubectl(
+            slot,
+            "-n",
+            namespace,
+            "delete",
+            f"job/{job_name}",
+            "--cascade=foreground",
+            "--wait=true",
+            timeout=15,
+        )
+        return result
+
     def deploy_plane(self, slot: str, observe: Callable[[str], None] = lambda _: None) -> str:
         self.config.allocation(slot)
         role, namespace = self.names(slot)
@@ -1128,6 +1356,9 @@ class AzureProvider:
             )
         observe(f"{role}-application")
         self.deploy(slot, role, role, values)
+        if role == "data":
+            observe("data-redis-metadata")
+            self.tag_redis_nic(slot)
         self.kubectl(
             slot,
             "-n",
@@ -1147,6 +1378,9 @@ class AzureProvider:
         write_json(existing, {"certificateSecretUri": uri})
         values.update(gatewayPhase="https", certificateSecretUri=uri)
         self.deploy(slot, role, role, values)
+        if role == "data":
+            observe("data-redis-metadata")
+            self.tag_redis_nic(slot)
         properties = self.resource(slot, "gateway", "gateway", role)
         url = endpoint(properties["url"])
         if properties["host"] != host or properties.get("certificateSecretUri") != uri:

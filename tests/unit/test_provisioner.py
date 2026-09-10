@@ -1328,8 +1328,13 @@ def test_certificate_allocation_names_and_subject_must_match_prebound_scope(raw_
         OperatorConfig.from_dict(raw_config)
 
 
-def test_full_data_deploy_calls_certificate_then_https_and_preserves_it_on_reapply(provider):
+def test_full_data_deploy_calls_certificate_then_https_and_preserves_it_on_reapply(
+    provider,
+    monkeypatch,
+):
     provider._verified = True
+    metadata_action = MagicMock()
+    monkeypatch.setattr(provider, "tag_redis_nic", metadata_action)
     provider.credentials.ensure("shared-control", {"cp_api", "cp_reconciler", "dp_reconciler"})
     provider.credentials.set_database("shared-control", database_properties())
     host = "data.centralus.cloudapp.azure.com"
@@ -1356,7 +1361,17 @@ def test_full_data_deploy_calls_certificate_then_https_and_preserves_it_on_reapp
     provider.commands.run.side_effect = run_command
     stages = []
     assert provider.deploy_plane("shared-data", stages.append) == "https://" + host
-    assert stages == ["data-credentials", "data-application", "data-certificate"]
+    assert stages == [
+        "data-credentials",
+        "data-application",
+        "data-redis-metadata",
+        "data-certificate",
+        "data-redis-metadata",
+    ]
+    assert [call.args for call in metadata_action.call_args_list] == [
+        ("shared-data",),
+        ("shared-data",),
+    ]
     calls = [call.args[0] for call in provider.commands.run.call_args_list]
     deploys = [index for index, args in enumerate(calls) if "deploy" in args and args[0] == "rad"]
     certificate_call = next(
@@ -1391,12 +1406,16 @@ def test_full_data_deploy_calls_certificate_then_https_and_preserves_it_on_reapp
     assert first_values[0]["gatewayPhase"] == "https"
     assert first_values[0]["certificateSecretUri"] == uri
     assert provider.credentials.path.read_text() == retained_passwords
+    assert metadata_action.call_count == 4
 
 
 def test_management_deploy_preserves_coordinator_identity_and_certificate_command(
     provider,
     raw_config,
+    monkeypatch,
 ):
+    metadata_action = MagicMock()
+    monkeypatch.setattr(provider, "tag_redis_nic", metadata_action)
     coordinator_id = "44444444-4444-4444-4444-444444444444"
     raw_config["coordinatorIdentity"]["clientId"] = coordinator_id
     provider.config = OperatorConfig.from_dict(raw_config)
@@ -1433,6 +1452,7 @@ def test_management_deploy_preserves_coordinator_identity_and_certificate_comman
 
     provider.commands.run.side_effect = run_command
     assert provider.deploy_plane("management") == "https://" + host
+    metadata_action.assert_not_called()
     assert len(deployments) == 2
     for parameters in deployments:
         assert parameters["provisionerClientId"]["value"] == coordinator_id
@@ -1463,6 +1483,273 @@ def test_management_deploy_preserves_coordinator_identity_and_certificate_comman
         provisioner_account["metadata"]["annotations"]["azure.workload.identity/client-id"]
         == coordinator_id
     )
+
+
+def metadata_job_fixture(provider, monkeypatch, *, application="data", resource_name="redis"):
+    scope = "/planes/radius/local/resourceGroups/radplanes/providers/"
+    monkeypatch.setattr(
+        provider,
+        "resource",
+        MagicMock(
+            return_value={
+                "provisioningState": "Succeeded",
+                "environment": scope + "Applications.Core/environments/shared-data",
+                "application": scope + f"Applications.Core/applications/{application}",
+            }
+        ),
+    )
+    group = provider.config.allocations["shared-data"]["appResourceGroupId"]
+    result = {
+        "cacheId": group + "/providers/Microsoft.Cache/redisEnterprise/amr-abcdefghijklm",
+        "privateEndpointId": group
+        + "/providers/Microsoft.Network/privateEndpoints/pe-amr-abcdefghijklm",
+        "nicId": group + "/providers/Microsoft.Network/networkInterfaces/nic-amr-abcdefghijklm",
+    }
+    state = SimpleNamespace(
+        created=[],
+        result=result,
+        job_status={"succeeded": 1},
+        pod_phase="Succeeded",
+        exit_code=0,
+        account={
+            "metadata": {
+                "name": "applications-rp",
+                "namespace": "radius-system",
+                "annotations": {
+                    "azure.workload.identity/client-id": CLIENT,
+                    "azure.workload.identity/tenant-id": TENANT,
+                },
+            }
+        },
+    )
+
+    def get(slot, namespace, kind, name, **kwargs):
+        assert slot == "shared-data" and namespace == "radius-system"
+        assert kwargs["timeout"] == 15
+        if kind == "serviceaccount":
+            return state.account
+        return (
+            {"metadata": {"uid": "metadata-job-uid"}, "status": state.job_status}
+            if state.created
+            else None
+        )
+
+    def create(slot, payload, **kwargs):
+        assert kwargs == {"create": True, "timeout": 15}
+        state.created.append(payload)
+
+    def execute(args, **kwargs):
+        if "pods" in args:
+            return json.dumps(
+                {
+                    "items": [
+                        {
+                            "metadata": {
+                                "ownerReferences": [
+                                    {
+                                        "uid": "metadata-job-uid",
+                                        "kind": "Job",
+                                        "name": "redis-nic-tags",
+                                        "controller": True,
+                                    }
+                                ]
+                            },
+                            "status": {
+                                "phase": state.pod_phase,
+                                "containerStatuses": [
+                                    {
+                                        "name": "redis-nic-tags",
+                                        "state": {
+                                            "terminated": {
+                                                "exitCode": state.exit_code,
+                                                "message": json.dumps(state.result),
+                                            }
+                                        },
+                                    }
+                                ],
+                            },
+                        }
+                    ]
+                }
+            )
+        return ""
+
+    monkeypatch.setattr(provider, "kube_get", get)
+    monkeypatch.setattr(provider, "apply", create)
+    provider.commands.run.side_effect = execute
+    return state
+
+
+def test_metadata_job_uses_existing_radius_identity_and_privileged_image(provider, monkeypatch):
+    state = metadata_job_fixture(provider, monkeypatch)
+    assert provider.tag_redis_nic("shared-data") == state.result
+    provider.resource.assert_called_once_with("shared-data", "redis", "redis", "data", timeout=30)
+    assert len(state.created) == 1
+    job = state.created[0]
+    assert job["metadata"]["namespace"] == "radius-system"
+    assert job["spec"]["backoffLimit"] == 0 and job["spec"]["activeDeadlineSeconds"] == 180
+    pod = job["spec"]["template"]
+    assert pod["metadata"]["labels"]["azure.workload.identity/use"] == "true"
+    assert pod["spec"]["serviceAccountName"] == "applications-rp"
+    assert pod["spec"]["automountServiceAccountToken"] is False
+    container = pod["spec"]["containers"][0]
+    assert container["image"] == provider.config.images["provisioner"]
+    assert container["command"] == [
+        "python",
+        "-m",
+        "plane_demo.management.providers.redis_nic_tags",
+    ]
+    assert container["terminationMessagePolicy"] == "File"
+    target = json.loads(container["env"][0]["value"])
+    assert target["client_id"] == CLIENT and target["tenant_id"] == TENANT
+    assert target["resource_id"].endswith("/redisCaches/redis")
+    assert target["tags"]["managedBy"] == "radius-todolist-app"
+    assert not any(key.endswith("DSN") or "password" in key for key in target)
+    assert "delete" in provider.commands.run.call_args.args[0]
+    assert all(call.kwargs["timeout"] == 15 for call in provider.commands.run.call_args_list)
+
+
+def test_metadata_job_uses_radius_identity_not_coordinator_identity(
+    provider, raw_config, monkeypatch
+):
+    radius_client = "44444444-4444-4444-4444-444444444444"
+    raw_config["allocations"]["shared-data"]["identities"]["radius"]["clientId"] = radius_client
+    provider.config = OperatorConfig.from_dict(raw_config)
+    state = metadata_job_fixture(provider, monkeypatch)
+    state.account["metadata"]["annotations"]["azure.workload.identity/client-id"] = radius_client
+    provider.tag_redis_nic("shared-data")
+    target = json.loads(
+        state.created[0]["spec"]["template"]["spec"]["containers"][0]["env"][0]["value"]
+    )
+    assert target["client_id"] == radius_client
+    assert target["client_id"] != provider.config.coordinator_identity["clientId"]
+
+
+def test_control_plane_deployment_does_not_run_redis_metadata(provider, monkeypatch):
+    slot = "shared-control"
+    uri = "https://demo-vault.vault.azure.net/secrets/gateway-shared-control"
+    for name in (
+        "prerequisites",
+        "initialize_database",
+        "runtime_secrets",
+        "deploy",
+        "record_endpoint",
+    ):
+        monkeypatch.setattr(provider, name, MagicMock())
+    monkeypatch.setattr(provider, "certificate", MagicMock(return_value=uri))
+    monkeypatch.setattr(
+        provider,
+        "resource",
+        MagicMock(
+            side_effect=[
+                {
+                    "host": "control.centralus.cloudapp.azure.com",
+                    "url": "http://control.centralus.cloudapp.azure.com",
+                },
+                {
+                    "host": "control.centralus.cloudapp.azure.com",
+                    "url": "https://control.centralus.cloudapp.azure.com",
+                    "certificateSecretUri": uri,
+                },
+            ]
+        ),
+    )
+    metadata_action = MagicMock()
+    monkeypatch.setattr(provider, "tag_redis_nic", metadata_action)
+    assert provider.deploy_plane(slot) == "https://control.centralus.cloudapp.azure.com"
+    metadata_action.assert_not_called()
+
+
+def test_data_deployment_stops_at_metadata_failure_without_publishing_an_endpoint(
+    provider, monkeypatch
+):
+    for name in ("prerequisites", "runtime_secrets", "deploy", "certificate", "record_endpoint"):
+        monkeypatch.setattr(provider, name, MagicMock())
+    monkeypatch.setattr(
+        provider,
+        "tag_redis_nic",
+        MagicMock(side_effect=ProvisioningError("redis_nic_tag_conflict")),
+    )
+    observed = []
+    with pytest.raises(ProvisioningError, match="redis_nic_tag_conflict"):
+        provider.deploy_plane("shared-data", observed.append)
+    assert observed[-1] == "data-redis-metadata"
+    assert provider.deploy.call_count == 1
+    provider.certificate.assert_not_called()
+    provider.record_endpoint.assert_not_called()
+
+
+@pytest.mark.parametrize("wrong", ["client", "tenant", "name", "namespace", "annotations"])
+def test_metadata_job_refuses_service_account_identity_mismatch(provider, monkeypatch, wrong):
+    state = metadata_job_fixture(provider, monkeypatch)
+    record = state.account["metadata"]
+    if wrong == "client":
+        record["annotations"]["azure.workload.identity/client-id"] = "different"
+    elif wrong == "tenant":
+        record["annotations"]["azure.workload.identity/tenant-id"] = "different"
+    elif wrong == "annotations":
+        record["annotations"] = []
+    else:
+        record[wrong] = "different"
+    with pytest.raises(ProvisioningError, match="redis_nic_identity_mismatch"):
+        provider.tag_redis_nic("shared-data")
+    assert not state.created
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("provisioningState", "Failed"),
+        ("application", "/other/application"),
+        ("environment", "/other/environment"),
+    ],
+)
+def test_metadata_job_requires_the_actual_succeeded_radius_linkage(
+    provider,
+    monkeypatch,
+    field,
+    value,
+):
+    state = metadata_job_fixture(provider, monkeypatch)
+    provider.resource.return_value[field] = value
+    with pytest.raises(ProvisioningError, match="redis_nic_radius_not_ready"):
+        provider.tag_redis_nic("shared-data")
+    assert not state.created
+
+
+def test_metadata_job_surfaces_safe_helper_failure_without_deleting_evidence(provider, monkeypatch):
+    state = metadata_job_fixture(provider, monkeypatch)
+    state.job_status, state.pod_phase, state.exit_code = {"failed": 1}, "Failed", 1
+    state.result = {"error_code": "redis_nic_ownership_mismatch"}
+    with pytest.raises(ProvisioningError, match="redis_nic_ownership_mismatch"):
+        provider.tag_redis_nic("shared-data")
+    assert not any("delete" in call.args[0] for call in provider.commands.run.call_args_list)
+
+
+def test_metadata_job_wait_is_bounded(provider, monkeypatch):
+    from plane_demo.management.providers import azure
+
+    state = metadata_job_fixture(provider, monkeypatch)
+    state.job_status = {}
+    ticks = iter([0, 1, 201])
+    monkeypatch.setattr(azure.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(azure.time, "sleep", lambda _: None)
+    with pytest.raises(ProvisioningError, match="redis_nic_timeout"):
+        provider.tag_redis_nic("shared-data")
+
+
+def test_same_metadata_helper_supports_a_separately_named_fresh_lifecycle_gate(
+    provider, monkeypatch
+):
+    state = metadata_job_fixture(
+        provider, monkeypatch, application="redis-life", resource_name="fresh"
+    )
+    provider.tag_redis_nic("shared-data", resource_name="fresh", application="redis-life")
+    target = json.loads(
+        state.created[0]["spec"]["template"]["spec"]["containers"][0]["env"][0]["value"]
+    )
+    assert target["resource_id"].endswith("/redisCaches/fresh")
+    assert target["application_id"].endswith("/applications/redis-life")
 
 
 def test_main_acquires_one_session_and_runs_the_actual_polling_loop(tmp_path, config, monkeypatch):

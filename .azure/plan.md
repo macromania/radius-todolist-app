@@ -1,6 +1,6 @@
 # Three-plane Radius deployment checkpoint
 
-Status: Validated (Azure functional proof passed; Redis lifecycle correction next).
+Status: Validated (F054 source reviewed; fresh Redis lifecycle gate next).
 Fresh admission and existing-tenant functional/outage proof are recorded
 separately. Redis lifecycle correction, final teardown, and local remain open.
 
@@ -65,6 +65,19 @@ and parameter hashes in `.state/azure/validation.json`; changed hashes require
 validation again. Never infer deployment success from compilation or Job submission.
 
 ## 7. Validation Proof
+
+2026-09-10T07:57:49Z: `uv run --no-sync python
+operations/validate-bootstrap.py` passed real ARM what-if and validation with
+the unchanged foundation hashes recorded in `.state/azure/validation.json`.
+F054's source passed `make check`: 514 tests, 245 subtests, all 22 Bicep files,
+three generated extensions, Ruff, and ShellCheck; 50 live-dependency tests
+were explicitly skipped. Independent F054 rubber-duck/security reviews were
+clean. Current image/Recipe/configuration manifests are archived under
+`pre-f054-artifacts/` before building the candidate. No existing Redis record
+is to be redeployed or migrated; validate the new Recipe through a separate
+fresh resource using the existing isolated-data allocation and Radius identity.
+Image-content/SDK inspection and actual create/tag/track/delete proof remain
+required before treating F054 as resolved.
 
 2026-09-10T07:03:57Z: `verify-existing` run
 `80a3a427f3874169b6604800dd05580e`, source `3c66555`, passed functional,

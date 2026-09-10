@@ -324,6 +324,79 @@ before deploying the actual application. A failed initialized-plane attempt
 requires operator cleanup of its verified owned resources and corresponding
 state; deleting only its intent file is not a safe retry procedure.
 
+## Redis NIC metadata outside Recipe tracking
+
+F054 changes the lifecycle of **new** Redis resources. Radius 0.60.2 appends the
+Bicep response's `OutputResources` to the Recipe's explicit `result.resources`.
+Listing only the cache and private endpoint therefore does not prevent a
+declared `Microsoft.Resources/tags` extension from being tracked. That type has
+no usable delete API version in the pinned Radius path.
+
+The Redis Recipe now declares only the cache, database, private endpoint, and
+DNS zone group. It neither declares an existing NIC nor emits a tags extension.
+TLS, private access, and the secure percent-encoded password output are unchanged.
+The separately packaged
+`plane_demo.management.providers.redis_nic_tags` helper applies NIC metadata
+through a short-lived Job, outside the Radius resource lifecycle.
+
+`deploy_plane()` calls `tag_redis_nic()` after **both** data-application Radius
+deployments, including an HTTPS reapply. Management/control deployment paths do
+not run it. Metadata failure stops deployment rather than publishing an endpoint
+or claiming infrastructure completion.
+
+The Job uses the existing `radius-system/applications-rp` service account and
+that slot's Radius workload identity. The caller verifies the account's name,
+namespace, client-ID annotation, and tenant annotation against operator config.
+The Job has `azure.workload.identity/use=true`, but no Kubernetes API token mount,
+new RBAC, Azure role grants, or human credentials. Its helper validates downward
+API namespace/account values and the projected Azure identity variables before
+obtaining a token with `WorkloadIdentityCredential`. It is absent from the public
+API image allowlist and included by the privileged provider-directory copy.
+
+Before any PATCH, the helper verifies the app group's required tags, locates
+exactly one cache carrying the expected Radius resource linkage, and reads the
+actual cache and private endpoint. Both must be succeeded, in the expected
+region/group, and carry the required project, application, environment, and
+resource tags. The endpoint must target that cache's `redisEnterprise`
+subresource with an approved connection and the allocated subnet. Its custom
+NIC name and single NIC reference must agree with the Recipe's naming contract;
+the NIC must be in the same app group and link back to that endpoint.
+
+The only write is ARM `PATCH .../providers/Microsoft.Resources/tags/default`
+using API `2021-04-01` and operation `Merge` on that verified NIC. Existing
+conflicting ownership tags fail rather than being overwritten. Unrelated tags
+and network properties are preserved; live readback confirms required tags and
+unchanged network properties, ignoring read-only ETag revisions. An already
+correct NIC needs no PATCH. Neither Redis access keys nor private logs are read.
+
+ARM requests use a 60-second aggregate budget, at most 10 seconds per request
+(5 seconds to connect), no redirects, and at most three verification reads.
+Workload-token acquisition uses bounded transport timeouts with retries disabled.
+The Job has zero retries and a 180-second deadline; the caller polls for at most
+200 seconds with bounded Kubernetes requests. Successful Jobs are deleted;
+failed/orphaned Jobs remain an explicit operator cleanup case. Safe error codes
+are returned through the owned Pod's termination message, not arbitrary logs.
+
+A parent-operated **fresh** lifecycle gate can use the same action after
+deploying its separately named Radius Redis resource:
+
+```python
+provider.tag_redis_nic(
+    "shared-data",
+    resource_name="redis-lifecycle",
+    application="redis-lifecycle",
+    environment="shared-data",
+)
+```
+
+The result contains only `cacheId`, `privateEndpointId`, and `nicId`. The gate
+must use a newly published immutable Recipe and an inspected tool image that
+contains this helper. Existing resources that already track the old tags
+extension are **not** repaired by this change: redeployment may attempt to
+garbage-collect that old record and fail. Do not reapply this Recipe to running
+data planes as a recovery technique, edit backing stores, or force adoption.
+Live create/tag/delete proof remains a separate parent-owned gate.
+
 ## In-cluster certificate issuance
 
 The driver calls the parent-owned `operations/run-certificate-job.py` coordinator.

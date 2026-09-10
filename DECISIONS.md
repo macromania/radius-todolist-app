@@ -323,3 +323,17 @@ fresh admission, historical reuse, or paused-admission proof. It checks current
 topology, configuration, counters, authentication, timelines, idempotency, and
 both outages. Keep the original failed admission record unchanged and report
 the two evidence scopes separately rather than inventing a general resume path.
+
+## D036 - Apply generated NIC metadata with the existing Recipe identity
+
+Keep Azure-generated Redis NIC tags outside the Bicep Recipe so Radius does
+not track an unsupported tag-deletion target. After each data deployment, run
+a bounded Job under the existing per-plane `applications-rp` workload identity.
+Do not add coordinator tag permissions or another identity.
+
+Before merging tags, prove the resource group, Radius ownership tags, cache,
+private endpoint, subnet, and NIC backlink match the allocated plane. Preserve
+other tags and network properties, read the tags back, and wait for actual Job
+success. Failures remain visible for explicit operator cleanup. Existing
+Radius records containing the old tag extension are not repaired by this
+source change; prove the new create/tag/delete lifecycle on a fresh resource.
