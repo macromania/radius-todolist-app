@@ -983,3 +983,19 @@ tests and 15 subtests passed; the direct package walkthrough and independent
 security review were clean. `final-radius-preview` is performing the strict
 read-only ownership/terminal-state inventory. Execution requires that preview
 to pass; no provider-delete fallback has been added.
+
+The preview passed at 10:56:23Z with all managed-node groups inspected.
+`final-radius-execute` then quiesced management API/provisioner and removed
+the isolated data app's Azure resources. It stopped at 11:22:45Z because the
+Radius app remained, despite the CLI returning zero. The actual-absence guard
+therefore prevented a false cleanup success. Independent Azure inventory
+confirmed that app group empty; a renewed strict preview found the remaining
+legacy Redis record in terminal `Failed` state.
+
+A separate reviewed recovery is checking the exact empty isolated data child,
+its sole failed Redis record, the precise old NIC-tag reference, and its
+management Radius cluster owner. It will not edit metadata or directly delete
+AKS. Any removal must go through that verified management Radius owner after
+the recovery preview passes. The immutable live bundle/bootstrap/helper/seed
+bytes match the reviewed package. All other child resources and the foundation
+remain pending normal owner-ordered cleanup; temporary access remains tracked.
