@@ -1049,3 +1049,16 @@ Redis record, empty app group, and management Radius owner.
 empty shared data cluster through management Radius. Its actual absence,
 remaining control-plane cleanup, temporary-access removal, and bootstrap
 teardown still require verification.
+
+The shared empty-child recovery completed through management Radius at
+12:56:12Z. Independent Azure reads at 12:58:43Z verified that AKS and its
+managed-node group absent and the app group empty. Its temporary Reader lease
+also disappeared with the node group; the original 21 grants plus three
+remaining temporary Readers were independently verified.
+
+Both data clusters are now removed. The next normal owner preview passed,
+and `final-radius-execute3` started at 13:01:51Z to remove the two control
+applications/clusters and then management's applications. Bootstrap
+management AKS, shared foundation resources, and final role cleanup remain
+separate pending steps. The verified images are cached locally before registry
+deletion; no local cluster or application has been started.
