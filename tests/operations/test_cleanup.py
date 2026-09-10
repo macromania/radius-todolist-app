@@ -76,6 +76,7 @@ class FakeCommands(cleanup.Commands):
         self.calls = []
         self.fail = lambda args: False
         self.leave_cluster = False
+        self.leave_radius_app = False
         self.leave_app_resource = False
         self.leave_group = False
         self.hidden_roles = set()
@@ -363,8 +364,9 @@ class FakeCommands(cleanup.Commands):
             return self.app_resources[(slot, self.value(args, "--application"))]
         if action == ["app", "delete"]:
             app = args[5]
-            del self.apps[slot][app]
-            self.app_resources.pop((slot, app), None)
+            if not self.leave_radius_app:
+                del self.apps[slot][app]
+                self.app_resources.pop((slot, app), None)
             if not self.leave_app_resource:
                 self.resources[self.manifest.allocations[slot]["appResourceGroup"]] = []
             return None
@@ -784,6 +786,29 @@ class CleanupTests(unittest.TestCase):
             self.engine().clean()
         self.assertFalse(
             any(a[0] == "rad" and a[3:5] == ["resource", "delete"] for a in self.mutations())
+        )
+
+    def test_zero_exit_with_remaining_radius_app_stops_before_owner_or_provider_deletion(self):
+        self.commands.leave_radius_app = True
+        with self.assertRaisesRegex(cleanup.CleanupError, "Radius app deletion incomplete"):
+            self.engine(radius_only=True).clean()
+        self.assertIn("data", self.commands.apps["shared-data"])
+        self.assertEqual(
+            self.commands.resources[self.manifest.allocations["shared-data"]["appResourceGroup"]],
+            [],
+        )
+        self.assertTrue(
+            any(
+                args[0] == "rad" and args[3:6] == ["app", "delete", "data"]
+                for args in self.mutations()
+            )
+        )
+        self.assertFalse(
+            any(
+                (args[0] == "rad" and args[3:5] == ["resource", "delete"])
+                or (args[0] == "az" and "delete" in args)
+                for args in self.mutations()
+            )
         )
 
     def test_remaining_child_aks_prevents_management_teardown(self):

@@ -1012,3 +1012,17 @@ empty Azure app group, sole failed Redis record, and management Radius owner.
 `final-isolated-recovery-execute` is now removing that empty child through its
 owner. Actual AKS/node-group absence and the remaining normal teardown still
 need verification.
+
+That recovery completed through management Radius at 11:59:13Z. Independent
+Azure reads at 12:02:39Z verified the isolated data AKS and managed-node group
+absent and its app group empty. Its exact temporary Reader assignment was
+removed with the node group; independent role readback confirmed that only
+that lease disappeared and the original 21 grants remain.
+
+The remaining normal cleanup preview passed. `final-radius-execute2` started
+at 12:06:12Z against the unchanged reviewed source, proceeding to shared data
+and the two control applications before their cluster owners. A permanent
+regression now exercises the actual cleanup path when the CLI returns zero
+but an app remains after its Azure resources are removed; it proves that no
+cluster-owner or provider deletion follows. All 51 cleanup tests and 15
+subtests passed. This adds no production fallback or behavior change.

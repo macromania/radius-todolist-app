@@ -176,6 +176,10 @@ they are not silently ignored or forcibly reset. Missing cluster ownership
 records, duplicate records, orphaned app resources, and incomplete deletions
 stop normal cleanup clearly.
 
+A zero CLI exit code is not deletion proof: Radius 0.60 returned zero during
+the legacy Redis cleanup while its app record remained. Keep the actual
+application and Azure-resource absence checks before deleting cluster owners.
+
 This is not a transaction or automatic rollback. A failure may follow successful
 deletion of earlier resources. Preserve evidence, inspect the reported phase,
 and use an explicit reviewed recovery path.
