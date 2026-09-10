@@ -46,11 +46,11 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F015 | 1 | High correctness | `scripts/install-radius.py` / Radius workspace loader | live | Radius workspace enumeration ignores KUBECONFIG and reads HOME/.kube/config | Resolved: per-cluster HOME, actual workspace/credential registration and identity verification, both fix reviews pass |
 | F016 | 1 | High correctness | `infra/radius/environments/project-azure.bicep` | live | Azure provider credentials do not automatically authenticate private Recipe downloads | Resolved: documented WI registry SecretStore, real download/deploy and both fix reviews pass |
 | F017 | 1 | Deployment blocker | `infra/radius/recipes/azure/cluster.bicep` | live | Cross-resource-group nested Azure modules fail in Radius deployment-engine evaluation | Resolved: flat Recipe/per-slot scope, both fix reviews, actual AKS creation by Radius identity, child Radius installation and HTTP workload proof passed |
-| F018 | 3 | High correctness | `src/plane_demo/providers/azure.py` | 374-380 (initial) | Environment registration omitted required private-registry authentication inputs | Corrected and fix-reviewed; included in current 117 passing coordinator tests; full onboarding pending |
+| F018 | 3 | High correctness | `src/plane_demo/providers/azure.py` | 374-380 (initial) | Environment registration omitted required private-registry authentication inputs | Resolved: corrected/reviewed inputs passed actual three-tenant onboarding and private Recipe pulls in the fresh lifecycle gate |
 | F019 | 3 | High correctness | `src/plane_demo/providers/azure.py` | 932-936 (initial) | Management deployment omitted provisioner managed-identity client ID | Corrected and fix-reviewed; current coordinator tests pass |
 | F020 | 3 | Medium correctness | `src/plane_demo/providers/azure.py` | 678-687 (initial) | Incomplete PostgreSQL Recipe state could be replayed before intent persisted | Pre-submission intent/refusal implemented and fix-reviewed; current coordinator tests pass |
 | F021 | 3 | Medium correctness | `src/plane_demo/provisioning.py` | 95-127 (initial) | Malformed operator network fields were passed to infrastructure | Parsed IPv4/CIDR validation implemented and fix-reviewed; current coordinator tests pass |
-| F022 | 4 | Medium security | `scripts/fault-parent-link.py` | 76-79, 127-140 (initial) | Caller working directory and arbitrary project identity defined the mutation boundary | Fixed and independently reviewed; offline harness tests pass, live acceptance pending |
+| F022 | 4 | Medium security | `scripts/fault-parent-link.py` | 76-79, 127-140 (initial) | Caller working directory and arbitrary project identity defined the mutation boundary | Resolved: fixed/reviewed boundaries passed both real parent-link outages, exact restoration, and independent fault-policy absence checks |
 | F023 | 4 | Medium correctness | `scripts/test-e2e.py` | 623-646 (initial) | Ignored message updates or reset counters could pass acceptance | Exact values/counters asserted; fix-reviewed and offline-tested |
 | F024 | 4 | Medium correctness | `scripts/test-e2e.py` | 471-478 (initial) | Stale applied version or missing report time could pass | Exact current child report checked; fix-reviewed and offline-tested |
 | F025 | 4 | Medium correctness | `scripts/test-e2e.py` | 666-680 (initial) | Empty control timelines could pass | Required events checked while allowing skipped intermediate versions; fix-reviewed |
@@ -86,7 +86,7 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F057 | lifecycle gate | Medium correctness | One-off F054 gate | group-show preflight | The wrapper supplied `--group` while the caller also supplied a positional group name, which Radius rejects | Resolved: duplicate removed, explicit scope retained, run-path regression/reviews passed; live group-show now succeeds |
 | F058 | lifecycle gate | Medium correctness | One-off F054 gate | group-ID comparison | Radius returns lowercase `resourcegroups`, which failed a case-sensitive comparison with `resourceGroups` | Resolved: actual ID verified, existing comparison helper reused, foreign-group regression/reviews passed; create5 passed Radius preflight |
 | F059 | lifecycle gate | High correctness | `redis_nic_tags.py` | location validation | Managed Redis returns `Central US`, not `centralus`, so the new helper rejects the correctly owned cache before tagging | Resolved: actual response/alias verified, guards/regressions/reviews passed, rebuilt image inspected, real baseline and fresh NIC tagging/idempotence passed |
-| F060 | lifecycle gate | Medium compatibility | Radius 0.60.2 CLI | unbound SecretStore deletion | `resource delete` tries to parse the generated empty application string before calling the deletion API | Reviewed native Radius owner-API cleanup passed; Radius auth/backing Secret absent and all lifecycle postconditions verified; reusable gate correction being finalized |
+| F060 | lifecycle gate | Medium compatibility | Radius 0.60.2 CLI | unbound SecretStore deletion | `resource delete` tries to parse the generated empty application string before calling the deletion API | Resolved: reviewed native owner-API cleanup and actual postconditions passed; gate helper finalized with 46 tests and clean direct walkthrough/security review |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -999,3 +999,16 @@ AKS. Any removal must go through that verified management Radius owner after
 the recovery preview passes. The immutable live bundle/bootstrap/helper/seed
 bytes match the reviewed package. All other child resources and the foundation
 remain pending normal owner-ordered cleanup; temporary access remains tracked.
+
+The F060 reusable gate helper is finalized and independently reviewed; all
+46 gate tests pass. It verifies the exact public Radius owner route and waits
+for both Radius-record and named-Secret absence. The source hash is
+`a5f26810feecc467b44e5894861e57db16c332bee61d6d3b483877d3a7ad6177`.
+No new Redis was created to repeat the already verified postconditions, and
+the failed `create6` payload remains immutable.
+
+The isolated-child recovery preview passed with the exact old NIC-tag ID,
+empty Azure app group, sole failed Redis record, and management Radius owner.
+`final-isolated-recovery-execute` is now removing that empty child through its
+owner. Actual AKS/node-group absence and the remaining normal teardown still
+need verification.

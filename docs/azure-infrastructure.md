@@ -419,11 +419,13 @@ after proving its cache/private-endpoint/subnet ownership links. See
 [the metadata contract](provisioning.md). No coordinator tag grant is added.
 Azure still owns the database and endpoint-generated NIC/DNS children.
 
-This corrects the source, not existing Radius metadata. The deployed old records
-still track the tag extension, and removing it through redeployment may invoke
-the same failing garbage collection. F054 remains open until a fresh
-create/tag/stored-tracking/delete gate passes; explicit output lists and
-compile-only checks are not lifecycle proof.
+The fresh create/tag/idempotence/stored-tracking/delete lifecycle and its
+unchanged-resource postconditions have passed; see F054/F059/F060 in
+[FINDINGS.md](../FINDINGS.md). This does not repair existing Radius metadata.
+Old deployed records still track the tag extension, and removing it through
+redeployment may invoke the same failing garbage collection. Their final
+teardown needs explicit owner-checked cleanup rather than a source-only
+migration or an assumed success from the CLI exit code.
 
 ### Gateway details
 

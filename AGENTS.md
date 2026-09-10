@@ -7,7 +7,7 @@ example; its scripts and deployment targets are intentionally removed.
 ## Scope and current status
 
 - Azure comes first; local provisioning is not implemented.
-- Azure integration gates passed. Full onboarding/outage acceptance is pending.
+- Azure onboarding, functional/outage behavior, and fresh Redis lifecycle are proven.
 - Use [FINDINGS.md](FINDINGS.md) for actual results, not assumptions from code.
 - [DECISIONS.md](DECISIONS.md) records approved choices and accepted limitations.
 - The user deferred deeper SQL/code simplification until end-to-end proof.
