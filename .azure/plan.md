@@ -106,6 +106,13 @@ foundation or Recipe inputs changed, so the recorded ARM validation remains
 applicable. Rebuild and inspect the new committed runtime image before
 regenerating the gate; existing tenant images/configuration remain unchanged.
 
+The `31e131a` rebuild and actual AKS image inspection are complete: 23 API and
+54 provisioner source/artifact hashes, UID, package imports, API exclusions,
+and extension payloads passed. The source-pinned `create6` lifecycle Job is
+running against a separate candidate configuration. Existing tenant workloads
+remain on their previous verified images; a completed lifecycle/absence result
+is still required.
+
 2026-09-10T07:03:57Z: `verify-existing` run
 `80a3a427f3874169b6604800dd05580e`, source `3c66555`, passed functional,
 topology/isolation, authentication, timeline/idempotency, and both real parent

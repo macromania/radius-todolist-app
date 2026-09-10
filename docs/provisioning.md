@@ -361,6 +361,9 @@ resource tags. The endpoint must target that cache's `redisEnterprise`
 subresource with an approved connection and the allocated subnet. Its custom
 NIC name and single NIC reference must agree with the Recipe's naming contract;
 the NIC must be in the same app group and link back to that endpoint.
+For this Central US allocation, accept Azure's canonical `centralus` and
+verified display name `Central US`: Managed Redis returns the latter while
+network resources return the former. Other regions still fail ownership checks.
 
 The only write is ARM `PATCH .../providers/Microsoft.Resources/tags/default`
 using API `2021-04-01` and operation `Merge` on that verified NIC. Existing

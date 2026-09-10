@@ -912,3 +912,15 @@ location metadata; the independent security fix review found no issues with
 the exact alias or allowlisted probe diagnostics. Existing resource ownership
 and foreign-region refusals remain enforced. No foundation or Recipe inputs
 changed. Rebuild the committed privileged source before the next gate attempt.
+
+The `31e131a` builds completed and tokenless AKS inspection again matched
+23 API and 54 provisioner files/artifacts, including the exact region fix.
+UID, API exclusion, extension members, and SDK imports passed. The new
+provisioner reference is
+`plane-provisioner@sha256:236b03faeba1ca2a735930618a59a1ed006fcabd7cfa50cb89bd487f169a2afd`.
+All 21 gate tests passed against the newly verified manifest. The regenerated
+`f054-redis-lifecycle-create6` Job started at 09:39:06Z with UID
+`3049f59c-98d7-42a0-8595-32e14c19f863`. Its isolated candidate configuration
+hash is `fe3198c4e5173d4b569451152c2ea9dabf799218b5dd8c2720ea453a9aef6732`;
+no previous image's runtime code was overlaid. Live lifecycle proof remains
+pending, and the working tenant configuration is unchanged.
