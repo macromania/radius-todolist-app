@@ -1,6 +1,6 @@
 # Three-plane Radius deployment checkpoint
 
-Status: Validated (F054 source reviewed; fresh Redis lifecycle gate next).
+Status: Validated (F059 region-response fix reviewed; candidate image rebuild next).
 Fresh admission and existing-tenant functional/outage proof are recorded
 separately. Redis lifecycle correction, final teardown, and local remain open.
 
@@ -97,6 +97,14 @@ read-only Job confirmed the actual ID. The existing case-insensitive ID helper,
 refusal. `f054-redis-lifecycle-create5` is running from the inspected image,
 with no change to existing tenant applications. Do not treat submission as
 lifecycle or teardown proof.
+
+`create5` passed Radius preflight but the read-only baseline found a real
+provider response mismatch: Managed Redis returns the verified display name
+`Central US`, rather than `centralus`. F059 accepts exactly those two names;
+237 focused tests and the direct walkthrough/security review passed. No
+foundation or Recipe inputs changed, so the recorded ARM validation remains
+applicable. Rebuild and inspect the new committed runtime image before
+regenerating the gate; existing tenant images/configuration remain unchanged.
 
 2026-09-10T07:03:57Z: `verify-existing` run
 `80a3a427f3874169b6604800dd05580e`, source `3c66555`, passed functional,

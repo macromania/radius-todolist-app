@@ -84,7 +84,8 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F055 | 4 | High correctness | `harness/test-e2e.py` | initial endpoint discovery | A 30-second endpoint-export wait is shorter than the five-cluster exporter's actual 90-second scan | Resolved: bounded discovery, 90-second-delay regression, unchanged convergence deadlines, 185 tests/211 subtests, clean fix reviews, and live existing-tenant verification passed |
 | F056 | lifecycle gate | Medium observability | One-off F054 gate | command logging | Setting the command logger to CRITICAL hid the first gate's already-redacted failure diagnostics | Resolved: standard ERROR diagnostics, 165 focused tests, clean direct walkthrough/security review; next live attempt exposed the actual F057 error |
 | F057 | lifecycle gate | Medium correctness | One-off F054 gate | group-show preflight | The wrapper supplied `--group` while the caller also supplied a positional group name, which Radius rejects | Resolved: duplicate removed, explicit scope retained, run-path regression/reviews passed; live group-show now succeeds |
-| F058 | lifecycle gate | Medium correctness | One-off F054 gate | group-ID comparison | Radius returns lowercase `resourcegroups`, which failed a case-sensitive comparison with `resourceGroups` | Actual ID verified read-only; existing case-insensitive helper applied; 21 tests including foreign-group refusal and clean direct walkthrough/security review; create5 live retry pending |
+| F058 | lifecycle gate | Medium correctness | One-off F054 gate | group-ID comparison | Radius returns lowercase `resourcegroups`, which failed a case-sensitive comparison with `resourceGroups` | Resolved: actual ID verified, existing comparison helper reused, foreign-group regression/reviews passed; create5 passed Radius preflight |
+| F059 | lifecycle gate | High correctness | `redis_nic_tags.py` | location validation | Managed Redis returns `Central US`, not `centralus`, so the new helper rejects the correctly owned cache before tagging | Actual response/region alias verified; exact two-name handling, 237 focused tests, direct walkthrough/security review pass; rebuilt image and live lifecycle proof pending |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -889,3 +890,25 @@ rubber-duck and independent security fix reviews were clean. The regenerated
 `f054-redis-lifecycle-create5` Job started at 09:24:03Z with UID
 `33eea4ff-fdc1-4d2d-a581-121910fd2ac5`. Its candidate remains isolated from the
 active tenant configuration. No failed gate record has been relabeled.
+
+`create5` passed Radius preflight but its read-only baseline probe failed before
+Recipe creation. Actual ARM reads identify F059: Managed Redis returns
+`location: "Central US"` while its endpoint/NIC return `"centralus"`. The
+subscription's `/locations` API confirms those are the display and canonical
+names of the same region. The helper now accepts those exact two names; its
+target configuration remains restricted to `centralus`, and other or malformed
+regions still fail before any PATCH. The default test cache now uses the actual
+display-name response rather than the previous unrealistic fixture.
+
+The one-off probe also now prints only allowlisted provider error codes instead
+of discarding them into the generic exception class. No exception text, tokens,
+or response bodies are exposed. Because F059 changes privileged runtime source,
+another committed image build and actual-content inspection are required; no
+source overlay into the previous image is allowed.
+
+F059 passed 237 focused provider/gate tests, Ruff, and whitespace checks.
+The direct rubber-duck review used the real cache response and subscription
+location metadata; the independent security fix review found no issues with
+the exact alias or allowlisted probe diagnostics. Existing resource ownership
+and foreign-region refusals remain enforced. No foundation or Recipe inputs
+changed. Rebuild the committed privileged source before the next gate attempt.

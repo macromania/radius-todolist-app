@@ -238,7 +238,8 @@ def check_tags(resource: dict, expected: Mapping[str, str]) -> dict[str, str]:
 def check_resource(resource: dict, identifier: str, kind: str, target: Target) -> dict:
     require(same_id(resource.get("id"), identifier) and same_id(resource.get("type"), kind))
     require(resource.get("name") == identifier.rsplit("/", 1)[1])
-    require(resource.get("location") == target.location)
+    # Managed Redis returns the display name; network resources return the region code.
+    require(resource.get("location") in (target.location, "Central US"))
     properties = resource.get("properties")
     require(isinstance(properties, dict) and properties.get("provisioningState") == "Succeeded")
     return properties

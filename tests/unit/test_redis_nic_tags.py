@@ -71,6 +71,7 @@ class Azure:
             },
             {**target.required_tags, "cache-only": "leave-on-cache"},
         )
+        self.cache["location"] = "Central US"
         self.pe = resource(
             self.pe_id,
             "Microsoft.Network/privateEndpoints",
@@ -157,6 +158,21 @@ class Azure:
 @pytest.fixture
 def azure(target_data):
     return Azure(metadata.Target.parse(target_data))
+
+
+@pytest.mark.parametrize("location", ["centralus", "Central US"])
+def test_canonical_and_verified_display_region_names_allow_tagging(azure, location):
+    azure.cache["location"] = location
+    assert azure.run()["cacheId"] == azure.cache_id
+    assert len(azure.patches) == 1
+
+
+@pytest.mark.parametrize("location", ["westus2", "West US 2", None, {}, 42])
+def test_other_or_malformed_regions_fail_before_tagging(azure, location):
+    azure.cache["location"] = location
+    with pytest.raises(ProvisioningError, match="redis_nic_ownership_mismatch"):
+        azure.run()
+    assert not azure.patches
 
 
 def test_verified_merge_preserves_other_tags_and_network_properties_and_is_idempotent(azure):
