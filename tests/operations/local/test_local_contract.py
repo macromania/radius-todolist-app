@@ -4,7 +4,7 @@ import json
 import os
 import subprocess
 import tarfile
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 import yaml
@@ -95,6 +95,122 @@ def test_command_failures_are_private_and_timeouts_are_not_cancellation(
     )
     with pytest.raises(common.LocalError, match="remote execution may still"):
         commands.run(["rad"], timeout=3)
+
+
+@pytest.fixture
+def native_transport(local_state, monkeypatch):
+    import httpx
+    from kubernetes import config
+
+    prepare.prepare()
+    settings = {"status": 202, "location": "https://127.0.0.1:35495/redirected", "error": None}
+    requests = []
+    options = {}
+    context = MagicMock()
+    original_client = httpx.Client
+
+    def configure(**kwargs):
+        configuration = kwargs["client_configuration"]
+        configuration.host = "https://127.0.0.1:35495"
+        configuration.verify_ssl = True
+        configuration.ssl_ca_cert = str(local_state / "client/ca")
+        configuration.cert_file = str(local_state / "client/cert")
+        configuration.key_file = str(local_state / "client/key")
+
+    def respond(request):
+        requests.append(request)
+        if settings["error"]:
+            raise settings["error"]
+        if request.url.path == "/redirected":
+            return httpx.Response(200)
+        return httpx.Response(settings["status"], headers={"Location": settings["location"]})
+
+    def client_factory(**kwargs):
+        options.update(kwargs)
+        return original_client(
+            transport=httpx.MockTransport(respond),
+            follow_redirects=kwargs["follow_redirects"],
+            trust_env=kwargs["trust_env"],
+            timeout=kwargs["timeout"],
+        )
+
+    loader = Mock(side_effect=configure)
+    ssl_factory = Mock(return_value=context)
+    monkeypatch.setattr(config, "load_kube_config", loader)
+    monkeypatch.setattr(common.ssl, "create_default_context", ssl_factory)
+    monkeypatch.setattr(httpx, "Client", client_factory)
+    return settings, requests, options, loader, context, ssl_factory
+
+
+def test_native_radius_creation_uses_json_and_private_explicit_tls_configuration(
+    local_state, native_transport
+):
+    _, requests, options, loader, context, ssl_factory = native_transport
+    common.Commands().create_cluster_resource()
+    assert loader.call_args.kwargs["config_file"] == str(local_state / "home/.kube/config")
+    assert loader.call_args.kwargs["context"] == common.CONTEXT
+    assert loader.call_args.kwargs["persist_config"] is False
+    assert loader.call_args.kwargs["temp_file_path"] == str(local_state / "client")
+    ssl_factory.assert_called_once_with(cafile=str(local_state / "client/ca"))
+    context.load_cert_chain.assert_called_once_with(
+        str(local_state / "client/cert"), str(local_state / "client/key")
+    )
+    assert options["verify"] is context
+    assert options["follow_redirects"] is False and options["trust_env"] is False
+    assert options["timeout"].connect == 5 and options["timeout"].read == 60
+    assert len(requests) == 1
+    request = requests[0]
+    assert request.method == "PUT"
+    assert request.url.path == "/apis/api.ucp.dev/v1alpha3" + common.RESOURCE_ID
+    assert request.url.params["api-version"] == "2025-08-01-preview"
+    assert request.headers["content-type"] == request.headers["accept"] == "application/json"
+    assert json.loads(request.content) == json.loads(
+        (local_state / "prepared/child.json").read_text()
+    )
+
+
+@pytest.mark.parametrize("status", [301, 302, 307, 308])
+@pytest.mark.parametrize(
+    "location", ["https://127.0.0.1:35495/redirected", "https://foreign.invalid/redirected"]
+)
+def test_native_creation_never_follows_redirects_or_replays_put(native_transport, status, location):
+    settings, requests, *_ = native_transport
+    settings.update(status=status, location=location)
+    with pytest.raises(common.LocalError, match=f"HTTP status {status}"):
+        common.Commands().create_cluster_resource()
+    assert len(requests) == 1
+
+
+def test_native_creation_transport_failure_is_not_retried(native_transport):
+    import httpx
+
+    settings, requests, *_ = native_transport
+    settings["error"] = httpx.ReadError("disconnected")
+    with pytest.raises(common.LocalError, match="transport failed"):
+        common.Commands().create_cluster_resource()
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize(
+    "host,verify_ssl",
+    [("https://foreign.invalid", True), ("https://127.0.0.1:35495", False)],
+)
+def test_native_radius_creation_rejects_changed_endpoint_or_disabled_tls(
+    local_state, monkeypatch, host, verify_ssl
+):
+    import httpx
+    from kubernetes import config
+
+    def configure(**kwargs):
+        kwargs["client_configuration"].host = host
+        kwargs["client_configuration"].verify_ssl = verify_ssl
+
+    monkeypatch.setattr(config, "load_kube_config", configure)
+    api_class = Mock()
+    monkeypatch.setattr(httpx, "Client", api_class)
+    with pytest.raises(common.LocalError, match="verified management endpoint"):
+        common.Commands().create_cluster_resource()
+    api_class.assert_not_called()
 
 
 def test_module_archive_is_deterministic_and_allowlisted(local_state):

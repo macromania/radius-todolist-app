@@ -213,11 +213,7 @@ def executor_pod(commands: Commands) -> dict:
 def create_child(commands: Commands, pod: dict) -> str:
     def submit_and_wait() -> None:
         deadline = time.monotonic() + 900
-        url = "/apis/api.ucp.dev/v1alpha3" + RESOURCE_ID + "?api-version=2025-08-01-preview"
-        commands.run(
-            kube("replace", "--raw", url, "-f", str(STATE / "prepared/child.json")),
-            timeout=60,
-        )
+        commands.create_cluster_resource()
         while time.monotonic() < deadline:
             current = resource(commands)
             if time.monotonic() >= deadline:

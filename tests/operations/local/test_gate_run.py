@@ -141,15 +141,6 @@ class GateCommands:
                 )
         if args[0] != "kubectl":
             raise AssertionError(f"Unexpected command: {args}")
-        if "replace" in args and "--raw" in args:
-            assert args[args.index("--raw") + 1] == (
-                "/apis/api.ucp.dev/v1alpha3"
-                + common.RESOURCE_ID
-                + "?api-version=2025-08-01-preview"
-            )
-            self.created = True
-            self.observed.wait(timeout=1)
-            return '{"properties":{"provisioningState":"Accepted"}}'
         if "etcdctl" in args:
             return json.dumps(
                 {
@@ -274,6 +265,11 @@ class GateCommands:
     def json(self, args, **kwargs):
         return json.loads(self.run(args, **kwargs))
 
+    def create_cluster_resource(self):
+        self.calls.append((["radius-api", "PUT", common.RESOURCE_ID], {}))
+        self.created = True
+        self.observed.wait(timeout=1)
+
 
 @pytest.fixture
 def gate_commands(local_state, monkeypatch):
@@ -314,7 +310,7 @@ def test_complete_gate_entrypoint_wires_invocation_state_tls_workload_and_radius
     assert not gate_commands.created
     assert not gate_commands.objects
     commands = [args for args, _ in gate_commands.calls]
-    create = next(i for i, a in enumerate(commands) if a[0] == "kubectl" and "replace" in a)
+    create = next(i for i, a in enumerate(commands) if a[0] == "radius-api")
     delete = next(i for i, a in enumerate(commands) if a[0] == "rad" and "delete" in a)
     assert any(a[-1] == gate.PROCESS_PROBE for a in commands[create:delete])
     assert sum("etcdctl" in a for a in commands) == 3
@@ -359,7 +355,7 @@ def test_secret_access_by_any_checked_default_account_blocks_creation(
     )
     assert not gate_commands.created
     assert not any(
-        (args[0] == "rad" and "create" in args) or (args[0] == "kubectl" and "replace" in args)
+        (args[0] == "rad" and "create" in args) or args[0] == "radius-api"
         for args, _ in gate_commands.calls
     )
 
@@ -378,8 +374,7 @@ def test_existing_child_is_not_automatically_adopted(local_state, gate_commands)
     gate_commands.created = True
     assert gate.main(["run", "--execute"]) == 1
     assert not any(
-        (a[0] == "rad" and "create" in a) or (a[0] == "kubectl" and "replace" in a)
-        for a, _ in gate_commands.calls
+        (a[0] == "rad" and "create" in a) or a[0] == "radius-api" for a, _ in gate_commands.calls
     )
 
 
@@ -397,7 +392,7 @@ def test_gate_waits_for_provisioning_after_native_api_acceptance(local_state, ga
     assert gate.main(["run", "--execute"]) == 0
     assert gate_commands.creation_states == []
     commands = [args for args, _ in gate_commands.calls]
-    assert sum(args[0] == "kubectl" and "replace" in args for args in commands) == 1
+    assert sum(args[0] == "radius-api" for args in commands) == 1
     assert sum(args[0] == "rad" and "show" in args for args in commands) >= 3
 
 

@@ -38,7 +38,9 @@ The harness submits the custom type directly rather than adding a gate branch to
 those application declarations.
 The generic create CLI uses the legacy API version, so child creation uses an
 authenticated native Radius PUT with the registered `2025-08-01-preview`
-version. The gate still waits for actual provisioning completion and observes
+version and explicit JSON media type. It uses the project's CA and client
+certificate with HTTPX, disables environment proxies and redirect following,
+and sends no retry after a transport failure. The gate still waits for actual provisioning completion and observes
 the executor; it does not equate HTTP acceptance with a ready cluster.
 
 There is no host-side child `kind create`, Terraform apply, or child `kind delete`.

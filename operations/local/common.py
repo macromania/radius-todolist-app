@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import ssl
 import subprocess
 import time
 from pathlib import Path
@@ -172,6 +173,50 @@ class Commands:
 
     def json(self, args: list[str], **kwargs) -> dict | list:
         return json.loads(self.run(args, **kwargs))
+
+    def create_cluster_resource(self) -> None:
+        import httpx
+        from kubernetes import client, config
+        from kubernetes.config.config_exception import ConfigException
+
+        configuration = client.Configuration()
+        try:
+            config.load_kube_config(
+                config_file=str(STATE / "home/.kube/config"),
+                context=CONTEXT,
+                client_configuration=configuration,
+                persist_config=False,
+                temp_file_path=str(private_dir(STATE / "client")),
+            )
+            if not configuration.verify_ssl or configuration.host != "https://127.0.0.1:35495":
+                raise LocalError("The Radius client must use the verified management endpoint")
+            if not all(
+                isinstance(path, str) and Path(path).resolve().is_relative_to(STATE / "client")
+                for path in (
+                    configuration.ssl_ca_cert,
+                    configuration.cert_file,
+                    configuration.key_file,
+                )
+            ):
+                raise LocalError("Management client certificates must use private project files")
+            context = ssl.create_default_context(cafile=configuration.ssl_ca_cert)
+            context.load_cert_chain(configuration.cert_file, configuration.key_file)
+            with httpx.Client(
+                verify=context,
+                trust_env=False,
+                follow_redirects=False,
+                timeout=httpx.Timeout(60, connect=5),
+            ) as api:
+                response = api.put(
+                    configuration.host + "/apis/api.ucp.dev/v1alpha3" + RESOURCE_ID,
+                    params={"api-version": "2025-08-01-preview"},
+                    headers={"Content-Type": "application/json", "Accept": "application/json"},
+                    json=json.loads((STATE / "prepared/child.json").read_text()),
+                )
+            if response.status_code not in (200, 201, 202):
+                raise LocalError(f"Radius creation failed with HTTP status {response.status_code}")
+        except (ConfigException, httpx.HTTPError, ssl.SSLError):
+            raise LocalError("The authenticated Radius Kubernetes transport failed") from None
 
     def apply(self, objects: dict | list) -> None:
         payload = (

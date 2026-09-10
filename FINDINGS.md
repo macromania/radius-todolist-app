@@ -91,6 +91,8 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F062 | 5 | High security | `harness/local/cluster-gate.py` | 645-655 (initial) | Secret-denial checks changed the target namespace but always impersonated `default:default`, missing the protected namespaces' default accounts | Resolved: corrected source/target/get-list-watch matrix, 18 entrypoint refusal cases, clean fix review, and live denial checks passed before child submission |
 | F063 | 5 | High security | `operations/local/bootstrap.py`, local cluster Recipe | kubeadm patches | kind 0.31 emits kubeadm v1beta3, so v1beta4 patches were ignored: management Secret encryption was inactive and the child SAN patch would also miss | Management encryption resolved by reviewed fresh bootstrap and actual ciphertext proof before Radius; child SAN schema/loopback names corrected and mock-tested, live child TLS proof pending |
 | F064 | 5 | High correctness | `harness/local/cluster-gate.py` | custom-resource submission | Generic `rad resource create` sends the legacy API version, so the custom cluster's 2025 API rejects it before provisioning | Use the exact authenticated Radius PUT with explicit registered version, then poll actual provisioning while observing the executor; 58 local tests and fix review pass; live retry pending |
+| F065 | 5 | High correctness | `operations/local/common.py` | native PUT media type | `kubectl replace --raw` did not send the JSON media type required by dynamic-RP | Explicit JSON over project CA/client-certificate authenticated HTTP transport; no child/state created by the rejected request; live retry pending |
+| F066 | 5 | Medium security | `operations/local/common.py` | unreleased transport candidate | Kubernetes ApiClient still followed redirects when connection retries were zero, allowing authenticated PUT replay | Candidate replaced before live use with HTTPX `follow_redirects=False`; real-client 301/302/307/308 same/foreign-origin and disconnect tests prove one request only; fix review clean |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -1194,3 +1196,25 @@ All 58 local Python tests pass, including exact PUT routing, accepted/creating
 state polling, terminal failure propagation, and pre-creation security refusals.
 The direct walkthrough traced the pinned CLI client, and the independent
 security fix review was clean. The original rejected run remains failed.
+
+The version-correct `kubectl` request was also rejected before admission, run
+`973c3b65ee85`. A bounded provider-log read identified `unsupported Content-Type`
+(F065); no child resource, Docker container, or Terraform state exists.
+The replacement loads only the private project kubeconfig/context and its
+private CA/client-certificate files, requires the exact TLS management endpoint,
+and sends JSON through HTTPX with environment proxies and redirects disabled.
+It does not change credentials, authorization, or the Radius ownership path.
+
+Security review of an intermediate, unreleased Kubernetes ApiClient transport
+found F066: disabling connection retries did not stop redirected PUT replay.
+That candidate was replaced before live execution. Tests use a real HTTPX
+client with a simulated server response to verify that 301, 302, 307, and 308
+responses at both same-origin and foreign URLs produce one request and an
+explicit failure. A transport disconnect is also not retried. All 70 local
+Python tests and the direct walkthrough/security fix review passed. The failed
+gate records remain unchanged; live JSON/mutual-TLS admission still needs proof.
+
+The integrated check passed 592 tests and 245 subtests, with 50 explicit
+dependency skips and both Terraform mock-provider tests. The final transport
+uses the project's existing mutual-TLS credentials, not a new identity or
+privilege grant; no container image or installed Recipe change is required.
