@@ -72,6 +72,19 @@ class CompiledInfrastructureTests(unittest.TestCase):
             "[variables('requiredTags')]",
         )
 
+    def test_redis_cleanup_tracks_only_independent_parent_resources(self):
+        template = self.redis_recipe
+        self.assertEqual(
+            template["outputs"]["result"]["value"]["resources"],
+            [
+                "[resourceId('Microsoft.Cache/redisEnterprise', variables('cacheName'))]",
+                "[resourceId('Microsoft.Network/privateEndpoints', "
+                "format('pe-{0}', variables('cacheName')))]",
+            ],
+        )
+        for child in ("database", "endpointNicTags", "zoneGroup"):
+            self.assertIn(child, template["resources"])
+
     def test_bootstrap_has_no_unbound_copy_indices(self):
         assert_bound_copy_indices(self.bootstrap)
 

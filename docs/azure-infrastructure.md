@@ -410,6 +410,13 @@ result contains host/port/username and **`tls: true`** in `values`, and
 connection named lowercase `redis`. Use the generated URL once, or decode the
 standalone password exactly once. Never decode the whole URL.
 
+Its lifecycle output lists only the cache and private endpoint. Azure removes
+the database and the endpoint's NIC, DNS zone group, and tags with those parents.
+The child declarations still create/configure/tag everything; they are not
+independent cleanup targets. In particular, Radius 0.60 cannot discover a
+deletion API version for `Microsoft.Resources/tags`. Listing that metadata
+resource makes Radius deletion time out even after the Azure resources are gone.
+
 ### Gateway details
 
 `gateway.bicep` takes `gatewaySubnetId`, `gatewaySubnetCidr`, `nodeSubnetName`,

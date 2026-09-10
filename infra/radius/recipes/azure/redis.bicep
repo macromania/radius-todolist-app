@@ -100,12 +100,10 @@ resource zoneGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024
 
 @secure()
 output result object = {
+  // Azure removes the database and endpoint-owned NIC, DNS group, and tags with these parents.
   resources: [
     cache.id
-    database.id
     endpoint.id
-    endpointNicTags.id
-    zoneGroup.id
   ]
   values: {
     host: cache.properties.hostName

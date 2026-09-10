@@ -80,6 +80,7 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F051 | 4 | High correctness | `harness/test-e2e.py` | paused_reconciler | A 30-second drain deadline leaves no room for the Pod's own 30-second shutdown grace and controller latency | Resolved: bounded grace-aware drain, regressions/review, and live shared-b readiness while data paused followed by restored application proof |
 | F052 | 4 | External interruption | Azure governance automation | 2026-09-10T00:06Z | All five project AKS clusters and three PostgreSQL servers were stopped during acceptance despite requested tags | Services restored by normal scoped starts, evidence recovered; two shared operations succeeded and isolated operation correctly interrupted; controlled reset for fresh proof in progress |
 | F053 | reset | External metadata change | Two management state disks | 2026-09-10T00:55Z | State disks lost required tags after preview, so strict cleanup stopped before mutations | Exact live PV/PVC/CSI ownership verified; only required tags merged back, SKU/size/identity preserved, safety review clean; renewed preview required |
+| F054 | reset | High correctness | `infra/radius/recipes/azure/redis.bicep` | result.resources | Radius cannot resolve a deletion API version for tracked Microsoft.Resources/tags metadata | Parent-only lifecycle roots retain all creation/tagging, avoid redundant child deletes; compiled regression and both fix reviews pass; fresh publication/execution required |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -658,3 +659,21 @@ That renewed preview passed with every managed node group inspected and no
 ownership bypass. `governance-reset-execute2` is running the same reviewed
 immutable source. Completion, temporary access removal, and fresh state are
 still required before the next full acceptance attempt.
+
+That execution removed the shared data Azure resources but timed out deleting
+its Radius Redis record after 1,800 seconds. The actual Radius logs identify
+the persistent cause: no deletion API version could be found for
+`Microsoft.Resources/tags`. Azure deletion activity and a fresh inventory
+confirmed the data app group empty. Concurrent parent/child deletion also
+produced transient canceled/superseded operations; this was not another tag
+ownership failure or an automatic provider fallback.
+
+F054 now lists only the independent Redis cache and private endpoint as
+Recipe lifecycle roots. The database, NIC, DNS zone group, and NIC-tag operation
+are still created; Azure removes those with their owning parents. TLS, private
+access, password encoding, secure output, and existing-NIC creation ordering
+are unchanged. Fourteen compiled-infrastructure tests and 19 subtests passed.
+The direct walkthrough and independent security fix review were clean.
+Existing canceled metadata still references the old output and requires an
+explicit, separately verified cleanup action; changing source does not repair
+that deployed record.

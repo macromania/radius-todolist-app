@@ -290,3 +290,12 @@ live namespace, PVC/PV UIDs, CSI handle, StorageClass, and Azure disk identity
 before a narrowly scoped repair. Merge only the requested ownership tags,
 preserve other properties and tags, and verify the result. Do not change
 governance controls or repeatedly fight external writes.
+
+## D033 - Track independently owned Recipe lifecycle roots
+
+The Redis Recipe reports the cache and private endpoint to Radius for deletion.
+Their database, NIC, DNS zone group, and tags remain declared for creation but
+are removed by Azure with the parents. Do not register virtual tag metadata as
+an independent lifecycle resource: Radius 0.60 cannot resolve its deletion API
+version. Avoid redundant parent/child deletes without hiding any independent
+resource that needs cleanup.
