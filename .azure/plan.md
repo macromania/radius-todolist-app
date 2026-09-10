@@ -1,6 +1,6 @@
 # Three-plane Radius deployment checkpoint
 
-Status: Validated (fresh management deploying with parent-only Redis lifecycle Recipe).
+Status: Validated (fresh management verified; full parent-lifecycle acceptance running).
 Full API-driven onboarding, outage acceptance, local deployment, and final
 teardown remain open. A source-layout change is not a new deployment result.
 
@@ -46,8 +46,9 @@ operation or bulk-delete local state.
 `.state/azure/provisioning-lifecycle-fixed.json` is the next candidate with the
 new locked Redis lifecycle Recipe and inspected images. It was activated after
 the latest old-state disk clearance was verified. `deploy-management-lifecycle`
-is running. Prove fresh management, then
-the complete three-tenant and outage scenario before local implementation.
+completed and passed HTTPS/authentication and empty-state checks.
+`demo-acceptance-lifecycle` is running the complete fresh three-tenant and
+outage scenario; wait for its proof before local implementation.
 The bootstrap uses standalone Bicep through the scoped
 Azure CLI; application deployment uses Radius and its per-cluster Recipes.
 

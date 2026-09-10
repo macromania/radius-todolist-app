@@ -712,3 +712,11 @@ rechecked. Fresh management and full acceptance remain the next live gates.
 The verified candidate is now active and `deploy-management-lifecycle` is
 running with a new operator-state volume. No old tenant operation, runtime
 marker, credential file, or harness evidence was replayed into the fresh run.
+
+`deploy-management-lifecycle` completed with three available workloads and
+`provisioner_ready` at 2026-09-10T04:03:28Z. Real verified HTTPS returned
+200/401/404 for health, missing key, and authenticated unknown tenant; a
+read-only query confirmed zero tenants and operations. The new full
+`demo-acceptance-lifecycle` run uses source `147c739` with no continuation flag.
+Its first operation `60ed95e4-ac7e-4b45-9ff7-dac0f0c43574` entered cluster
+provisioning at 04:19:34Z. Full tenant/outage success remains unproven.
