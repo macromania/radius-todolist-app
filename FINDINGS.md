@@ -1062,3 +1062,20 @@ applications/clusters and then management's applications. Bootstrap
 management AKS, shared foundation resources, and final role cleanup remain
 separate pending steps. The verified images are cached locally before registry
 deletion; no local cluster or application has been started.
+
+`final-radius-execute3` completed at 13:38:03Z with
+`radius_resources_removed`. Independent Azure verification at 13:42:00Z found
+all four tenant AKS clusters and their node groups absent, and all five app
+groups empty. The last temporary Reader and `radius-reset` federation were
+then removed; readback at 13:43:05Z confirmed all temporary access absent and
+the original 21 grants/federation unchanged. The project-scoped Docker registry
+login was also removed after caching the verified images.
+
+Only bootstrap resources remain. Their explicit provider-only preview passed
+strict ownership/custom-role checks and contained exactly one AKS deletion:
+the bootstrap management cluster. This is not an automatic fallback from a
+Radius failure: the Radius-owned phase and actual absence were verified first.
+The direct walkthrough and independent security review were clean. Execution
+rechecked all child/app absence and temporary-access removal before starting
+the existing provider-only cleanup path. Its warning remains visible; no
+child AKS is being deleted directly. Final group/role absence still needs proof.

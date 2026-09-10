@@ -1,9 +1,10 @@
 # Three-plane Radius deployment checkpoint
 
-Status: Validated (fresh Redis lifecycle verified; final Azure teardown next).
+Status: Validated (Radius-owned teardown verified; bootstrap removal running).
 Fresh admission and existing-tenant functional/outage proof are recorded
 separately. Fresh Redis lifecycle and unchanged-resource postconditions are
-verified. Final Azure teardown and local remain open.
+verified. All child clusters and application resources are removed. Bootstrap
+resource/role removal and local remain open.
 
 ## Scope and authorization
 
@@ -66,6 +67,15 @@ and parameter hashes in `.state/azure/validation.json`; changed hashes require
 validation again. Never infer deployment success from compilation or Job submission.
 
 ## 7. Validation Proof
+
+2026-09-10T13:42:00Z: independent Azure reads verified all four child AKS/node
+groups absent and all five app groups empty after the Radius-only executor
+completed. At 13:43:05Z, the exact temporary access journal was fully cleared
+and baseline grants/federation preserved. The explicit bootstrap provider-only
+preview then passed all ownership/custom-role checks, with management as its
+only AKS deletion. Its direct walkthrough/security review were clean.
+Execution rechecked child/app absence and access revocation; final actual
+bootstrap/role deletion remains to be verified before local work begins.
 
 2026-09-10T10:13:38Z: fresh Redis creation, real metadata tagging twice,
 idempotence, supported stored tracking, and Radius deletion are verified.
