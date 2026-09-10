@@ -4,8 +4,8 @@ Management, control, and data run in separate Kubernetes clusters. Radius
 provisions the child clusters and their applications. **Azure onboarding and
 functional behavior are proven in separately scoped runs:** two shared tenants,
 one isolated tenant, configuration/counter isolation, and both parent outages.
-The corrected Redis create/tag/delete lifecycle is also proven. Final Azure
-teardown remains open; local is not implemented.
+The corrected Redis create/tag/delete lifecycle and final Azure teardown are
+also verified. Local is not implemented yet.
 
 This pass organizes the repository, not the application design. SQL,
 authentication, provisioning, and reconciliation simplification are deferred
@@ -91,8 +91,10 @@ extensions, and ShellCheck. It does not build/push images, create resources, or
 use deployed databases. Real PostgreSQL/Redis tests require explicitly disposable
 dependencies; see [test inputs](docs/contracts.md#validation).
 
-For Azure, use the existing protected `.state/azure/` configuration and follow
-the [provisioning prerequisites](docs/provisioning.md). These commands are
+The demonstrated Azure environment has been removed. Its protected
+`.state/azure/` records are historical evidence, not active endpoints or reusable
+cluster identities. For a fresh Azure deployment, follow the
+[provisioning prerequisites](docs/provisioning.md). These commands are
 separate stages, not a one-command fresh deployment:
 
 ```sh

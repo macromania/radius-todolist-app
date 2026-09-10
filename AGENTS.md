@@ -8,6 +8,7 @@ example; its scripts and deployment targets are intentionally removed.
 
 - Azure comes first; local provisioning is not implemented.
 - Azure onboarding, functional/outage behavior, and fresh Redis lifecycle are proven.
+- Azure teardown is verified; archived Azure state is not a live deployment.
 - Use [FINDINGS.md](FINDINGS.md) for actual results, not assumptions from code.
 - [DECISIONS.md](DECISIONS.md) records approved choices and accepted limitations.
 - The user deferred deeper SQL/code simplification until end-to-end proof.

@@ -349,3 +349,16 @@ its backing Secret to disappear, then verify the surrounding resources.
 This is a specific client compatibility correction, not a general force-delete
 fallback. Do not alter stored ownership fields, edit Radius's backing store,
 or bypass its resource lifecycle by directly deleting the Kubernetes Secret.
+
+## D038 - Keep local identities separate while retaining the same plane slots
+
+Local cluster names and project kubecontexts use `radplanes-local-<slot>`.
+The allocation keys remain `management`, `shared-control`, `shared-data`,
+`isolated-1-control`, and `isolated-1-data`, so placement/reporting semantics
+do not change. Only project kubeconfig files may have their contexts renamed.
+
+Use the approved gateway ports 35490-35494 and host Kubernetes API ports
+35495-35499, all loopback-only. Keep local state under `.state/local`; archived
+Azure endpoints and cluster identities are not local defaults or reusable
+active Azure state. The first local milestone is an independently reviewed
+Radius-owned kind creation/deletion gate, not a host-side tenant provisioner.

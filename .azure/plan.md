@@ -1,10 +1,11 @@
 # Three-plane Radius deployment checkpoint
 
-Status: Validated (Radius-owned teardown verified; bootstrap removal running).
+Status: Validated (archived Azure deployment; complete teardown verified).
 Fresh admission and existing-tenant functional/outage proof are recorded
 separately. Fresh Redis lifecycle and unchanged-resource postconditions are
 verified. All child clusters and application resources are removed. Bootstrap
-resource/role removal and local remain open.
+resource/role removal is verified. Local remains open. This checkpoint does not
+describe an active Azure deployment; fresh deployment requires new validation.
 
 ## Scope and authorization
 
@@ -67,6 +68,16 @@ and parameter hashes in `.state/azure/validation.json`; changed hashes require
 validation again. Never infer deployment success from compilation or Job submission.
 
 ## 7. Validation Proof
+
+2026-09-10T14:29:36Z: the unchanged independent `operations/verify-clean.py`
+reported `clean`, persisted in `final-cleanup/final-verification.json`.
+All owned groups, project roles/assignments, and active tagged resources are
+absent. The protected vault is soft-deleted with scheduled purge
+2026-09-17T14:14:19Z, not claimed as purged. A transient disagreement between
+role-list and exact-GET results was resolved by later full verification, not by
+weakening checks. Final `make check`: 522 tests, 245 subtests, 50 explicit
+dependency skips, 22 Bicep files, three extensions, Ruff, and ShellCheck.
+Independent Azure closeout walkthrough/security reviews were clean.
 
 2026-09-10T13:42:00Z: independent Azure reads verified all four child AKS/node
 groups absent and all five app groups empty after the Radius-only executor

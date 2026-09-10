@@ -1079,3 +1079,27 @@ The direct walkthrough and independent security review were clean. Execution
 rechecked all child/app absence and temporary-access removal before starting
 the existing provider-only cleanup path. Its warning remains visible; no
 child AKS is being deleted directly. Final group/role absence still needs proof.
+
+### Azure phase closed, 2026-09-10
+
+Bootstrap deletion removed all remaining owned groups and the management AKS.
+The first final check reported custom-role catalogue leftovers. Exact GETs
+returned `RoleDefinitionDoesNotExist`, and a later run of the **unchanged**
+full verifier also confirmed absence. No ownership check was relaxed and no
+additional resource scope was deleted to resolve that inconsistent observation.
+
+The persisted independent result,
+`final-cleanup/final-verification.json`, is `clean` at 14:29:36Z: all owned
+resource groups, project custom roles/assignments, and active project-tagged
+resources are absent. The vault remains soft-deleted, not purged, with scheduled
+purge at 2026-09-17T14:14:19Z. Its protection was not disabled. The archived
+Azure state is historical evidence and must not be treated as active endpoints
+or reused cluster identity.
+
+Final `make check` passed 522 tests and 245 subtests, all 22 Bicep files, three
+generated extensions, Ruff, and ShellCheck. Fifty opt-in dependency tests were
+explicitly skipped. Independent Azure closeout rubber-duck and security reviews
+found no blockers within the recorded ownership/evidence scopes. They retained
+the separate failed/fresh and successful/existing-state records and the
+documented demo limitations. This completes Azure, not the overall plan:
+local implementation and its five-cluster acceptance are next.
