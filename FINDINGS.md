@@ -972,3 +972,14 @@ with the original 21 grants and original federation unchanged. The protected
 `final-cleanup-access.json` journal records every intended/created ID and the
 baseline before mutations. Remove these exact temporary entries after the
 Radius-only phase and verify their absence before bootstrap teardown.
+
+The final Radius-only cleanup package uses source `146ca9c`, the inspected
+tool image, and eight allowlisted, token-free seed files. Its five cluster
+UIDs match the successful functional run. The unchanged independent reset
+bootstrap runs in `radplanes-system`, so deleting application namespaces
+cannot kill its executor. The bundle, bootstrap, and seed bytes were checked
+against the actual immutable ConfigMap in AKS. Fifty cleanup/optimization
+tests and 15 subtests passed; the direct package walkthrough and independent
+security review were clean. `final-radius-preview` is performing the strict
+read-only ownership/terminal-state inventory. Execution requires that preview
+to pass; no provider-delete fallback has been added.
