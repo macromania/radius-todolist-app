@@ -87,6 +87,7 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F058 | lifecycle gate | Medium correctness | One-off F054 gate | group-ID comparison | Radius returns lowercase `resourcegroups`, which failed a case-sensitive comparison with `resourceGroups` | Resolved: actual ID verified, existing comparison helper reused, foreign-group regression/reviews passed; create5 passed Radius preflight |
 | F059 | lifecycle gate | High correctness | `redis_nic_tags.py` | location validation | Managed Redis returns `Central US`, not `centralus`, so the new helper rejects the correctly owned cache before tagging | Resolved: actual response/alias verified, guards/regressions/reviews passed, rebuilt image inspected, real baseline and fresh NIC tagging/idempotence passed |
 | F060 | lifecycle gate | Medium compatibility | Radius 0.60.2 CLI | unbound SecretStore deletion | `resource delete` tries to parse the generated empty application string before calling the deletion API | Resolved: reviewed native owner-API cleanup and actual postconditions passed; gate helper finalized with 46 tests and clean direct walkthrough/security review |
+| F061 | final cleanup | Medium correctness | Shared empty-owner recovery helper | managed-node inventory | The copied one-off helper queried a deleted node group after its temporary Reader grant was correctly removed with it | Resolved: existing live-AKS-first pattern retained every live ownership check; no extra grants; direct walkthrough/security review and actual corrected preview passed |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -1026,3 +1027,25 @@ regression now exercises the actual cleanup path when the CLI returns zero
 but an app remains after its Azure resources are removed; it proves that no
 cluster-owner or provider deletion follows. All 51 cleanup tests and 15
 subtests passed. This adds no production fallback or behavior change.
+
+The second normal execution removed the shared data app's Azure resources
+but again stopped on its legacy Radius app/Redis metadata at 12:29:50Z.
+The shared app group is independently empty. Its first explicit recovery
+preview exposed F061: unlike the normal Radius-only path, the copied helper
+still queried every allocated node group, including the deleted isolated
+data group whose Reader assignment was already gone.
+
+The helper now follows the existing normal-cleanup pattern: discover live AKS
+from verified non-node groups, then verify every live cluster's node group.
+It does not treat Forbidden as absence, omit any live ownership check, or add
+broader permissions. Six existing Radius-only regressions covering this
+pattern passed, as did the direct walkthrough and independent security review.
+The newly named immutable payload's actual bytes were verified before
+`final-shared-recovery-preview2` started. The prior failed preview is retained.
+
+That corrected preview passed with the exact shared NIC-tag ID, sole failed
+Redis record, empty app group, and management Radius owner.
+`final-shared-recovery-execute2` started at 12:47:41Z, removing only the verified
+empty shared data cluster through management Radius. Its actual absence,
+remaining control-plane cleanup, temporary-access removal, and bootstrap
+teardown still require verification.
