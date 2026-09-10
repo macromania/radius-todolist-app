@@ -362,3 +362,17 @@ Use the approved gateway ports 35490-35494 and host Kubernetes API ports
 Azure endpoints and cluster identities are not local defaults or reusable
 active Azure state. The first local milestone is an independently reviewed
 Radius-owned kind creation/deletion gate, not a host-side tenant provisioner.
+
+## D039 - Protect local Terraform credentials as real credentials
+
+The kind provider records child administrator credentials in Terraform state.
+Marking an output sensitive does not encrypt that state. Management encrypts
+Kubernetes Secrets in etcd with a private project key, restricts state/access
+Secret reads, and verifies the actual stored encryption prefix. Public Radius
+outputs carry only the protected access reference.
+
+Suppress plaintext Terraform plan output in the actual dynamic-RP configuration,
+not an unwired Helm value. Keep provider errors visible and inspect logs for
+credential markers without exporting their contents. Check default service-account
+identities by their source namespace for get/list/watch access to protected
+namespaces; one account's denial is not another account's permission proof.

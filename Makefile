@@ -11,19 +11,19 @@ export CONFIRM_AZURE
 export PYTHONDONTWRITEBYTECODE := 1
 export TMPDIR := $(CURDIR)/.state/check/tmp
 
-.PHONY: help check lint test test-integration check-bicep check-shell check-work \
+.PHONY: help check lint test test-integration check-bicep check-shell check-terraform check-work \
         require-azure confirm-azure preflight bootstrap-preview validate-azure bootstrap \
         install-radius publish-recipes build-publish register-radius deploy-management \
         export-state test-e2e test-outages clean-plan clean-azure verify-clean
 
-help: ## List implemented commands; local deployment is not available
+help: ## List implemented commands; full local deployment is not available
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 	  awk 'BEGIN {FS = ":.*?## "}; {printf "  %-22s %s\n", $$1, $$2}'
 
 check-work:
 	@mkdir -p "$(TMPDIR)" .state/check infra/radius/types/.build
 
-check: lint test check-shell ## Run cloud-free lint, tests, Bicep/type compilation, and shell checks
+check: lint test check-shell check-terraform ## Run cloud-free Python, Bicep, Terraform mock, and shell checks
 
 lint: check-work ## Check runtime, operations, harness, and tests with Ruff
 	$(RUN) ruff check src operations harness tests infra/bootstrap/tests
@@ -51,7 +51,10 @@ test-integration: check-work ## Run dependency tests with explicitly configured 
 	$(RUN) pytest -q tests/integration
 
 check-shell: ## Check shell entrypoints without executing them
-	shellcheck operations/*.sh harness/*.sh
+	shellcheck operations/*.sh harness/*.sh infra/radius/recipes/local/cluster/*.sh
+
+check-terraform: check-work ## Validate the local Recipe with mocked providers; never creates clusters
+	$(RUN) python operations/local/validate.py
 
 require-azure: check-work
 	@test "$(ENV)" = azure || { echo "Local deployment is not implemented." >&2; exit 1; }

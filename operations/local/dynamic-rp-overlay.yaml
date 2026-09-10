@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dynamic-rp
+  namespace: radius-system
+spec:
+  strategy:
+    type: Recreate
+    rollingUpdate: null
+  template:
+    metadata:
+      labels:
+        radplanes.local/executor: management-only
+    spec:
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+      initContainers:
+        - name: local-terraform-layout
+          # The installer substitutes only this field with the inspected executor image.
+          image: EXECUTOR_IMAGE
+          imagePullPolicy: Never
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              mkdir -p /terraform/.terraform-global
+              cp /opt/radplanes/terraform /terraform/.terraform-global/terraform
+              cp /opt/radplanes/terraform /terraform/terraform
+              touch /terraform/.terraform-global/.terraform-ready
+              chmod 0700 /terraform /terraform/.terraform-global
+              chown -R 65532:65532 /terraform
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN"]
+          volumeMounts:
+            - name: terraform
+              mountPath: /terraform
+      containers:
+        - name: dynamic-rp
+          imagePullPolicy: Never
+          securityContext:
+            runAsUser: 65532
+            runAsGroup: 65532
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: DOCKER_HOST
+              value: unix:///run/radplanes/docker.sock
+            - name: RADIUS_LOGGING_LEVEL
+              value: error
+          volumeMounts:
+            - name: local-docker
+              mountPath: /run/radplanes/docker.sock
+      volumes:
+        - name: local-docker
+          hostPath:
+            path: /run/radplanes/docker.sock
+            type: Socket

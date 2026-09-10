@@ -88,6 +88,7 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F059 | lifecycle gate | High correctness | `redis_nic_tags.py` | location validation | Managed Redis returns `Central US`, not `centralus`, so the new helper rejects the correctly owned cache before tagging | Resolved: actual response/alias verified, guards/regressions/reviews passed, rebuilt image inspected, real baseline and fresh NIC tagging/idempotence passed |
 | F060 | lifecycle gate | Medium compatibility | Radius 0.60.2 CLI | unbound SecretStore deletion | `resource delete` tries to parse the generated empty application string before calling the deletion API | Resolved: reviewed native owner-API cleanup and actual postconditions passed; gate helper finalized with 46 tests and clean direct walkthrough/security review |
 | F061 | final cleanup | Medium correctness | Shared empty-owner recovery helper | managed-node inventory | The copied one-off helper queried a deleted node group after its temporary Reader grant was correctly removed with it | Resolved: existing live-AKS-first pattern retained every live ownership check; no extra grants; direct walkthrough/security review and actual corrected preview passed |
+| F062 | 5 | High security | `harness/local/cluster-gate.py` | 645-655 (initial) | Secret-denial checks changed the target namespace but always impersonated `default:default`, missing the protected namespaces' default accounts | Corrected subject/target matrix covers three default accounts, two protected namespaces, and get/list/watch; 18 actual-entrypoint refusal cases and independent fix review pass; live enforcement still pending |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -1103,3 +1104,33 @@ found no blockers within the recorded ownership/evidence scopes. They retained
 the separate failed/fresh and successful/existing-state records and the
 documented demo limitations. This completes Azure, not the overall plan:
 local implementation and its five-cluster acceptance are next.
+
+### Local executor gate source
+
+The bounded one-child gate now has a Terraform kind Recipe, a derived management
+`dynamic-rp` executor image, explicit socket overlay, immutable in-cluster HTTP
+module archive, protected access Secret/state, bootstrap operations, and a
+separate harness. Shared application declarations, Azure Recipes, and custom
+type schemas are unchanged. This is not the full `LocalProvider` or a live
+local deployment.
+
+The initial independent walkthrough found no static integration blocker. The
+security review found F062: a different target namespace does not change an
+impersonated service account's identity. The fix checks `default` accounts from
+all three relevant namespaces against both protected namespaces for `get`,
+`list`, and `watch`, preserving the original outsider check and adding
+cross-namespace coverage. Each of 18 granted-permission test cases invokes the
+real gate entrypoint and stops before child creation. The direct fix walkthrough
+and independent security fix review were clean.
+
+All 54 local Python tests, two Terraform mock-provider tests, Ruff, ShellCheck,
+and Terraform format/validation passed. CI and `make check` now include these
+cloud-free surfaces with pinned Terraform 1.15.8. No image build, container
+creation, kind bootstrap, port binding, or state-lifecycle proof has run yet.
+Actual image contents, Docker Desktop socket permissions, encrypted state,
+child TLS/networking, PostgreSQL/Envoy, and Radius-owned deletion remain live gates.
+
+The integrated `make check` passed 576 tests and 245 subtests, with 50 explicit
+dependency skips, all Bicep/type checks, both Terraform mock-provider tests,
+Ruff, and ShellCheck. The CI change adds only checksum-pinned Terraform setup
+and the same Make entrypoint; it adds no cloud credentials or live provisioning.

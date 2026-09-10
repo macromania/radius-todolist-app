@@ -87,7 +87,8 @@ make check
 ```
 
 `make check` runs Ruff, offline tests, all Bicep compiles, generated Radius
-extensions, and ShellCheck. It does not build/push images, create resources, or
+extensions, Terraform mock-provider tests, and ShellCheck. Terraform 1.14-1.15
+is required for the local Recipe checks; CI uses pinned 1.15.8. It does not build/push images, create resources, or
 use deployed databases. Real PostgreSQL/Redis tests require explicitly disposable
 dependencies; see [test inputs](docs/contracts.md#validation).
 
@@ -111,6 +112,9 @@ That target **submits** the operator Job; verify its completion separately.
 There is no implemented local deployment target or automatic certificate-renewal
 target. The [Azure contract](docs/azure-infrastructure.md) describes the
 integration gates; [FINDINGS.md](FINDINGS.md) records what actually ran.
+The [local executor gate](docs/local.md) now has staged preparation, image,
+bootstrap, and one-child commands. Its source is validated offline; live local
+feasibility and the complete tenant demo are not yet proven.
 The fresh admission run stopped on harness endpoint discovery after all three
 operations succeeded. A separate `verify-existing` run passed the remaining
 functional and outage checks; it does not claim another fresh admission.

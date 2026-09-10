@@ -66,7 +66,8 @@ Do not replace those abstractions with direct cluster creation in Python.
 Use `make help` and `make check`; neither claims a deployment succeeded.
 Install project dependencies with `uv sync --locked` when required.
 `make check` generates extensions, compiles all Bicep, runs Ruff, offline tests,
-and ShellCheck. It never builds/pushes images or contacts deployed databases.
+Terraform mock-provider validation, and ShellCheck. It never creates clusters,
+builds/pushes images, or contacts deployed databases.
 `make test-integration` requires explicit disposable dependencies; see contracts.
 Use Python 3.13 from the project, not an arbitrary system interpreter.
 Use Radius 0.60.2 and its bundled Bicep 0.42.1, not the older `az bicep`.

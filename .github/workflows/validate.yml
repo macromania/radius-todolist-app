@@ -19,7 +19,7 @@ jobs:
         with:
           version: "0.11.7"
           python-version: "3.13"
-      - name: Install pinned Radius and its Bicep compiler
+      - name: Install pinned Radius, Bicep, and Terraform
         shell: bash
         run: |
           set -euo pipefail
@@ -32,9 +32,15 @@ jobs:
             https://github.com/Azure/bicep/releases/download/v0.42.1/bicep-linux-x64 \
             -o "$HOME/.rad/bin/bicep"
           echo "aed90eb2c69a6ee2bd70dc0d4354408ac4d04fd9911d3ec8e0cd74ad173e7139  $HOME/.rad/bin/bicep" | sha256sum -c -
+          curl -fL --retry 3 \
+            https://releases.hashicorp.com/terraform/1.15.8/terraform_1.15.8_linux_amd64.zip \
+            -o .state/check/terraform.zip
+          echo "d25ce7b6902013ad905db3d2eab0be4cd905887fe88b81a6171b8d5503c31f3d  .state/check/terraform.zip" | sha256sum -c -
+          unzip -q .state/check/terraform.zip terraform -d .state/check/bin
+          rm .state/check/terraform.zip
           chmod +x .state/check/bin/rad "$HOME/.rad/bin/bicep"
           echo "$PWD/.state/check/bin" >> "$GITHUB_PATH"
       - name: Install project dependencies
         run: uv sync --locked
-      - name: Validate runtime, harness, images, and Bicep contracts
+      - name: Validate runtime, harness, Bicep, and Terraform mock contracts
         run: make check
