@@ -96,6 +96,13 @@ Before the first mutation, the operator checks:
   use `<slot>-<role>-<resourceId>`. The application-free gate formula must not
   be used for these resources. Legacy SHA-1 names and unexpected state are
   refused, never adopted.
+* Application-scoped discovery cross-checked against the native resource-group
+  inventory, not the CLI's default-environment resource list. Core containers
+  may omit an explicit environment only under a validated parent application;
+  custom resources still require their exact environment. Native inventory
+  rejects foreign/duplicate IDs, incomplete pages, and request failures. Empty
+  environment definitions and retained ARM deployment-history records are not
+  workload owners.
 * Each child's Terraform state Secret UID, lineage, serial, completed kind
   resource, pinned node image, and tracked access Secret. Full cleanup requires
   exactly three managed resources, including
@@ -125,8 +132,11 @@ adoption, or partial-state recovery machinery.
 1. Quiesce management API and provisioner with atomic Deployment UID/label
    preconditions, then wait for their Pods to terminate.
 2. Delete the two data applications, then the two control applications,
-   through each child's Radius. Requery applications and resources after every
-   deletion. A zero CLI exit code with a remaining application is failure.
+   through each child's Radius. Requery applications and the native resource-group
+   inventory after every deletion: CLI application-scoped resource listing fails
+   once that application is gone. A zero exit code with a remaining application
+   is failure. Previously removed resource IDs remain excluded during later
+   checks; an old ID reappearing is also failure.
 3. Delete each custom cluster resource through **management Radius**, data
    before control. The native DELETE uses `2025-08-01-preview`, explicit JSON
    media types, and the verified management CA/client certificate. It disables
@@ -151,6 +161,12 @@ PVC storage. Management node removal also removes bootstrap-owned local
 workload/state PVC storage inside that node. The tool does **not** directly
 delete a child kind cluster, remove Docker containers or arbitrary volumes,
 delete Kubernetes Secrets, force Radius resources, or edit Radius backing state.
+
+Immediately before each child deletion, its complete native workload inventory,
+application list, and all `tfstate=true` Secrets must be empty. Final management
+deletion likewise requires an empty native workload inventory, not merely an
+empty environment-filtered CLI result. Native reads use the verified cluster
+CA/client identity and expected child TLS name, without proxies or redirects.
 
 Individual commands and the overall reporting window are bounded. A timeout
 does not prove Radius or Terraform stopped; preserve the record and inspect the

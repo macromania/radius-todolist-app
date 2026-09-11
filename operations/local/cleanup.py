@@ -12,6 +12,7 @@ import re
 import ssl
 import sys
 import time
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -158,6 +159,7 @@ class Cleanup:
         }
         self.path = STATE / "evidence" / f"cleanup-{self.record['runId']}.json"
         self.inventory: dict = {}
+        self.removed_resource_ids: dict[str, set[str]] = {}
 
     def step(self, action: str, identity: str, **proof) -> None:
         self.record["steps"].append(
@@ -213,9 +215,11 @@ class Cleanup:
     def radius_list(self, slot: str, *args: str) -> list:
         return items(json.loads(self.rad(slot, *args, "--group", GROUP, "-o", "json")))
 
-    def native_delete(self, slot: str) -> None:
-        _, cluster, user = selected_access(self.targets["management"], "management")
-        directory = private_dir(STATE / "client" / f"cleanup-{self.record['runId']}")
+    @contextmanager
+    def native_client(self, slot: str):
+        require(slot in self.targets, "Unknown native Radius target")
+        _, cluster, user = selected_access(self.targets[slot], slot)
+        directory = private_dir(STATE / "client" / f"cleanup-{self.record['runId']}-{slot}")
         files = {}
         for key, encoded in (
             ("ca", cluster["certificate-authority-data"]),
@@ -232,12 +236,104 @@ class Cleanup:
             follow_redirects=False,
             timeout=httpx.Timeout(60, connect=5),
         ) as client:
+            yield client, cluster["server"]
+
+    def native_delete(self, slot: str) -> None:
+        with self.native_client("management") as (client, server):
             response = client.delete(
-                cluster["server"] + "/apis/api.ucp.dev/v1alpha3" + cluster_resource(slot),
+                server + "/apis/api.ucp.dev/v1alpha3" + cluster_resource(slot),
                 params={"api-version": API_VERSION},
                 headers={"Content-Type": "application/json", "Accept": "application/json"},
             )
         require(response.status_code in {200, 202, 204}, "Radius cluster DELETE was not accepted")
+
+    def native_resources(self, slot: str) -> list[dict]:
+        with self.native_client(slot) as (client, server):
+            response = client.get(
+                server
+                + "/apis/api.ucp.dev/v1alpha3"
+                + SCOPE.rsplit("/providers", 1)[0]
+                + "/resources",
+                params={"api-version": "2023-10-01-preview"},
+                headers={"Accept": "application/json"},
+                extensions=(
+                    {} if slot == "management" else {"sni_hostname": f"radplanes-local-{slot}"}
+                ),
+            )
+        require(response.status_code == 200, "Native Radius inventory failed")
+        body = response.json()
+        require(
+            isinstance(body, dict) and not body.get("nextLink") and not body.get("@odata.nextLink"),
+            "Incomplete native Radius inventory",
+        )
+        result, identifiers = [], set()
+        for value in items(body):
+            require(
+                isinstance(value, dict)
+                and isinstance(value.get("id"), str)
+                and isinstance(value.get("type"), str)
+                and isinstance(value.get("name"), str)
+                and same_radius_id(value["id"], f"{SCOPE}/{value['type']}/{value['name']}")
+                and value["id"].casefold() not in identifiers,
+                "Foreign or duplicate native Radius resource",
+            )
+            identifiers.add(value["id"].casefold())
+            # These are definitions or retained ARM deployment history, not workload owners.
+            if value["type"].casefold() not in {
+                "applications.core/applications",
+                "applications.core/environments",
+                "microsoft.resources/deployments",
+            }:
+                result.append(value)
+        return result
+
+    def verify_complete_inventory(self, slot: str) -> None:
+        require(
+            {r["id"].casefold() for r in self.native_resources(slot)}
+            == {r["id"].casefold() for r in self.inventory[slot]["resources"]},
+            f"{slot}: unreviewed Radius resources exist outside application inventory",
+        )
+
+    def app_resources_absent(self, slot: str, name: str) -> None:
+        application = f"{SCOPE}/Applications.Core/applications/{name}"
+        resources = [
+            resource
+            for resource in self.inventory[slot]["resources"]
+            if same_radius_id(resource["properties"].get("application"), application)
+        ]
+        identifiers = self.removed_resource_ids.get(slot, set()) | {
+            resource["id"].casefold() for resource in resources
+        }
+        allowed = {r["id"].casefold() for r in self.inventory[slot]["resources"]} - identifiers
+        require(
+            {r["id"].casefold() for r in self.native_resources(slot)} <= allowed,
+            f"{slot}: Radius resources remain after application deletion",
+        )
+        self.removed_resource_ids[slot] = identifiers
+
+    def child_empty(self, slot: str) -> None:
+        require(slot in CHILDREN, "Only child clusters use this absence guard")
+        self.namespace(slot, "kube-system", self.targets[slot]["clusterUid"])
+        require(
+            not self.radius_list(slot, "app", "list")
+            and not self.native_resources(slot)
+            and not items(
+                self.commands.json(
+                    self.kube(
+                        slot,
+                        "-n",
+                        "radius-system",
+                        "get",
+                        "secrets",
+                        "-l",
+                        "tfstate=true",
+                        "-o",
+                        "json",
+                    )
+                )
+            ),
+            f"{slot}: child Radius resources or Terraform state remain",
+        )
 
     def docker_nodes(self) -> dict[str, dict]:
         ids = containers(self.commands)
@@ -451,7 +547,16 @@ class Cleanup:
             and environment["properties"]["compute"]["namespace"] == f"radplanes-local-{slot}",
             f"{slot}: foreign Radius compute namespace",
         )
-        resources = self.radius_list(slot, "resource", "list")
+        resources = [
+            resource
+            for app in apps
+            for resource in self.radius_list(slot, "resource", "list", "--application", app["name"])
+        ]
+        require(
+            all(isinstance(resource.get("id"), str) for resource in resources)
+            and len({resource["id"].casefold() for resource in resources}) == len(resources),
+            f"{slot}: duplicate or malformed Radius resource inventory",
+        )
         cluster_records = {}
         for resource in resources:
             kind, name, properties = resource["type"], resource["name"], resource["properties"]
@@ -493,7 +598,13 @@ class Cleanup:
                         "Demo.Platform/gateways",
                     }
                     and same_radius_id(properties.get("application"), app_id)
-                    and same_radius_id(properties.get("environment"), env_id),
+                    and (
+                        same_radius_id(properties.get("environment"), env_id)
+                        or (
+                            kind == "Applications.Core/containers"
+                            and properties.get("environment") is None
+                        )
+                    ),
                     f"{slot}: unknown or foreign Radius application resource",
                 )
         if slot == "management":
@@ -573,6 +684,7 @@ class Cleanup:
             )
             self.namespace(slot, target["namespace"], target["namespaceUid"])
             self.inventory[slot] = self.radius_inventory(slot)
+            self.verify_complete_inventory(slot)
             self.verify_state_inventory(slot)
             self.record["targets"][slot] = {
                 key: target[key]
@@ -803,12 +915,13 @@ class Cleanup:
             not any(app["name"] == name for app in self.radius_list(slot, "app", "list")),
             f"{slot}: Radius application remains",
         )
-        remaining = self.radius_list(slot, "resource", "list", "--application", name)
-        require(not remaining, f"{slot}: Radius resources remain after application deletion")
+        self.app_resources_absent(slot, name)
         self.step("radius_application_absent", f"{slot}/{name}")
 
     def cluster_absent(self, slot: str) -> bool:
-        resources = self.radius_list("management", "resource", "list")
+        resources = self.radius_list(
+            "management", "resource", "list", "--application", f"cluster-{slot}"
+        )
         if any(same_radius_id(item["id"], cluster_resource(slot)) for item in resources):
             return False
         target = self.targets[slot]
@@ -826,13 +939,16 @@ class Cleanup:
         for slot in CHILDREN:
             self.delete_app(slot)
         for slot in CHILDREN:
+            self.child_empty(slot)
             require(
                 self.docker_nodes()[slot]["Id"] == self.targets[slot]["nodeId"],
                 "Child Docker identity changed before Radius deletion",
             )
             self.namespace(slot, "kube-system", self.targets[slot]["clusterUid"])
             self.state_owner(slot)
-            current = self.radius_list("management", "resource", "list")
+            current = self.radius_list(
+                "management", "resource", "list", "--application", f"cluster-{slot}"
+            )
             expected = self.inventory["management"]["clusters"][slot]
             require(
                 [item for item in current if same_radius_id(item["id"], cluster_resource(slot))]
@@ -849,7 +965,8 @@ class Cleanup:
             self.delete_app("management", f"cluster-{slot}")
         self.delete_app("management")
         require(
-            not self.radius_list("management", "resource", "list"),
+            not self.radius_list("management", "app", "list")
+            and not self.native_resources("management"),
             "Management Radius resources remain; bootstrap deletion refused",
         )
         require(

@@ -5,8 +5,11 @@ are not passing checks. Runtime artifacts containing credentials stay out of Git
 
 ## Status
 
-Implementation started 2026-09-09. Phase 0's scoped preflight is complete.
-Azure integration and application implementation are in progress.
+Implementation started 2026-09-09. Azure admission, separately scoped functional/
+outage proof, fresh Redis lifecycle, and teardown are verified. The local
+executor gate passed. Full local acceptance remains incomplete: its first
+admission failed on Redis PVC permission, now corrected. The failed three-cluster
+environment was removed through its owners on September 11 before a fresh run.
 
 ## Phase 0 - Foundations
 
@@ -106,6 +109,9 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F077 | 6 | High correctness | Local PostgreSQL/Redis/gateway Recipes | context scope validation | Terraform Recipe validators repeated the case-sensitive Radius group-path assumption | Normalize only Radius resource-ID casing; actual-wire fixtures and foreign-group refusal pass in all three Recipes; fresh immutable modules required |
 | F078 | 6 | High correctness | Local data-plane prerequisites | persistent Redis permissions | Stock applications-RP can create StatefulSets but cannot create the Redis PVC | Add only namespace-scoped PVC lifecycle permissions to the existing applications-RP account in data namespaces; real denial, run-path tests, and fix review verified |
 | F079 | 6 | High correctness | `harness/test-e2e.py` | PostgreSQL identity probe | Psycopg exposes SSL state on `connection.pgconn`, not `connection.info` | Correct supported property, preserve transport guard, and test the actual probe; real management-PG execution and fix review pass |
+| F080 | 6 | High correctness | `operations/local/cleanup.py` | Radius inventory | Bare resource listing is environment-filtered and omits child wrappers and Core containers without explicit environment | Inventory validated applications explicitly; permit omitted container environment only under its validated parent; custom owners still require exact environment |
+| F081 | 6 | High correctness | `operations/local/cleanup.py` | Post-deletion verification | CLI application-scoped resource listing requires the already-deleted application to exist | Use the authenticated native resource-group inventory after deletion; actual data deletion and the original failed reset record remain separately recorded |
+| F082 | 6 | Medium safety | `operations/local/cleanup.py` | Complete owner absence | Application-only inventory can miss orphans; previously deleted known IDs can reappear during later removals | Cross-check complete native workload inventory, reject all remaining child Terraform state, track removed IDs cumulatively, and require final management native emptiness; regressions, fix reviews, and real reset pass |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -1415,3 +1421,60 @@ get/create/delete PVC permission for applications RP. This permits its normal
 owner cleanup; it did not replay the failed deployment or grant StatefulSet,
 cluster-wide, or application-API privileges. Protected
 `diagnostics/redis-storage-permission-proof.json` records the scope.
+
+### Failed local admission reset, 2026-09-11
+
+The normal cleanup contract still requires all five exported targets. A separate
+protected, one-off reset was reviewed for exactly the failed management/shared
+pair. Its preview bound the original failed operation, null pair inventory IDs,
+three Docker/cluster/namespace identities, original image references, Radius
+application owners, Terraform backend UIDs/lineages/serials, access Secret UIDs,
+and the exact PVC-only Role. No onboarding operation was replayed or adopted.
+
+Live inventory exposed F080: bare `rad resource list` selects the current
+environment and omits Core containers whose environment exists only on their
+application. Application-scoped enumeration fixes discovery without accepting
+a wrong explicit environment or a custom resource without its exact owner.
+
+The first reset began at 09:55:21Z. It quiesced management, deleted the shared
+data application through child Radius, then stopped at F081: the CLI cannot
+list resources for an application that no longer exists. Its failed journal
+and one-shot marker were retained. The continuation independently proved the
+data application, its Radius records, backends, StatefulSets, and PVCs absent;
+it did not repeat that deletion or restart management.
+
+The independent correctness review found F082 before continuation. The native
+resource-group endpoint returns all resource IDs/types regardless of application
+or environment, including records outside known applications. Preflight now
+compares that complete workload inventory with validated owners. Child deletion
+also requires no application records, workload records, or Terraform backend
+Secrets. Environment/application definitions and retained ARM deployment-history
+records are distinguished from workload owners, not claimed deleted. A follow-up
+review reproduced reappearance of an earlier deleted ID; cumulative removed-ID
+tracking and a final empty native management inventory close that gap.
+
+The direct fix walkthrough, independent security fix reviews, 81 tracked cleanup
+tests, and 29 private reset/continuation tests passed. Regressions exercise actual
+command paths, complete-inventory/foreign/pagination refusal, orphan state after
+app deletion, reappearing known IDs, unchanged failure records, and no automatic
+continuation replay.
+
+The separately previewed continuation finished at **10:33:36Z**: control
+application removal, both child deletions through management Radius, actual
+Docker/backend/access absence, empty wrapper removal, management application
+removal, then only the bootstrap-owned management kind cluster. Independent
+verification at **10:34:17Z** confirmed all three original project node IDs and
+project node names/labels absent, with all **13 unrelated containers retained**.
+Protected evidence is `evidence/reset-49f9dc-verified.json` and
+`recovery-49f9dc/remaining-journal.json`; the latter hashes to
+`b3cbd34bc1edcc09696a0fd59b3666bdf06e0fb3f332286555d20495e68b2686`.
+The original acceptance and first reset still say failed. This is cleanup proof,
+not passing full-local acceptance, persistence, or outage evidence.
+
+After independent absence proof, 17 exact obsolete bootstrap/deployment files
+were archived and retired for a fresh environment. The previous runtime image
+review was also archived; gate evidence, failed runs, credentials history, and
+the reset journals were retained. No broad state-directory cleanup occurred.
+The final source checkpoint passed `make check`: **872 tests, 263 subtests,
+50 explicit dependency skips, 23 Bicep files, 24 Terraform mock-provider tests,
+Ruff, and ShellCheck**. Fresh images and a new full acceptance run remain required.

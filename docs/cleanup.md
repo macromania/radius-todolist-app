@@ -1,8 +1,9 @@
 # Azure cleanup and verification
 
 These tools implement the approved **whole-demo Azure teardown**. They destroy
-application data. Local cleanup is not implemented. Authoring and mocked tests
-do not mean a live cleanup has run.
+application data. [Local cleanup](local-cleanup.md) has a separate explicit
+operator and ownership contract. Authoring and mocked tests do not mean a live
+cleanup has run.
 
 ```sh
 # Read-only cloud/Radius inventory and ordered plan:

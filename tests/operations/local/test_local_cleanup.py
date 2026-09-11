@@ -2,6 +2,8 @@ import base64
 import gzip
 import hashlib
 import json
+from contextlib import contextmanager
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
@@ -12,6 +14,8 @@ cleanup = load("local_full_cleanup", LOCAL / "cleanup.py")
 LOAD_INPUTS = cleanup.load_inputs
 CHECK_FAULTS = cleanup.Cleanup.check_faults
 NATIVE_DELETE = cleanup.Cleanup.native_delete
+APP_RESOURCES_ABSENT = cleanup.Cleanup.app_resources_absent
+NATIVE_RESOURCES = cleanup.Cleanup.native_resources
 REVISION = "a" * 40
 IMAGES = {
     role: {
@@ -125,7 +129,6 @@ class Offline:
                     "name": "workload",
                     "id": f"{cleanup.SCOPE}/Applications.Core/containers/workload",
                     "properties": {
-                        "environment": env_id,
                         "application": app_id,
                         "provisioningState": "Succeeded",
                     },
@@ -386,6 +389,15 @@ class Offline:
                         if value["properties"].get("application")
                         == f"{cleanup.SCOPE}/Applications.Core/applications/{app}"
                     ]
+                else:
+                    values = [
+                        {**app, "type": "Applications.Core/applications"} for app in self.apps[slot]
+                    ] + [
+                        value
+                        for value in values
+                        if value["properties"].get("environment")
+                        == f"{cleanup.SCOPE}/Applications.Core/environments/{slot}"
+                    ]
                 return json.dumps(values)
             if command[:2] == ["env", "show"]:
                 return json.dumps(
@@ -447,6 +459,11 @@ class Offline:
             if command[0] == "patch":
                 patch = json.loads(command[command.index("-p") + 1])
                 assert patch[0]["path"] == "/metadata/uid"
+                deployment = self.objects[slot, namespace, command[1], command[2]]
+                assert patch[0]["value"] == deployment["metadata"]["uid"]
+                assert patch[1]["value"] == deployment["metadata"]["labels"]
+                assert patch[2] == {"op": "replace", "path": "/spec/replicas", "value": 0}
+                deployment["spec"]["replicas"] = 0
                 self.mutations.append(("quiesce", command[2]))
                 return ""
         if args[:3] == ["kind", "delete", "cluster"]:
@@ -510,7 +527,148 @@ def scenario(local_state, monkeypatch):
         lambda instance, slot: fake.native_delete(instance, slot),
     )
     monkeypatch.setattr(cleanup.Cleanup, "check_faults", lambda self: None)
+
+    monkeypatch.setattr(
+        cleanup.Cleanup, "native_resources", lambda self, slot: fake.resources[slot]
+    )
     return local_state, targets, fake
+
+
+@pytest.mark.parametrize(
+    "remaining,status", [(False, 200), (True, 200), (False, 302), (False, 403)]
+)
+def test_native_post_delete_inventory_does_not_require_existing_app(
+    scenario, monkeypatch, remaining, status
+):
+    _, targets, fake = scenario
+    instance = cleanup.Cleanup(fake, targets, False)
+    instance.inventory = {"shared-data": instance.radius_inventory("shared-data")}
+    before = list(fake.resources["shared-data"])
+    fake.resources["shared-data"] = []
+    calls = []
+
+    def get(url, **kwargs):
+        calls.append((url, kwargs))
+        values = before if remaining else []
+        return SimpleNamespace(status_code=status, json=lambda: {"value": values})
+
+    @contextmanager
+    def native_client(self, slot):
+        assert slot == "shared-data"
+        yield SimpleNamespace(get=get), "https://127.0.0.1:35497"
+
+    monkeypatch.setattr(cleanup.Cleanup, "native_client", native_client)
+    monkeypatch.setattr(cleanup.Cleanup, "native_resources", NATIVE_RESOURCES)
+    if remaining or status != 200:
+        with pytest.raises(common.LocalError, match="inventory failed|resources remain"):
+            APP_RESOURCES_ABSENT(instance, "shared-data", "data")
+    else:
+        APP_RESOURCES_ABSENT(instance, "shared-data", "data")
+        assert len(calls) == 1
+        for url, kwargs in calls:
+            assert "/Applications.Core/applications/data" not in url
+            assert url.endswith("/resourceGroups/radplanes-local/resources")
+            assert kwargs["params"] == {"api-version": "2023-10-01-preview"}
+            assert kwargs["extensions"] == {"sni_hostname": "radplanes-local-shared-data"}
+    assert not fake.mutations
+
+
+@pytest.mark.parametrize("after", ["cluster-shared-data", "management"])
+def test_previously_deleted_resource_reappearance_blocks_bootstrap_deletion(
+    scenario, monkeypatch, after
+):
+    _, _, fake = scenario
+    removed = next(r for r in fake.resources["management"] if r["name"] == "shared-data")
+    original = cleanup.Cleanup.delete_app
+
+    def delete(instance, slot, name=None):
+        original(instance, slot, name)
+        if slot == "management" and (name or "management") == after:
+            fake.resources[slot].append(removed)
+
+    monkeypatch.setattr(cleanup.Cleanup, "delete_app", delete)
+    assert cleanup.main(["--execute"]) == 1
+    assert not any(action == "kind-management" for action, _ in fake.mutations)
+
+
+def test_unbound_resource_is_not_hidden_by_application_inventory(scenario):
+    _, _, fake = scenario
+    fake.resources["shared-data"].append(
+        {
+            "id": f"{cleanup.SCOPE}/Applications.Core/containers/orphan",
+            "name": "orphan",
+            "type": "Applications.Core/containers",
+            "properties": {
+                "application": f"{cleanup.SCOPE}/Applications.Core/applications/deleted"
+            },
+        }
+    )
+    assert cleanup.main(["--execute"]) == 1
+    assert not fake.mutations
+
+
+@pytest.mark.parametrize("orphan", ["resource", "state"])
+def test_orphan_after_app_deletion_blocks_child_destruction(scenario, monkeypatch, orphan):
+    _, _, fake = scenario
+    original = cleanup.Cleanup.delete_app
+
+    def delete(instance, slot, name=None):
+        original(instance, slot, name)
+        if slot == "shared-data":
+            if orphan == "resource":
+                fake.resources[slot].append(
+                    {
+                        "id": f"{cleanup.SCOPE}/Other.Provider/widgets/orphan",
+                        "type": "Other.Provider/widgets",
+                        "name": "orphan",
+                    }
+                )
+            else:
+                fake.objects[slot, "radius-system", "secret", "untracked-state"] = {
+                    "metadata": {
+                        "name": "untracked-state",
+                        "namespace": "radius-system",
+                        "uid": "orphan-state-uid",
+                        "labels": {"tfstate": "true"},
+                    },
+                }
+
+    monkeypatch.setattr(cleanup.Cleanup, "delete_app", delete)
+    assert cleanup.main(["--execute"]) == 1
+    assert not any(action in {"radius-cluster", "kind-management"} for action, _ in fake.mutations)
+
+
+@pytest.mark.parametrize("fault", ["pagination", "missing-items", "duplicate", "foreign"])
+def test_native_inventory_refuses_incomplete_or_foreign_results(scenario, monkeypatch, fault):
+    _, targets, fake = scenario
+    value = {
+        "id": f"{cleanup.SCOPE}/Applications.Core/containers/orphan",
+        "type": "Applications.Core/containers",
+        "name": "orphan",
+    }
+    bodies = {
+        "pagination": {"value": [], "nextLink": "https://other.invalid/next"},
+        "missing-items": {},
+        "duplicate": {"value": [value, value]},
+        "foreign": {"value": [{**value, "id": value["id"].replace("radplanes-local", "foreign")}]},
+    }
+
+    @contextmanager
+    def client(self, slot):
+        yield (
+            SimpleNamespace(
+                get=lambda *a, **k: SimpleNamespace(
+                    status_code=200,
+                    json=lambda: bodies[fault],
+                )
+            ),
+            "https://127.0.0.1:35497",
+        )
+
+    monkeypatch.setattr(cleanup.Cleanup, "native_client", client)
+    with pytest.raises(common.LocalError):
+        NATIVE_RESOURCES(cleanup.Cleanup(fake, targets, False), "shared-data")
+    assert not fake.mutations
 
 
 def test_preview_real_entrypoint_never_mutates(scenario, capsys):
@@ -640,6 +798,15 @@ def test_all_ownership_checked_before_any_mutation(scenario, failure):
     assert not fake.mutations
     (evidence,) = state.glob("evidence/cleanup-*.json")
     assert json.loads(evidence.read_text())["result"] == "failed"
+
+
+def test_explicit_foreign_container_environment_is_not_treated_as_implicit(scenario):
+    _, _, fake = scenario
+    fake.resources["shared-control"][0]["properties"]["environment"] = (
+        f"{cleanup.SCOPE}/Applications.Core/environments/management"
+    )
+    assert cleanup.main(["--execute"]) == 1
+    assert not fake.mutations
 
 
 def test_zero_cli_exit_with_remaining_app_stops_before_cluster_delete(scenario):
