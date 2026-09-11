@@ -16,8 +16,8 @@ variable "context" {
       ) && (
       var.context.runtime.kubernetes.namespace == "radplanes-local-${var.context.environment.name}-${var.context.application.name}"
       ) && can(regex(
-        "^/planes/radius/local/resourceGroups/radplanes-local/providers/Demo\\.Platform/postgreSqlDatabases/[a-z][a-z0-9-]*$",
-        var.context.resource.id
+        "^/planes/radius/local/resourcegroups/radplanes-local/providers/demo\\.platform/postgresqldatabases/[a-z][a-z0-9-]*$",
+        lower(var.context.resource.id)
     ))
     error_message = "PostgreSQL must use an owned management/control slot, Radius group, and matching application namespace."
   }

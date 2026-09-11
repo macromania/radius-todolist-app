@@ -103,6 +103,7 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F074 | 6 | Medium correctness | Runtime image and acceptance source manifests | copied local overlay | Host-side image inspection found the copied `dynamic-rp-overlay.yaml` missing from both expected source lists | Include the actual copied YAML in worker build/acceptance provenance, never the API; original guard and failed build retained |
 | F075 | 6 | High correctness | `providers/local.py` | Terraform init permissions | Root with only CHOWN cannot chmod a volume already owned by UID 65532 | Take ownership before mode changes, seed verified binaries, and hand ownership back last; no capabilities added; real restricted-container and management-RP checks pass |
 | F076 | 6 | High correctness | Local provider/export/cleanup | Radius resource-ID comparisons | The real API returns lowercase `resourcegroups`, which mismatched newly added case-sensitive comparisons | Reuse exact case-insensitive Radius-ID equality across all local ownership surfaces; foreign IDs remain refused; 187 tests and actual management identity reads pass |
+| F077 | 6 | High correctness | Local PostgreSQL/Redis/gateway Recipes | context scope validation | Terraform Recipe validators repeated the case-sensitive Radius group-path assumption | Normalize only Radius resource-ID casing; actual-wire fixtures and foreign-group refusal pass in all three Recipes; fresh immutable modules required |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -1355,3 +1356,20 @@ management group/environment reads now pass the same guard. The second
 data-free setup attempt is archived under `history/radius-id-casing/`; checks
 again confirmed no child, Terraform state, database, PVC, or initialized plane
 credentials before clearing only its two attempt files for the rebuilt source.
+
+The next complete setup succeeded. PostgreSQL's first Recipe invocation then
+exposed the same wire-casing assumption inside all three application Recipe
+validators (F077). Those validators now compare canonical lowercase Radius IDs;
+slot, application, namespace, type, private address, port, and credential checks
+remain unchanged. Actual-wire fixtures and foreign-group refusal tests pass:
+24 Terraform mock-provider tests and 51 Recipe/publication tests. The direct
+walkthrough and independent security fix review were clean.
+
+The failed PostgreSQL resource created no managed Terraform resources or
+StatefulSet. Its normal Radius deletion also failed on the old module's
+validator. No state edit or force deletion was attempted. A separately reviewed
+bootstrap reset preview verified the exact management node, no children, no
+application Pods/StatefulSets, one unbound Pending provisioner PVC, one empty
+Terraform backend, and no initialized database. Only that operator-owned,
+empty bootstrap may be removed and recreated. Failed records are archived;
+unrelated containers, images, network, and global contexts must remain intact.

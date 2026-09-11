@@ -13,8 +13,8 @@ variable "context" {
       ) && (
       var.context.runtime.kubernetes.namespace == "radplanes-local-${var.context.environment.name}-data"
       ) && can(regex(
-        "^/planes/radius/local/resourceGroups/radplanes-local/providers/Applications\\.Datastores/redisCaches/[a-z][a-z0-9-]*$",
-        var.context.resource.id
+        "^/planes/radius/local/resourcegroups/radplanes-local/providers/applications\\.datastores/rediscaches/[a-z][a-z0-9-]*$",
+        lower(var.context.resource.id)
     ))
     error_message = "Redis must use an owned data slot, Radius group, and matching application namespace."
   }

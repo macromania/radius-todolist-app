@@ -11,7 +11,7 @@ variables {
     application = { name = "management" }
     environment = { name = "management" }
     resource = {
-      id         = "/planes/radius/local/resourceGroups/radplanes-local/providers/Demo.Platform/postgreSqlDatabases/postgres"
+      id         = "/planes/radius/local/resourcegroups/radplanes-local/providers/Demo.Platform/postgreSqlDatabases/postgres"
       properties = { databaseName = "management" }
     }
     runtime = { kubernetes = { namespace = "radplanes-local-management-management" } }
@@ -61,6 +61,22 @@ run "postgres_contract" {
     condition     = one([for env in kubernetes_stateful_set_v1.postgres.spec[0].template[0].spec[0].container[0].env : env.value if env.name == "POSTGRES_HOST_AUTH_METHOD"]) == "scram-sha-256"
     error_message = "PostgreSQL must require password authentication."
   }
+}
+
+run "reject_foreign_radius_group" {
+  command = plan
+  variables {
+    context = {
+      application = { name = "management" }
+      environment = { name = "management" }
+      resource = {
+        id         = "/planes/radius/local/resourcegroups/foreign/providers/Demo.Platform/postgreSqlDatabases/postgres"
+        properties = { databaseName = "management" }
+      }
+      runtime = { kubernetes = { namespace = "radplanes-local-management-management" } }
+    }
+  }
+  expect_failures = [var.context]
 }
 
 run "reapply_preserves_password_and_database" {

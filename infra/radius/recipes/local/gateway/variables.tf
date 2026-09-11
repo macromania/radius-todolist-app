@@ -21,8 +21,8 @@ variable "context" {
       ) && (
       var.context.runtime.kubernetes.namespace == "radplanes-local-${var.context.environment.name}-${var.context.application.name}"
       ) && can(regex(
-        "^/planes/radius/local/resourceGroups/radplanes-local/providers/Demo\\.Platform/gateways/[a-z][a-z0-9-]*$",
-        var.context.resource.id
+        "^/planes/radius/local/resourcegroups/radplanes-local/providers/demo\\.platform/gateways/[a-z][a-z0-9-]*$",
+        lower(var.context.resource.id)
     ))
     error_message = "Gateway must use an owned slot, Radius group, and matching application namespace."
   }

@@ -9,7 +9,7 @@ variables {
   context = {
     application = { name = "data" }
     environment = { name = "shared-data" }
-    resource    = { id = "/planes/radius/local/resourceGroups/radplanes-local/providers/Applications.Datastores/redisCaches/redis" }
+    resource    = { id = "/planes/radius/local/resourcegroups/radplanes-local/providers/Applications.Datastores/redisCaches/redis" }
     runtime     = { kubernetes = { namespace = "radplanes-local-shared-data-data" } }
   }
 }
@@ -44,6 +44,19 @@ run "redis_contract" {
     condition     = !kubernetes_stateful_set_v1.redis.spec[0].template[0].spec[0].automount_service_account_token && kubernetes_stateful_set_v1.redis.spec[0].template[0].spec[0].security_context[0].fs_group_change_policy == "OnRootMismatch"
     error_message = "Redis must not receive a Kubernetes token or change PVC traversal behavior."
   }
+}
+
+run "reject_foreign_radius_group" {
+  command = plan
+  variables {
+    context = {
+      application = { name = "data" }
+      environment = { name = "shared-data" }
+      resource    = { id = "/planes/radius/local/resourcegroups/foreign/providers/Applications.Datastores/redisCaches/redis" }
+      runtime     = { kubernetes = { namespace = "radplanes-local-shared-data-data" } }
+    }
+  }
+  expect_failures = [var.context]
 }
 
 run "reapply_preserves_redis_password" {

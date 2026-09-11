@@ -6,7 +6,7 @@ variables {
     application = { name = "data" }
     environment = { name = "shared-data" }
     resource = {
-      id = "/planes/radius/local/resourceGroups/radplanes-local/providers/Demo.Platform/gateways/gateway"
+      id = "/planes/radius/local/resourcegroups/radplanes-local/providers/Demo.Platform/gateways/gateway"
       properties = {
         apiService           = "data-api"
         apiPort              = 8088
@@ -54,6 +54,22 @@ run "gateway_contract" {
     condition     = !contains(keys(output.result.values), "challengeBackendService") && !strcontains(kubernetes_config_map_v1.envoy.data["envoy.yaml"], "certificate") && !strcontains(kubernetes_config_map_v1.envoy.data["envoy.yaml"], "challenge")
     error_message = "Local HTTP must not pretend to configure certificates or cloud challenge backends."
   }
+}
+
+run "reject_foreign_radius_group" {
+  command = plan
+  variables {
+    context = {
+      application = { name = "data" }
+      environment = { name = "shared-data" }
+      resource = {
+        id         = "/planes/radius/local/resourcegroups/foreign/providers/Demo.Platform/gateways/gateway"
+        properties = { apiService = "data-api", apiPort = 8088 }
+      }
+      runtime = { kubernetes = { namespace = "radplanes-local-shared-data-data" } }
+    }
+  }
+  expect_failures = [var.context]
 }
 
 run "reject_another_slots_port" {
