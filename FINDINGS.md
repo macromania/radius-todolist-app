@@ -104,6 +104,8 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F075 | 6 | High correctness | `providers/local.py` | Terraform init permissions | Root with only CHOWN cannot chmod a volume already owned by UID 65532 | Take ownership before mode changes, seed verified binaries, and hand ownership back last; no capabilities added; real restricted-container and management-RP checks pass |
 | F076 | 6 | High correctness | Local provider/export/cleanup | Radius resource-ID comparisons | The real API returns lowercase `resourcegroups`, which mismatched newly added case-sensitive comparisons | Reuse exact case-insensitive Radius-ID equality across all local ownership surfaces; foreign IDs remain refused; 187 tests and actual management identity reads pass |
 | F077 | 6 | High correctness | Local PostgreSQL/Redis/gateway Recipes | context scope validation | Terraform Recipe validators repeated the case-sensitive Radius group-path assumption | Normalize only Radius resource-ID casing; actual-wire fixtures and foreign-group refusal pass in all three Recipes; fresh immutable modules required |
+| F078 | 6 | High correctness | Local data-plane prerequisites | persistent Redis permissions | Stock applications-RP can create StatefulSets but cannot create the Redis PVC | Add only namespace-scoped PVC lifecycle permissions to the existing applications-RP account in data namespaces; real denial, run-path tests, and fix review verified |
+| F079 | 6 | High correctness | `harness/test-e2e.py` | PostgreSQL identity probe | Psycopg exposes SSL state on `connection.pgconn`, not `connection.info` | Correct supported property, preserve transport guard, and test the actual probe; real management-PG execution and fix review pass |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -1373,3 +1375,35 @@ application Pods/StatefulSets, one unbound Pending provisioner PVC, one empty
 Terraform backend, and no initialized database. Only that operator-owned,
 empty bootstrap may be removed and recreated. Failed records are archived;
 unrelated containers, images, network, and global contexts must remain intact.
+
+Fresh management from `a5af309` deployed successfully with persistent PostgreSQL
+and provisioner storage, HTTP health 200, missing-key 401, and
+`provisioner_ready`. The full `all` run `49f9dca7593c4e3c8ff7e201544647e8`
+began at 08:12:35Z on September 11. Shared-a was admitted, both shared kind
+clusters were created through management Radius with image import, both child
+Radius installations completed, and control PostgreSQL/API deployment passed.
+The operation failed at `data-application` at 08:22:09Z: the Redis Recipe's PVC
+creation was denied to `radius-system:applications-rp` (F078). The run remains
+failed; no second or isolated tenant, configuration matrix, or outage was run.
+
+Real authorization reads confirmed PVC create was denied while StatefulSet
+create was already allowed. The fix therefore grants only PVC lifecycle verbs
+through a Role/RoleBinding in each exact data namespace. It adds no cluster-wide
+rights, Secret permission, runtime API authority, or Docker access. Tests invoke
+prerequisites for all five slots and verify only data receives the exact grant;
+the direct walkthrough and independent security review passed.
+
+The exporter separately stopped because a late agent-only optional hardening
+edit changed the source during acceptance. Its source guard was correct. The
+exact patch was preserved in protected history, only those agent edits were
+restored to the deployed commit, and verified export resumed without a tenant
+replay or guard waiver. It did not cause the later Redis permission failure.
+
+Before another admission run, an installed-client check also caught F079.
+The actual PostgreSQL probe now uses `connection.pgconn.ssl_in_use`, retains
+its local-only DSN/TLS checks, and passes execution inside the running management
+API. It reports the real private node endpoint and no credential values.
+The focused provider/harness suite passed 126 tests and 13 subtests; the direct
+walkthrough and security fix review were clean. Failed operation/evidence and
+the existing shared resources remain pending explicit owner-ordered reset,
+not automatic provisioning recovery.

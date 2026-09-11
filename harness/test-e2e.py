@@ -173,7 +173,7 @@ if role in ("management-api","control-api"):
             parameters=conninfo_to_dict(os.environ[name])
             if not parameters.get("password") or parameters.get("sslmode")!="disable":
                 raise RuntimeError("local_postgresql_connection_contract")
-            if connection.info.ssl_in_use:
+            if connection.pgconn.ssl_in_use:
                 raise RuntimeError("local_postgresql_transport_contract")
             identity["tls"]=False
         result={"postgresql":identity}

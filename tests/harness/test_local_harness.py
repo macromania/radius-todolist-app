@@ -1302,6 +1302,42 @@ class NativeScriptTests(unittest.TestCase):
         local.from_evidence.return_value.restore.assert_called_once()
 
 
+class LocalPostgresProbeTests(unittest.TestCase):
+    def test_actual_probe_uses_the_supported_pgconn_ssl_property(self):
+        import psycopg
+
+        self.assertTrue(hasattr(psycopg.pq.PGconn, "ssl_in_use"))
+        connection = SimpleNamespace(
+            info=SimpleNamespace(host="172.18.0.3", port=31543),
+            pgconn=SimpleNamespace(ssl_in_use=False),
+            execute=Mock(
+                return_value=SimpleNamespace(
+                    fetchone=lambda: {"database": "control", "server_address": "10.244.0.5/32"}
+                )
+            ),
+        )
+        output = io.StringIO()
+        with (
+            patch("psycopg.connect", return_value=nullcontext(connection)),
+            patch.dict(
+                "os.environ",
+                {
+                    "CONTROL_DSN": (
+                        "host=172.18.0.3 port=31543 dbname=control user=cp_api "
+                        "password=synthetic-local-password sslmode=disable"
+                    )
+                },
+            ),
+            patch.object(sys, "argv", ["probe", "control-api", "local"]),
+            redirect_stdout(output),
+        ):
+            exec(compile(runner.IDENTITY_PROBE, "<identity-probe>", "exec"), {})
+            self.assertFalse(json.loads(output.getvalue())["postgresql"]["tls"])
+            connection.pgconn.ssl_in_use = True
+            with self.assertRaisesRegex(RuntimeError, "local_postgresql_transport_contract"):
+                exec(compile(runner.IDENTITY_PROBE, "<identity-probe>", "exec"), {})
+
+
 class LocalRedisProbeTests(unittest.TestCase):
     def test_run_path_performs_authenticated_ping_and_negative_password_check(self):
         connection = Connection(

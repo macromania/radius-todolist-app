@@ -527,6 +527,39 @@ def test_secret_permissions_are_named_and_no_docker_privilege_is_granted(provide
     )
 
 
+@pytest.mark.parametrize("slot", SLOTS)
+def test_storage_recipe_permissions_are_only_for_the_data_namespace(provider, monkeypatch, slot):
+    emitted = []
+    monkeypatch.setattr(
+        provider,
+        "apply",
+        lambda _, value, **__: emitted.extend(value if isinstance(value, list) else [value]),
+    )
+    monkeypatch.setattr(provider, "kube_get", lambda *_: None)
+    provider.prerequisites(slot)
+    grants = [value for value in emitted if value["metadata"].get("name") == "redis-recipe-storage"]
+    if not slot.endswith("-data"):
+        assert grants == []
+        return
+    namespace = provider.names(slot)[1]
+    assert [value["kind"] for value in grants] == ["Role", "RoleBinding"]
+    assert all(value["metadata"]["namespace"] == namespace for value in grants)
+    assert grants[0]["rules"] == [
+        {
+            "apiGroups": [""],
+            "resources": ["persistentvolumeclaims"],
+            "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"],
+        },
+    ]
+    assert grants[1]["subjects"] == [
+        {
+            "kind": "ServiceAccount",
+            "namespace": "radius-system",
+            "name": "applications-rp",
+        }
+    ]
+
+
 def test_local_runtime_secrets_keep_api_and_worker_credentials_separate(provider, monkeypatch):
     emitted = {}
     monkeypatch.setattr(provider, "secret", lambda _, __, name, data: emitted.update({name: data}))

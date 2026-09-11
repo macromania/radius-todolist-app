@@ -161,6 +161,10 @@ Redis remains the lowercase `redis` connection, password authenticated, with
 the existing encoded-password contract. Its local TLS setting is explicitly
 false; Azure's TLS setting remains true. Local traffic is trusted synthetic
 demo traffic, not hostile-tenant isolation.
+The stock applications RP lacks PVC lifecycle permission. Data prerequisites
+grant it only through `redis-recipe-storage` in that data namespace, bound to
+`radius-system:applications-rp`. Existing StatefulSet permission is reused;
+no cluster-wide role or runtime API permission is added.
 
 Public endpoint records always contain `http://127.0.0.1:ALLOCATED_PORT`. A
 management worker Pod checks administrative liveness through the child's

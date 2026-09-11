@@ -1013,6 +1013,19 @@ class LocalProvider:
                 }
             )
         if role == "data":
+            resources += workloads.role_binding(
+                namespace,
+                "redis-recipe-storage",
+                "radius-system",
+                "applications-rp",
+                [
+                    {
+                        "apiGroups": [""],
+                        "resources": ["persistentvolumeclaims"],
+                        "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"],
+                    },
+                ],
+            )
             for account, verbs in (
                 ("data-api", ["get"]),
                 ("data-reconciler", ["get", "create", "patch"]),
