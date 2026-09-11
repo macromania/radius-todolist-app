@@ -1,8 +1,56 @@
 # Full local provider contract
 
 The one-child Radius executor gate passed on September 10, 2026. This document
-describes the full-demo implementation, **not a new live acceptance result**.
-See [the gate evidence](local.md) and `FINDINGS.md` for actual results.
+describes the full-demo implementation. The fresh five-cluster scenario,
+parent outages, corrected API identity, and owner-ordered teardown are verified;
+see [the gate evidence](local.md) and [FINDINGS.md](../FINDINGS.md) for exact run scopes.
+
+## Fresh local run
+
+This procedure is verified on the recorded macOS host only. The local tools
+deliberately use Docker Desktop at
+`unix:///Users/mahmutcanga/.docker/run/docker.sock`; another user account or
+platform is not supported by these instructions. Do not substitute Colima,
+change global Docker defaults, or imply that setting `DOCKER_HOST` overrides
+the scoped endpoint. Use project Python 3.13, kind 0.31.0, Radius 0.60.2 with
+Bicep 0.42.1, and the reserved ports in `ports.env`.
+
+Preserve this checkout's historical `.state/local`. All local commands use that
+fixed path within their own checkout, so run the fresh procedure from a **new
+clone or worktree with no `.state/local`**. For example, after verifying the old
+project clusters are gone:
+
+```sh
+git worktree add --detach ../radius-three-plane-fresh HEAD
+cd ../radius-three-plane-fresh
+```
+
+Checkouts share the same Docker daemon, cluster names, and ports; do not run
+two deployments concurrently. An interrupted or failed attempt requires explicit
+ownership review. These commands do not retry, adopt, or clear its state.
+
+```sh
+uv sync --locked
+make check
+uv run --no-sync python operations/local/prepare.py
+uv run --no-sync python operations/local/images.py build --execute
+uv run --no-sync python operations/local/images.py inspect --execute
+make local-runtime-build CONFIRM_LOCAL=yes
+make local-runtime-inspect CONFIRM_LOCAL=yes
+uv run --no-sync python operations/local/bootstrap.py create --execute
+uv run --no-sync python operations/local/bootstrap.py install --execute
+make local-runtime-load CONFIRM_LOCAL=yes
+make local-setup CONFIRM_LOCAL=yes
+make local-deploy-management CONFIRM_LOCAL=yes
+uv run --no-sync python harness/local/export-state.py --watch --timeout 7200
+```
+
+Keep the exporter in a separate terminal or attached background process. Once
+`export-status.json` reports `ready_for_onboarding: true`, run
+`make local-test CONFIRM_LOCAL=yes` from another terminal. Completion must say
+`outcome: passed`; submission is not proof. Then follow
+[full local cleanup](local-cleanup.md) after preserving acceptance and restored
+fault evidence. Image preparation never publishes to an external registry.
 
 ## Run path and ownership
 

@@ -3,9 +3,11 @@
 **Status: the real one-child feasibility gate passed.** Run `d3fd13ce214f`
 completed on September 10, 2026, with source `9190bb0`. It proved the actual
 Radius Terraform execution, encrypted state, child access, workload/connectivity,
-and owner-driven deletion described below. The child and its credentials/state
-are gone; management remains for the full local implementation. This is
-not the full local tenant demo or a `LocalProvider`. Azure is closed and must not
+and owner-driven deletion described below. That gate initially retained management;
+it was subsequently removed. The full local provider and final five-cluster
+scenario are now implemented, proved, and removed; see
+[the full provider contract](local-provider.md) and [FINDINGS.md](../FINDINGS.md).
+This page records the separate one-child gate, not its replacement. Azure is closed and must not
 be recreated for this gate.
 
 ## Ownership and scope
@@ -184,7 +186,7 @@ exporting those logs. Unexpected diagnostic disclosure still needs operator revi
 
 Docker Desktop's host client endpoint is
 `unix:///Users/mahmutcanga/.docker/run/docker.sock`. The management node's
-`extraMounts` uses `/var/run/docker.sock` as the **unproven VM-side candidate** and
+`extraMounts` uses the live-verified VM-side `/var/run/docker.sock` and
 exposes it inside that node at `/run/radplanes/docker.sock`; the RP hostPath refers
 to the node-side path, not the Mac home directory. Socket existence, group behavior,
 daemon identity, and Pod reachability are live gates. There is no Colima/TCP daemon
@@ -233,7 +235,8 @@ passed feasibility result. Missing state or a changed node/Secret UID blocks thi
 command. Partial creation without usable state needs a separately reviewed
 operator decision; this implementation supplies no host child-deletion shortcut.
 Likewise, bootstrap/install start records refuse automatic replay after interruption.
-Management teardown remains parent-owned and is not implemented here.
+Management teardown remains operator-owned; the separate
+[full cleanup operator](local-cleanup.md) implements and verifies it.
 `make check` and CI include the cloud-free local Python tests, Terraform
 mock-provider validation, and Recipe shell checks; they never create clusters.
 

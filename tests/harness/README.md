@@ -2,7 +2,8 @@
 
 These scripts perform **real HTTP requests and Kubernetes mutations** only when
 called with `--execute`. The normal unit/integration suites never invoke them.
-No live fault or Azure acceptance was run while implementing these scripts.
+Live Azure and local results, their source revisions, and teardown proofs are
+recorded in [FINDINGS.md](../../FINDINGS.md); tests alone are not that evidence.
 The checkout containing each script is the immutable path authority: project
 identity is fixed to `radplanes`, and relative configuration, state, evidence,
 Git commands, and source reads resolve from that checkout, never the caller's
@@ -89,7 +90,12 @@ are `radplanes-local-<slot>`, never `kind-` prefixed. Gateways use only
 `http://127.0.0.1:35490` through `:35494` in that order. Host Kubernetes API
 ports are 35495–35499, with verified CA transport. Namespaces are
 `radplanes-local-<slot>-<role>`. Labels and service accounts retain their
-existing `plane-demo/project=radplanes` and component names.
+existing `plane-demo/project=radplanes` and component names. The data API alone
+uses the dedicated `data-api-runtime` account, not Radius's generated Secret
+reader. Acceptance checks the mounted identity's actual parent-Secret GET and
+Secret LIST return authenticated 403 responses. Broad and resource-name-scoped
+authorization reviews permit only ConfigMap get and reject token minting,
+ConfigMap writes/watch, and Secret access. The checks repeat after API restart.
 
 Every pass verifies the recorded management Docker ID and encryption proof,
 each exact kind node name/label/ID, its unique private address on the `kind`

@@ -4,6 +4,8 @@
 five-cluster local demonstration. **It destroys the demo databases, Redis data,
 and node-local PVC storage.** Run acceptance and preserve its evidence first.
 Offline tests are not proof that live cleanup or the full local scenario passed.
+The normal five-cluster path was executed and independently verified on
+September 11, 2026; [FINDINGS.md](../FINDINGS.md) records both exact cleanup runs.
 The earlier one-child gate has its own cleanup command and historical evidence;
 this operator does not adopt that gate's resource or Terraform state.
 

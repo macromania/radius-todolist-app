@@ -9,9 +9,10 @@ Implementation started 2026-09-09. Azure admission, separately scoped functional
 outage proof, fresh Redis lifecycle, and teardown are verified. The local
 executor gate and fresh five-cluster local acceptance passed, including both
 parent outages and separately recorded datastore persistence. Both deployed
-environments have been removed through their owners. Final local security review
-found Radius's default data-API Secret access; the declarative runtime-identity
-correction is implemented and reviewed, but still requires fresh live proof.
+environments have been removed through their owners. Radius's default data-API
+Secret access is corrected and proved in final fresh run `8f76f612...`, including
+after API restart. No implementation finding remains open within the approved
+demo scope. Accepted limitations below remain limitations, not production claims.
 
 ## Phase 0 - Foundations
 
@@ -85,7 +86,7 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F051 | 4 | High correctness | `harness/test-e2e.py` | paused_reconciler | A 30-second drain deadline leaves no room for the Pod's own 30-second shutdown grace and controller latency | Resolved: bounded grace-aware drain, regressions/review, and live shared-b readiness while data paused followed by restored application proof |
 | F052 | 4 | External interruption | Azure governance automation | 2026-09-10T00:06Z | All five project AKS clusters and three PostgreSQL servers were stopped during acceptance despite requested tags | Normal scoped restoration, preserved interrupted state, and reviewed owner-ordered reset completed; all three fresh operations then succeeded; governance controls unchanged |
 | F053 | reset | External metadata change | Two management state disks | 2026-09-10T00:55Z | State disks lost required tags after preview, so strict cleanup stopped before mutations | Exact PV/PVC/CSI ownership verified; only required tags merged, properties preserved; reviewed reset and exact disk absence subsequently verified |
-| F054 | reset | High correctness | `infra/radius/recipes/azure/redis.bicep` | result.resources | Radius cannot resolve a deletion API version for tracked Microsoft.Resources/tags metadata | Resolved for fresh resources: real create/tag/idempotence/tracking and Radius deletion passed; final native-owner cleanup and unchanged-resource postconditions verified; old deployed records still require explicit cleanup |
+| F054 | reset | High correctness | `infra/radius/recipes/azure/redis.bicep` | result.resources | Radius cannot resolve a deletion API version for tracked Microsoft.Resources/tags metadata | Resolved: fresh create/tag/idempotence/tracking/deletion passed; historical affected records were removed during reviewed whole-demo teardown and independent Azure absence verification |
 | F055 | 4 | High correctness | `harness/test-e2e.py` | initial endpoint discovery | A 30-second endpoint-export wait is shorter than the five-cluster exporter's actual 90-second scan | Resolved: bounded discovery, 90-second-delay regression, unchanged convergence deadlines, 185 tests/211 subtests, clean fix reviews, and live existing-tenant verification passed |
 | F056 | lifecycle gate | Medium observability | One-off F054 gate | command logging | Setting the command logger to CRITICAL hid the first gate's already-redacted failure diagnostics | Resolved: standard ERROR diagnostics, 165 focused tests, clean direct walkthrough/security review; next live attempt exposed the actual F057 error |
 | F057 | lifecycle gate | Medium correctness | One-off F054 gate | group-show preflight | The wrapper supplied `--group` while the caller also supplied a positional group name, which Radius rejects | Resolved: duplicate removed, explicit scope retained, run-path regression/reviews passed; live group-show now succeeds |
@@ -94,11 +95,11 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F060 | lifecycle gate | Medium compatibility | Radius 0.60.2 CLI | unbound SecretStore deletion | `resource delete` tries to parse the generated empty application string before calling the deletion API | Resolved: reviewed native owner-API cleanup and actual postconditions passed; gate helper finalized with 46 tests and clean direct walkthrough/security review |
 | F061 | final cleanup | Medium correctness | Shared empty-owner recovery helper | managed-node inventory | The copied one-off helper queried a deleted node group after its temporary Reader grant was correctly removed with it | Resolved: existing live-AKS-first pattern retained every live ownership check; no extra grants; direct walkthrough/security review and actual corrected preview passed |
 | F062 | 5 | High security | `harness/local/cluster-gate.py` | 645-655 (initial) | Secret-denial checks changed the target namespace but always impersonated `default:default`, missing the protected namespaces' default accounts | Resolved: corrected source/target/get-list-watch matrix, 18 entrypoint refusal cases, clean fix review, and live denial checks passed before child submission |
-| F063 | 5 | High security | `operations/local/bootstrap.py`, local cluster Recipe | kubeadm patches | kind 0.31 emits kubeadm v1beta3, so v1beta4 patches were ignored: management Secret encryption was inactive and the child SAN patch would also miss | Management encryption resolved by reviewed fresh bootstrap and actual ciphertext proof before Radius; child SAN schema/loopback names corrected and mock-tested, live child TLS proof pending |
-| F064 | 5 | High correctness | `harness/local/cluster-gate.py` | custom-resource submission | Generic `rad resource create` sends the legacy API version, so the custom cluster's 2025 API rejects it before provisioning | Use the exact authenticated Radius PUT with explicit registered version, then poll actual provisioning while observing the executor; 58 local tests and fix review pass; live retry pending |
-| F065 | 5 | High correctness | `operations/local/common.py` | native PUT media type | `kubectl replace --raw` did not send the JSON media type required by dynamic-RP | Explicit JSON over project CA/client-certificate authenticated HTTP transport; no child/state created by the rejected request; live retry pending |
+| F063 | 5 | High security | `operations/local/bootstrap.py`, local cluster Recipe | kubeadm patches | kind 0.31 emits kubeadm v1beta3, so v1beta4 patches were ignored: management Secret encryption was inactive and the child SAN patch would also miss | Resolved: actual ciphertext verified before Radius in fresh bootstraps; gate d3fd13ce214f proved child CA/name verification and wrong-name rejection; full deployments retain verified child transport |
+| F064 | 5 | High correctness | `harness/local/cluster-gate.py` | custom-resource submission | Generic `rad resource create` sends the legacy API version, so the custom cluster's 2025 API rejects it before provisioning | Resolved: authenticated versioned JSON PUT and actual executor observation passed live gate d3fd13ce214f; later full deployments use the typed Bicep path |
+| F065 | 5 | High correctness | `operations/local/common.py` | native PUT media type | `kubectl replace --raw` did not send the JSON media type required by dynamic-RP | Resolved: explicit JSON and project CA/client-certificate transport passed actual creation and deletion; rejected earlier request created no child/state |
 | F066 | 5 | Medium security | `operations/local/common.py` | unreleased transport candidate | Kubernetes ApiClient still followed redirects when connection retries were zero, allowing authenticated PUT replay | Candidate replaced before live use with HTTPX `follow_redirects=False`; real-client 301/302/307/308 same/foreign-origin and disconnect tests prove one request only; fix review clean |
-| F067 | 6 | High security | `operations/local/runtime-images.py` | initial image inspection | Candidate-executed hash reporting did not bind inspection to the guarded build or verify administrative binaries | Require recorded immutable build IDs and trusted host-side filesystem/tool/Python-runtime hashing before import smoke tests; 17 focused tests and independent fix review pass; actual builds pending |
+| F067 | 6 | High security | `operations/local/runtime-images.py` | initial image inspection | Candidate-executed hash reporting did not bind inspection to the guarded build or verify administrative binaries | Resolved: immutable build IDs and host-side source/tool/interpreter/extension verification passed actual native builds, including final aac195e images, before loading or import smoke checks |
 | F068 | 6 | High correctness | `operations/local/module-server.py` | ConfigMap mount handling | Rejecting all symlinks also rejects Kubernetes' legitimate atomic ConfigMap projection | Fixed: containment-checked AtomicWriter projection and checksum verification; startup/escape regressions and fix review pass |
 | F069 | 6 | High correctness | Local provider and exporter | aggregate endpoint publication | Provider-generated `endpoints.json` conflicts with the exporter's strict ownership marker | Fixed: exporter is sole aggregate publisher; provider writes per-slot records only; ownership regression and review pass |
 | F070 | 6 | High correctness | `harness/local/export-state.py` | child Radius ownership | Export validation expects different application/environment owners from the provider's `cluster-SLOT`/`provision-SLOT` records | Fixed: exact real owners validated, with producer-shaped positive and wrong-owner refusal tests |
@@ -117,10 +118,12 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F083 | 6 | Medium verification | Private persistence probe | Pod termination | API-restart helper overrides datastore shutdown grace to five seconds while the candidate claimed graceful shutdown | Preserve the configured Pod grace and UID precondition; explicitly make no clean-exit/crash-durability claim; corrected before datastore mutation |
 | F084 | 6 | Medium verification | Private persistence probe | Durable API snapshots | Reduced status projections omit persisted histories and report details | Compare complete management/control API fields and full paginated histories plus complete data responses; actual bound rerun passes |
 | F085 | 6 | Medium verification | Private persistence evidence | Verifier provenance | Original supplemental result names only application source and omits post-state digests | Separate rerun binds verifier/tests/helpers/inputs to hashes and clean source, retaining post-API and post-database digests; independently verified |
-| F086 | 6 | Medium security | Shared data workload and provider prerequisites | API Kubernetes identity | Radius generates namespace-wide Secret-reader permissions for the mounted data-API account, exposing parent `CONTROL_DSN` through the Kubernetes API | Use a distinct ConfigMap-get-only runtime account through the supported Pod override; shared Azure/local source and actual-token denial tests reviewed; fresh live proof pending |
+| F086 | 6 | Medium security | Shared data workload and provider prerequisites | API Kubernetes identity | Radius generates namespace-wide Secret-reader permissions for the mounted data-API account, exposing parent `CONTROL_DSN` through the Kubernetes API | Resolved: distinct ConfigMap-get-only runtime account through supported Pod override; final fresh all-mode run proves four actual permission observations across both pairs and API replacement; independent live security review accepted |
 | F087 | 6 | Medium verification | Private PostgreSQL persistence snapshot | Security catalogs | Role/RLS flags omit policy predicates, memberships, and object ACLs | Include ordered policies, memberships, schema/relation/column/function privileges and definitions; all three real PostgreSQL queries and bound persistence rerun pass |
 | F088 | 6 | Medium correctness | `operations/local/cleanup.py` | Verification path input | Documented repository-relative record path was interpreted as state-relative twice | Normalize only the known `.state/local` prefix, then retain private-path/traversal/symlink guards; exact documented command and entrypoint regression pass |
 | F089 | 6 | Medium verification | Data API permission probe | Named grants | Unnamed authorization reviews miss resource-name-limited token minting or ConfigMap mutation grants | Add named account/map/parent-Secret reviews and ConfigMap watch checks; executable probe and named-grant refusal tests and fix review pass |
+| F090 | 7 | Medium documentation | `docs/local-provider.md` | Fresh-run prerequisites | Fixed state paths make the retained historical checkout unsuitable for the fresh command sequence | Require a new clone/worktree without `.state/local`, preserve original evidence, and verify old cluster absence before using shared names/ports |
+| F091 | 7 | Medium documentation | `docs/local-provider.md` | Docker host scope | Generic Docker Desktop wording hides the deliberately account-specific socket endpoint | State the exact verified-host socket and non-portable-host scope; no global defaults or runtime endpoint behavior changed |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -1562,3 +1565,56 @@ verified deleted deployment were archived under
 fault journals. Their original acceptance references describe their former
 paths; archived bytes and retirement hashes preserve the evidence without
 letting obsolete Pod identities become active fault-cleanup inputs.
+
+### Final local acceptance and closeout, 2026-09-11
+
+Final source **`aac195e622c02409f5a8aa52ba7478194236b4a4`** was committed before
+its native images were built, host-content inspected, and deployed into a fresh
+encrypted management cluster. No tracked source changed during acceptance.
+Full `all` run **`8f76f612c91e440684762b732ecd29c2` passed** from
+**12:34:21Z to 13:01:05Z**, proving the entire five-cluster scenario again after
+the API-identity correction. Its evidence SHA-256 is
+`74956a726654b57ab77a685abc070b19f4a4f9c000e8dd312a7b307e9deecb82`.
+
+Four data-API permission observations cover first shared admission, shared reuse,
+the isolated pair, and the replacement shared API Pod during the parent outage.
+Each ran 46 broad/name-scoped authorization checks: only ConfigMap `get` was
+allowed. Actual parent-Secret GET and namespace Secret LIST returned authenticated
+403 responses. The generated Secret-reader account was not the Pod identity.
+The targeted final live security review accepted F086/F089 as resolved.
+
+Data continuity lasted 64.54 and 64.48 seconds during the two actual parent-link
+faults. Management reporting recovered in 2.88 seconds; the data API restarted
+without its control database in 6.23 seconds. Latest-only control catch-up passed.
+Original rules were restored exactly, with physical restoration taking 2.33 and
+2.49 seconds. Full source/image, shared/isolated topology, configured values,
+counters, authentication, pagination, and idempotency checks also passed.
+Earlier bound datastore persistence covers unchanged Recipes, SQL, and data
+storage; it is not presented as a second persistence run on this later commit.
+
+Normal final cleanup **`0007b49d904f`** ran from **13:06:43Z to 13:11:53Z**.
+All child applications and clusters were removed through their Radius owners
+before management bootstrap deletion. Independent verification at
+**13:13:00Z** confirmed all five original node IDs and project nodes absent,
+retaining all **13 unrelated containers**. The cleanup record hashes to
+`ea8d2c6c8de2e17b241f1d4b0f9895877c68ddbaff9a7d89cad6bf1fdaa24e01`;
+verification output is `evidence/cleanup-0007b49d904f-verified.log`.
+
+Azure and local active deployments are gone. Local images/cache, the shared kind
+network, and protected historical state remain intentionally. Azure's protected
+soft-deleted vault retains its scheduled September 17 purge date. Old failed
+records, narrower proof scopes, and accepted limitations are unchanged. The
+final handoff updates current docs and preserves the CI/source-check contract;
+it does not reopen deferred SQL/authentication/reconciliation simplification.
+
+Final handoff review corrected F090/F091: the fresh-run instructions now require
+a separate clone/worktree and explicitly identify the verified user's Docker
+socket. They do not suggest clearing historical state or running concurrent
+deployments with the same names/ports. The documentation's claim is a reproducible
+procedure on that verified host, not cross-user/platform portability.
+
+Handoff rubber-duck/security reviews and the documentation fix review completed
+without remaining issues. The final architecture/Azure/limitations maps link to
+the detailed contracts rather than duplicating their configuration. All 73 local
+links in the changed documentation resolve; `AGENTS.md` remains a 107-line map.
+No host acceptance/export process remains running.

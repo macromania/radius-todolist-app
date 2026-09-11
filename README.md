@@ -6,7 +6,10 @@ functional behavior are proven in separately scoped runs:** two shared tenants,
 one isolated tenant, configuration/counter isolation, and both parent outages.
 The corrected Redis create/tag/delete lifecycle and final Azure teardown are
 also verified. Local Radius-owned cluster creation, access, and deletion are
-proven; the full local tenant flow is being implemented.
+proven. The complete five-cluster local scenario passed with shared reuse,
+isolation, both parent outages, and the corrected data-API credential boundary.
+Datastore Pod-replacement persistence was verified separately. Both demonstrated
+environments have been removed; protected state is historical, not a live demo.
 
 The runtime, platform operations, and acceptance harness are grouped separately.
 Deeper SQL, authentication, provisioning, and reconciliation simplification is
@@ -111,19 +114,29 @@ make install-radius ENV=azure CONFIRM_AZURE=yes
 Reviewed Recipes, verified image contents, and the validated operator
 configuration are required before `make deploy-management CONFIRM_AZURE=yes`.
 That target **submits** the operator Job; verify its completion separately.
-Local build/setup/deployment/acceptance/cleanup targets are implemented, but
-their full live acceptance is still in progress. There is no automatic
+Local build/setup/deployment/acceptance/cleanup targets are implemented and
+verified. There is no automatic
 certificate-renewal target. The [Azure contract](docs/azure-infrastructure.md) describes the
 integration gates; [FINDINGS.md](FINDINGS.md) records what actually ran.
 The [local executor gate](docs/local.md) passed real cluster creation, encrypted
 state, child TLS, PostgreSQL/Envoy connectivity, and owner-driven deletion.
-The full five-cluster tenant scenario and its local outages remain unproven.
+The final local full run used source `aac195e`; its API identity checks also ran
+after a data API restart during the control-database outage.
 See [local provider stages](docs/local-provider.md),
 [local Recipes](docs/local-recipes.md), and
 [local ownership-ordered cleanup](docs/local-cleanup.md) for their exact contracts.
 The fresh admission run stopped on harness endpoint discovery after all three
-operations succeeded. A separate `verify-existing` run passed the remaining
+Azure operations succeeded. A separate Azure `verify-existing` run passed the remaining
 functional and outage checks; it does not claim another fresh admission.
+That historical Azure proof predates the final shared data-API identity fix,
+which was compiled for both environments and proved live on local Radius.
+
+For a fresh local deployment, use the ordered prerequisites and commands in
+[local provider stages](docs/local-provider.md#fresh-local-run) from a new
+clone/worktree on the verified host. Docker access is deliberately scoped to
+the recorded user's socket; this is not a portable-host setup script. Existing
+attempt files deliberately block automatic replay; do not reuse deleted cluster
+identities or bulk-remove state to bypass that guard.
 
 The harness remains explicit:
 
@@ -155,9 +168,12 @@ production tenant authentication or spending controls.
 
 ## State and cleanup
 
-`.state/azure/` is essential deployment state: ownership records, protected
-credentials/kubeconfigs, operator configuration, and evidence. Do not move or
-bulk-delete it. `operator-state` and `provisioner-state` are distinct cluster
+`.state/azure/` and `.state/local/` retain ownership records, protected
+credentials/kubeconfigs, operator configuration, and evidence from the removed
+deployments. Do not use their endpoints as live access or bulk-delete them.
+Local Docker images/cache and the shared `kind` network are intentionally retained.
+Azure's protected soft-deleted vault is scheduled for purge on September 17;
+it is not claimed purged. `operator-state` and `provisioner-state` are distinct cluster
 volumes. Preserve their names and credential permission checks.
 
 Generated `.tgz` files and `.state/check/` compiler/test scratch are disposable
@@ -182,5 +198,6 @@ Read [cleanup ownership and verification](docs/cleanup.md) first. Keep the new
 Do not claim teardown until the actual resources are verified gone.
 
 Further reading: [decisions](DECISIONS.md), [findings](FINDINGS.md),
+[architecture](docs/architecture.md), [accepted limitations](docs/limitations.md),
 [application contracts](docs/contracts.md), and
 [provisioning sequence](docs/provisioning.md).

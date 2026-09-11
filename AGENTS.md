@@ -6,11 +6,12 @@ example; its scripts and deployment targets are intentionally removed.
 
 ## Scope and current status
 
-- Azure is complete. Local provisioning is implemented; full live acceptance is pending.
+- Azure and full local functional/outage scenarios are proven; see the recorded run scopes.
 - Azure onboarding, functional/outage behavior, and fresh Redis lifecycle are proven.
-- Azure teardown is verified; archived Azure state is not a live deployment.
+- Azure and local teardown are verified; retained state is not a live deployment.
 - Use [FINDINGS.md](FINDINGS.md) for actual results, not assumptions from code.
 - [DECISIONS.md](DECISIONS.md) records approved choices and accepted limitations.
+- [docs/architecture.md](docs/architecture.md) and [docs/limitations.md](docs/limitations.md) summarize the system and its boundaries.
 - The user deferred deeper SQL/code simplification until end-to-end proof.
 - A directory move is not permission to redesign authentication or reconciliation.
 
@@ -85,9 +86,10 @@ Do not suppress image build/push output or reuse pre-change results as new proof
 - Repeated control polls preserve control-owned updates.
 - Data API requests depend only on local ConfigMaps, Redis, and their own key.
 - Keep singleton locking and explicit interrupted-operation behavior.
-- Keep private datastores, verified PostgreSQL TLS, and Redis `tls: true`.
+- Keep Azure PostgreSQL verified TLS and Redis `tls: true`; local non-TLS stays explicit and internal.
 - Keep the lowercase `redis` connection and existing password encoding.
 - Keep API/provisioner identities and images separate.
+- Data API uses `data-api-runtime` with ConfigMap get only, never namespace Secret access.
 - Preserve `fsGroupChangePolicy: OnRootMismatch` and private credential modes.
 
 ## State, safety, and cleanup
