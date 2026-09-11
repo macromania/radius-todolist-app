@@ -5,7 +5,8 @@ provisions the child clusters and their applications. **Azure onboarding and
 functional behavior are proven in separately scoped runs:** two shared tenants,
 one isolated tenant, configuration/counter isolation, and both parent outages.
 The corrected Redis create/tag/delete lifecycle and final Azure teardown are
-also verified. Local is not implemented yet.
+also verified. Local Radius-owned cluster creation, access, and deletion are
+proven; the full local tenant flow is being implemented.
 
 This pass organizes the repository, not the application design. SQL,
 authentication, provisioning, and reconciliation simplification are deferred
@@ -112,9 +113,9 @@ That target **submits** the operator Job; verify its completion separately.
 There is no implemented local deployment target or automatic certificate-renewal
 target. The [Azure contract](docs/azure-infrastructure.md) describes the
 integration gates; [FINDINGS.md](FINDINGS.md) records what actually ran.
-The [local executor gate](docs/local.md) now has staged preparation, image,
-bootstrap, and one-child commands. Its source is validated offline; live local
-feasibility and the complete tenant demo are not yet proven.
+The [local executor gate](docs/local.md) passed real cluster creation, encrypted
+state, child TLS, PostgreSQL/Envoy connectivity, and owner-driven deletion.
+The full five-cluster tenant scenario and its local outages remain unproven.
 The fresh admission run stopped on harness endpoint discovery after all three
 operations succeeded. A separate `verify-existing` run passed the remaining
 functional and outage checks; it does not claim another fresh admission.

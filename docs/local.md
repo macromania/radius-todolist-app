@@ -1,10 +1,10 @@
 # Local milestone 5: one-child feasibility gate
 
-**Status: source and native images are validated; live feasibility is not yet proven.**
-The first management installation stopped on an actual encryption check. A
-reviewed fresh bootstrap now passes encryption and Radius/socket checks. The
-first child request was rejected on an API-version mismatch before creation;
-its corrected versioned submission is awaiting live proof. This is
+**Status: the real one-child feasibility gate passed.** Run `d3fd13ce214f`
+completed on September 10, 2026, with source `9190bb0`. It proved the actual
+Radius Terraform execution, encrypted state, child access, workload/connectivity,
+and owner-driven deletion described below. The child and its credentials/state
+are gone; management remains for the full local implementation. This is
 not the full local tenant demo or a `LocalProvider`. Azure is closed and must not
 be recreated for this gate.
 
@@ -103,7 +103,7 @@ context, global Radius configuration, Docker configuration, SSH directory, or
 human registry credentials are changed/mounted. All host CLI commands use explicit
 project names, context/config paths, and an isolated `.state/local/home`.
 
-## What a live pass must prove
+## What the live pass proved
 
 The gate refuses an existing child, existing access Secret, or existing Terraform
 state instead of adopting it. During the custom-resource request it observes a
@@ -237,10 +237,39 @@ Management teardown remains parent-owned and is not implemented here.
 `make check` and CI include the cloud-free local Python tests, Terraform
 mock-provider validation, and Recipe shell checks; they never create clusters.
 
-No schema change or Azure operation is needed. Before accepting milestone 5,
-the parent must resolve any observed VM socket/Unix permission, image architecture,
-kubeadm/etcd, module URL, Radius state, TLS/routing, scheduling, PostgreSQL, or Envoy
-failure with actual evidence. Offline success is not evidence for those live seams.
+## Full-demo runtime images
+
+The API and provisioner are separate native images, distinct from the gate's
+executor/operator tools. The API retains its explicit public-source allowlist.
+The local provisioner adds Kubernetes/Radius/Bicep tools and administrative code,
+but no Docker socket or Azure login. Prepare them from committed image inputs:
+
+```sh
+uv run python operations/local/runtime-images.py build --execute
+uv run python operations/local/runtime-images.py inspect --execute
+```
+
+These commands never publish images to a registry. Tags include the full source
+commit, and an existing tag cannot be overwritten. Inspection requires the
+recorded build IDs and operates on those immutable IDs, not a mutable tag.
+Trusted host code hashes an exported, never-started container filesystem,
+including source files, pinned administrative tools, and the Python runtime.
+Import smoke checks run afterward with no network or host mounts. Only both
+successful inspections set `content_verified` in private
+`.state/local/runtime-images.json`. A changed digest or candidate-produced
+checksum report alone is not accepted.
+
+The manifest records each image's `reference`, `image_id`, `source_hashes`,
+extension members, tool hashes, and Python-runtime fingerprint. Full-demo
+deployment and acceptance must verify those artifacts separately; building an
+image does not create tenants or prove the five-cluster scenario.
+
+No schema change or Azure operation was needed. The real gate resolved the
+observed kubeadm and request-transport issues with independently reviewed
+fixes and retained failed records. Both phase closeout reviews passed.
+The proof is limited to one child and disposable connectivity fixtures: it
+does not establish the full local provider, persistent datastore Recipes,
+five-cluster tenant scenario, or local outage behavior.
 
 ## Offline validation
 

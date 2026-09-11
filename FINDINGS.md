@@ -93,6 +93,7 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F064 | 5 | High correctness | `harness/local/cluster-gate.py` | custom-resource submission | Generic `rad resource create` sends the legacy API version, so the custom cluster's 2025 API rejects it before provisioning | Use the exact authenticated Radius PUT with explicit registered version, then poll actual provisioning while observing the executor; 58 local tests and fix review pass; live retry pending |
 | F065 | 5 | High correctness | `operations/local/common.py` | native PUT media type | `kubectl replace --raw` did not send the JSON media type required by dynamic-RP | Explicit JSON over project CA/client-certificate authenticated HTTP transport; no child/state created by the rejected request; live retry pending |
 | F066 | 5 | Medium security | `operations/local/common.py` | unreleased transport candidate | Kubernetes ApiClient still followed redirects when connection retries were zero, allowing authenticated PUT replay | Candidate replaced before live use with HTTPX `follow_redirects=False`; real-client 301/302/307/308 same/foreign-origin and disconnect tests prove one request only; fix review clean |
+| F067 | 6 | High security | `operations/local/runtime-images.py` | initial image inspection | Candidate-executed hash reporting did not bind inspection to the guarded build or verify administrative binaries | Require recorded immutable build IDs and trusted host-side filesystem/tool/Python-runtime hashing before import smoke tests; 17 focused tests and independent fix review pass; actual builds pending |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -1218,3 +1219,50 @@ The integrated check passed 592 tests and 245 subtests, with 50 explicit
 dependency skips and both Terraform mock-provider tests. The final transport
 uses the project's existing mutual-TLS credentials, not a new identity or
 privilege grant; no container image or installed Recipe change is required.
+
+### Local milestone 5 passed, 2026-09-10
+
+Run `d3fd13ce214f` passed from 18:14:35Z to 18:18:18Z, after source `9190bb0`
+was committed at 18:14:18Z. It observed the actual kind-provider process in
+management `dynamic-rp`, verified Radius-owned Terraform state and encrypted
+Secrets, and checked the child's original CA and explicit server name, including
+a real rejection of an incorrect name. Child Radius and its workload were
+deployed. The child reached password-authenticated parent PostgreSQL through
+internal port 31543, rejected a wrong password, and served the run-specific
+Envoy response through reserved loopback port 35491.
+
+The same run deleted the child through Radius and verified child Docker,
+Terraform state, and access-Secret absence, with the original containers
+unchanged. Independent checks confirmed those absences and management
+readiness. The original run hash is
+`3b805b31b35844a4e859f41d2bb670739c609a78d6125938cef52a2b99544b5e`;
+`evidence/milestone5-proof.json` records the source hashes, timestamps, and
+actual image inspection. Failed earlier runs were not relabeled.
+
+Independent live-phase rubber-duck and security reviews found no blockers in
+this bounded proof. Management remains intentionally for the next phase.
+The full local provider, persistent PostgreSQL/Redis/gateway Recipes,
+five-cluster shared/isolated scenario, and both outages are still pending.
+
+### Full local implementation in progress
+
+Local Recipes, provider wiring, and acceptance/outage support are being added
+behind the proved cluster mechanism. Application image preparation remains
+separate: native API and privileged provisioner images are built locally, not
+pushed to an external registry. Child image loading belongs to the Radius
+cluster Recipe; the public API and runtime provisioner receive no Docker socket.
+
+The image-boundary review found F067 before any new runtime build. Inspection
+now requires the successful build's exact immutable image IDs. Trusted host
+code hashes exported, never-started container filesystems: source files,
+vendor-pinned administrative binaries, extension payloads, and the interpreter/
+dependency files. The API privilege exclusion is also checked from that export.
+Only afterward do image-executed import smoke checks run by immutable ID.
+Seventeen tests cover missing build evidence, changed tags/runtime, replaced
+administrative tools, host-side hashes, and API exclusion. The direct walkthrough and independent security
+fix review were clean. This source verification is not a local deployment claim.
+
+The host-side export parser also ran against the retained immutable Azure API
+image without starting its container. It matched all 23 source/manifest files
+and hashed the interpreter/dependency tree. This checks the actual export/read
+mechanism only; it is not a new native runtime image build or full-local proof.
