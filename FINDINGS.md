@@ -1407,3 +1407,11 @@ The focused provider/harness suite passed 126 tests and 13 subtests; the direct
 walkthrough and security fix review were clean. Failed operation/evidence and
 the existing shared resources remain pending explicit owner-ordered reset,
 not automatic provisioning recovery.
+
+The exact missing PVC Role/RoleBinding has now been applied to the existing
+shared data namespace only, after live node-ID, cluster-UID, namespace-UID,
+project-label, and name-absence checks. Actual authorization reads confirmed
+get/create/delete PVC permission for applications RP. This permits its normal
+owner cleanup; it did not replay the failed deployment or grant StatefulSet,
+cluster-wide, or application-API privileges. Protected
+`diagnostics/redis-storage-permission-proof.json` records the scope.
