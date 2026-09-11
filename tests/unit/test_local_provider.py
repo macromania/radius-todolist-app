@@ -882,6 +882,11 @@ def test_child_bootstrap_configures_both_stock_rps_without_socket_or_image_repla
         assert pod["initContainers"][0]["volumeMounts"] == [
             {"name": "terraform", "mountPath": "/terraform"}
         ]
+        assert pod["initContainers"][0]["command"] == ["python3", "-c", local.TERRAFORM_INIT]
+        assert pod["initContainers"][0]["securityContext"]["capabilities"] == {
+            "drop": ["ALL"],
+            "add": ["CHOWN"],
+        }
         assert pod["volumes"][0]["projected"]["defaultMode"] == 0o440
         assert pod["containers"][0]["volumeMounts"][0]["mountPath"] == (
             "/var/run/secrets/kubernetes.io/serviceaccount"

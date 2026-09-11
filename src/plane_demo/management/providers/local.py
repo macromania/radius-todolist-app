@@ -55,15 +55,22 @@ if len(archive)>40000000 or hashlib.sha256(archive).hexdigest()!=expected:
 binary=zipfile.ZipFile(io.BytesIO(archive)).read("terraform")
 for name in ("/terraform","/terraform/.terraform-global"):
     Path(name).mkdir(exist_ok=True,mode=0o700)
+    os.chown(name,0,0)
     os.chmod(name,0o700)
-    os.chown(name,65532,65532)
 for name in ("/terraform/terraform","/terraform/.terraform-global/terraform"):
+    if Path(name).exists():
+        os.chown(name,0,0)
     Path(name).write_bytes(binary)
     os.chmod(name,0o700)
     os.chown(name,65532,65532)
 marker=Path("/terraform/.terraform-global/.terraform-ready")
+if marker.exists():
+    os.chown(marker,0,0)
 marker.touch(mode=0o600)
+os.chmod(marker,0o600)
 os.chown(marker,65532,65532)
+for name in ("/terraform/.terraform-global","/terraform"):
+    os.chown(name,65532,65532)
 """
 
 

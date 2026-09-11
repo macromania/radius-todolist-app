@@ -101,6 +101,7 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F072 | 6 | High correctness | `operations/local/cleanup.py` | Terraform ownership inventory | Full-demo state includes `terraform_data.images[0]`, but cleanup accepts only the two gate resources | Fixed: exact third image-import owner and configured inputs checked; arbitrary extra state remains refused |
 | F073 | 6 | High correctness | `providers/local.py` | environment registration | Radius 0.60.2 generic create does not support the supplied `--group` flag | Removed unsupported flag while retaining the exact seeded workspace scope; actual command-path tests and fix review pass |
 | F074 | 6 | Medium correctness | Runtime image and acceptance source manifests | copied local overlay | Host-side image inspection found the copied `dynamic-rp-overlay.yaml` missing from both expected source lists | Include the actual copied YAML in worker build/acceptance provenance, never the API; original guard and failed build retained |
+| F075 | 6 | High correctness | `providers/local.py` | Terraform init permissions | Root with only CHOWN cannot chmod a volume already owned by UID 65532 | Take ownership before mode changes, seed verified binaries, and hand ownership back last; no capabilities added; real restricted-container and management-RP checks pass |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -1314,3 +1315,25 @@ missing or changed files (F074). Both worker source manifests now include that
 real input, with a regression confirming it remains excluded from the API.
 No image was loaded or deployed from the incomplete build, and its immutable
 tags are not overwritten. The corrected committed source will receive new tags.
+
+The corrected `114e118` native images passed trusted host filesystem, tool,
+interpreter, extension, and source checks, followed by import smoke checks.
+They were loaded into management only. All four new immutable module servers
+became ready. Full setup then stopped at the applications RP's Terraform init
+container, before any tenant, database, PVC, or child creation.
+
+F075 was a Unix ownership ordering error: the init had only CHOWN, not the
+capability to chmod another UID's files. The fix takes ownership of the fixed
+Terraform paths before mode changes and returns directory ownership last.
+It adds no capability, socket, host mount, or credential access. The exact init
+ran twice in a real restricted Linux container, with only CHOWN and a
+UID-65532-owned tmpfs, and produced the expected final private modes/ownership.
+
+Seventy-one provider tests and the direct walkthrough/security fix review
+passed. A separately guarded, child-free/state-free operational repair applied
+that same initializer to management's applications RP. The live process now
+runs as UID/GID 65532 and executes Terraform 1.15.8 from its mode-0700 layout.
+Failed setup inputs and inspected image records are retained under
+`history/terraform-init-permission/`. Only the two unchanged setup attempt files
+were cleared after those checks; no API onboarding operation was replayed.
+The privileged source must be rebuilt before proceeding to child provisioning.
