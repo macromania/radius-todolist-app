@@ -614,6 +614,8 @@ class ExportTests(LocalStateCase):
         for field, suffix in (
             ("environment", "/Applications.Core/environments/management"),
             ("application", "/Applications.Core/applications/management"),
+            ("environment", "/Applications.Core/environments/provision-shared-data"),
+            ("application", "/Applications.Core/applications/cluster-shared-data"),
         ):
             changed = copy.deepcopy(records)
             changed["value"][0]["properties"][field] = export.RESOURCE_PREFIX + suffix
@@ -622,6 +624,14 @@ class ExportTests(LocalStateCase):
                 self.assertRaisesRegex(shared.ExportError, "resource_identity_mismatch"),
             ):
                 subject.resource_inventory({})
+
+    def test_aggregate_endpoints_without_export_generation_are_not_adopted(self):
+        path = self.write("endpoints.json", {"pairs": {}})
+        original = path.read_bytes()
+        with self.assertRaisesRegex(export.Error, "local_endpoints_without_owned_generation"):
+            self.exporter()
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(self.operator.calls, [])
 
     def test_containerd_manifest_digest_is_mapped_using_actual_raw_config_bytes(self):
         running, digest = self.manifest_image()
@@ -1180,13 +1190,17 @@ class LocalRunnerTests(LocalStateCase):
             {"host": self.operator.addresses["shared-control"], "port": 31543, "tls": False},
         )
         self.assertTrue(observed["data"]["redis"]["wrong_password_rejected"])
-        self.operator.postgres_port = 5432
-        with self.assertRaisesRegex(faults.AcceptanceError, "datastore_endpoint_mismatch"):
-            subject.workload_evidence("shared")
-        self.operator.postgres_port = 31543
-        self.operator.postgres_host = self.operator.addresses["management"]
-        with self.assertRaisesRegex(faults.AcceptanceError, "datastore_endpoint_mismatch"):
-            subject.workload_evidence("shared")
+        for host, port in (
+            (self.operator.addresses["shared-control"], 5432),
+            (self.operator.addresses["management"], 31543),
+            (self.operator.addresses["isolated-1-control"], 31543),
+            ("postgresql.radplanes-local-shared-control-control.svc.cluster.local", 31543),
+            ("8.8.8.8", 31543),
+        ):
+            with self.subTest(host=host, port=port):
+                self.operator.postgres_host, self.operator.postgres_port = host, port
+                with self.assertRaisesRegex(faults.AcceptanceError, "datastore_endpoint_mismatch"):
+                    subject.workload_evidence("shared")
 
     def test_mapped_manifest_id_acceptance_still_executes_running_source_probe(self):
         running, digest = self.manifest_image()

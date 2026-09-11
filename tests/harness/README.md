@@ -112,8 +112,10 @@ rollouts may remain pending; authentication, changed ownership, transport,
 image/source, and key failures do not become an empty inventory or fake readiness.
 The exporter never edits live resources or global CLI/HOME configurations.
 
-Local parent PostgreSQL is the verified **parent node's private IPv4 address
-on port 31543**, with no host port mapping. This local transport intentionally
+Local PostgreSQL uses its owning cluster's verified **node private IPv4 address
+on port 31543**, with no host port mapping. A control API uses its own control
+node; its reconciler's management connection uses the management node. Neither
+connection uses a PostgreSQL DNS/5432 alias. This local transport intentionally
 uses `sslmode=disable`; Azure PostgreSQL verification is unchanged. A data API
 connects to its own namespaced Redis DNS endpoint on port 6379 with `tls: false`.
 The acceptance probe performs a real authenticated PING, rejects a wrong
