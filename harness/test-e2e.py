@@ -138,6 +138,7 @@ def local_source_hashes(component):
             *ROOT.glob("src/plane_demo/**/*.py"),
             *(ROOT / "operations" / name for name in COORDINATOR_SCRIPTS),
             *ROOT.glob("operations/local/*.py"),
+            *ROOT.glob("operations/local/*.yaml"),
             *(
                 path
                 for path in (ROOT / "infra/radius").rglob("*")

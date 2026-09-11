@@ -144,6 +144,7 @@ def expected_hashes(role: str) -> dict[str, str]:
             *ROOT.glob("src/plane_demo/**/*.py"),
             *(ROOT / "operations" / name for name in OPERATOR_FILES),
             *ROOT.glob("operations/local/*.py"),
+            *ROOT.glob("operations/local/*.yaml"),
         ]
         paths += [
             path

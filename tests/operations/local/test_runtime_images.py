@@ -155,6 +155,11 @@ def test_api_source_manifest_excludes_privileged_code():
     )
 
 
+def test_copied_local_overlay_is_part_of_the_worker_source_manifest():
+    assert "operations/local/dynamic-rp-overlay.yaml" in runtime.expected_hashes("provisioner")
+    assert "operations/local/dynamic-rp-overlay.yaml" not in runtime.expected_hashes("api")
+
+
 def test_inspection_requires_a_recorded_guarded_build(images, local_state):
     commands, _ = images
     (local_state / "runtime-images.json").unlink()

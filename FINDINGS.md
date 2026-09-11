@@ -100,6 +100,7 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F071 | 6 | High correctness | `harness/test-e2e.py` | local PostgreSQL identity | Local acceptance expects service DNS/5432 instead of the approved node-private-IP/31543 output | Fixed: exact target node IP and port 31543, foreign node/port refusal, and unchanged Azure checks |
 | F072 | 6 | High correctness | `operations/local/cleanup.py` | Terraform ownership inventory | Full-demo state includes `terraform_data.images[0]`, but cleanup accepts only the two gate resources | Fixed: exact third image-import owner and configured inputs checked; arbitrary extra state remains refused |
 | F073 | 6 | High correctness | `providers/local.py` | environment registration | Radius 0.60.2 generic create does not support the supplied `--group` flag | Removed unsupported flag while retaining the exact seeded workspace scope; actual command-path tests and fix review pass |
+| F074 | 6 | Medium correctness | Runtime image and acceptance source manifests | copied local overlay | Host-side image inspection found the copied `dynamic-rp-overlay.yaml` missing from both expected source lists | Include the actual copied YAML in worker build/acceptance provenance, never the API; original guard and failed build retained |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -1305,3 +1306,11 @@ declarations, dependency modules, type schemas, SQL, and public API image
 allowlist remain unchanged. These are source/readiness checks; the next
 boundary is a native image build, host-side content verification, management
 deployment, and actual five-cluster acceptance.
+
+The first native build completed both Docker images but correctly stopped at
+the host-side content guard. A second trusted export diagnosed exactly one
+extra copied file: `operations/local/dynamic-rp-overlay.yaml`; there were no
+missing or changed files (F074). Both worker source manifests now include that
+real input, with a regression confirming it remains excluded from the API.
+No image was loaded or deployed from the incomplete build, and its immutable
+tags are not overwritten. The corrected committed source will receive new tags.
