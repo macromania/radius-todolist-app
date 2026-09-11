@@ -89,7 +89,7 @@ def images(monkeypatch, local_state):
     return commands, bad
 
 
-@pytest.mark.parametrize("stage", ["build", "inspect"])
+@pytest.mark.parametrize("stage", ["build", "inspect", "load-management"])
 def test_preview_does_not_construct_commands(stage, monkeypatch):
     constructor = Mock(side_effect=AssertionError("Preview cannot invoke Docker"))
     monkeypatch.setattr(runtime, "Commands", constructor)
@@ -222,8 +222,7 @@ def test_host_parser_rejects_privileged_files_even_with_an_api_label(tmp_path, m
 )
 def test_host_parser_rejects_replaced_administrative_tools(tmp_path, monkeypatch, changed):
     pins = {
-        name: hashlib.sha256(name.encode()).hexdigest()
-        for name in runtime.TOOL_HASHES["arm64"]
+        name: hashlib.sha256(name.encode()).hexdigest() for name in runtime.TOOL_HASHES["arm64"]
     }
     monkeypatch.setitem(runtime.TOOL_HASHES, "arm64", pins)
     monkeypatch.setattr(runtime, "expected_hashes", lambda _: {})
@@ -238,3 +237,35 @@ def test_host_parser_rejects_replaced_administrative_tools(tmp_path, monkeypatch
             archive.addfile(member, io.BytesIO(data))
     with pytest.raises(common.LocalError, match="administrative tools"):
         runtime.rootfs_proof(path, "provisioner", "arm64")
+
+
+def test_only_verified_management_receives_runtime_images(images, local_state, monkeypatch):
+    from local_support import bootstrap
+
+    commands, _ = images
+    runtime.inspect_runtime(commands)
+    verify = Mock()
+    monkeypatch.setattr(bootstrap, "verify_management", verify)
+    original = commands.run.side_effect
+
+    def run(args, **kwargs):
+        if "exec" in args:
+            return "\n".join(runtime.references(REVISION).values())
+        return original(args, **kwargs)
+
+    commands.run.side_effect = run
+    runtime.load_management(commands)
+    loads = [call.args[0] for call in commands.run.call_args_list if call.args[0][0] == "kind"]
+    assert len(loads) == 2
+    assert all(
+        args[:5] == ["kind", "load", "docker-image", "--name", common.MANAGEMENT] for args in loads
+    )
+    assert verify.call_count == 2
+    assert (local_state / "runtime-images-loaded.json").exists()
+
+
+def test_uninspected_images_cannot_be_loaded_into_management(images):
+    commands, _ = images
+    with pytest.raises(common.LocalError, match="Inspect both"):
+        runtime.load_management(commands)
+    assert not any(call.args[0][0] == "kind" for call in commands.run.call_args_list)

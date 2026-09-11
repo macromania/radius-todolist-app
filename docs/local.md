@@ -247,6 +247,7 @@ but no Docker socket or Azure login. Prepare them from committed image inputs:
 ```sh
 uv run python operations/local/runtime-images.py build --execute
 uv run python operations/local/runtime-images.py inspect --execute
+uv run python operations/local/runtime-images.py load-management --execute
 ```
 
 These commands never publish images to a registry. Tags include the full source
@@ -263,6 +264,30 @@ The manifest records each image's `reference`, `image_id`, `source_hashes`,
 extension members, tool hashes, and Python-runtime fingerprint. Full-demo
 deployment and acceptance must verify those artifacts separately; building an
 image does not create tenants or prove the five-cluster scenario.
+The load stage rechecks the exact bootstrap node and inspected image IDs, loads
+only management, and checks its actual containerd references. Child image
+distribution remains a Radius cluster Recipe responsibility.
+
+The full operator sequence is also exposed through Make with an explicit local
+mutation opt-in:
+
+```sh
+make local-runtime-build CONFIRM_LOCAL=yes
+make local-runtime-inspect CONFIRM_LOCAL=yes
+make local-runtime-load CONFIRM_LOCAL=yes
+make local-setup CONFIRM_LOCAL=yes
+make local-deploy-management CONFIRM_LOCAL=yes
+make local-export
+make local-test CONFIRM_LOCAL=yes
+make local-clean-plan
+make local-clean CONFIRM_LOCAL=yes
+make local-verify LOCAL_CLEANUP_RECORD=.state/local/evidence/cleanup-RUN_ID.json
+```
+
+Export must continue during tenant onboarding so child endpoints become
+available. Use the exporter's watch mode as described in
+[the acceptance contract](../tests/harness/README.md). These full-demo commands
+are implemented interfaces, not yet a claim of passing full local acceptance.
 
 No schema change or Azure operation was needed. The real gate resolved the
 observed kubeadm and request-transport issues with independently reviewed

@@ -94,6 +94,11 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F065 | 5 | High correctness | `operations/local/common.py` | native PUT media type | `kubectl replace --raw` did not send the JSON media type required by dynamic-RP | Explicit JSON over project CA/client-certificate authenticated HTTP transport; no child/state created by the rejected request; live retry pending |
 | F066 | 5 | Medium security | `operations/local/common.py` | unreleased transport candidate | Kubernetes ApiClient still followed redirects when connection retries were zero, allowing authenticated PUT replay | Candidate replaced before live use with HTTPX `follow_redirects=False`; real-client 301/302/307/308 same/foreign-origin and disconnect tests prove one request only; fix review clean |
 | F067 | 6 | High security | `operations/local/runtime-images.py` | initial image inspection | Candidate-executed hash reporting did not bind inspection to the guarded build or verify administrative binaries | Require recorded immutable build IDs and trusted host-side filesystem/tool/Python-runtime hashing before import smoke tests; 17 focused tests and independent fix review pass; actual builds pending |
+| F068 | 6 | High correctness | `operations/local/module-server.py` | ConfigMap mount handling | Rejecting all symlinks also rejects Kubernetes' legitimate atomic ConfigMap projection | Restore containment-checked projected-file support with checksum verification; assigned for correction before deployment |
+| F069 | 6 | High correctness | Local provider and exporter | aggregate endpoint publication | Provider-generated `endpoints.json` conflicts with the exporter's strict ownership marker | Make the exporter the sole aggregate publisher; provider retains only per-slot endpoint records |
+| F070 | 6 | High correctness | `harness/local/export-state.py` | child Radius ownership | Export validation expects different application/environment owners from the provider's `cluster-SLOT`/`provision-SLOT` records | Validate those exact real owners and add producer-shaped fixtures |
+| F071 | 6 | High correctness | `harness/test-e2e.py` | local PostgreSQL identity | Local acceptance expects service DNS/5432 instead of the approved node-private-IP/31543 output | Match the real local connection contract while preserving Azure checks |
+| F072 | 6 | High correctness | `operations/local/cleanup.py` | Terraform ownership inventory | Full-demo state includes `terraform_data.images[0]`, but cleanup accepts only the two gate resources | Validate the exact image-import resource and configured inputs, not arbitrary extra resources |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -1266,3 +1271,11 @@ The host-side export parser also ran against the retained immutable Azure API
 image without starting its container. It matched all 23 source/manifest files
 and hashed the interpreter/dependency tree. This checks the actual export/read
 mechanism only; it is not a new native runtime image build or full-local proof.
+
+The assembled local implementation passed 779 Python tests and 254 subtests,
+50 explicit dependency skips, and 21 Terraform mock-provider tests. Its
+independent full-phase security review found no new vulnerabilities, but the
+rubber-duck review reproduced five producer/consumer mismatches (F068-F072).
+Passing mock tests did not prove those contracts. Corrections remain required
+before building or deploying the full local runtime; no live tenant admission
+has been attempted with this implementation.

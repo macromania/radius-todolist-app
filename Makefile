@@ -7,16 +7,19 @@ ACCEPTANCE_CONFIG ?= .state/azure/acceptance.json
 SLOT ?= management
 BICEP ?= $(HOME)/.rad/bin/bicep
 RUN := uv run --no-sync
-export CONFIRM_AZURE
+export CONFIRM_AZURE CONFIRM_LOCAL
 export PYTHONDONTWRITEBYTECODE := 1
 export TMPDIR := $(CURDIR)/.state/check/tmp
 
 .PHONY: help check lint test test-integration check-bicep check-shell check-terraform check-work \
         require-azure confirm-azure preflight bootstrap-preview validate-azure bootstrap \
         install-radius publish-recipes build-publish register-radius deploy-management \
-        export-state test-e2e test-outages clean-plan clean-azure verify-clean
+        export-state test-e2e test-outages clean-plan clean-azure verify-clean \
+        confirm-local local-runtime-build local-runtime-inspect local-runtime-load \
+        local-setup local-deploy-management local-export local-test local-clean-plan \
+        local-clean local-verify
 
-help: ## List implemented commands; full local deployment is not available
+help: ## List source, Azure, and explicit local commands
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 	  awk 'BEGIN {FS = ":.*?## "}; {printf "  %-22s %s\n", $$1, $$2}'
 
@@ -55,6 +58,40 @@ check-shell: ## Check shell entrypoints without executing them
 
 check-terraform: check-work ## Validate the local Recipe with mocked providers; never creates clusters
 	$(RUN) python operations/local/validate.py
+
+confirm-local: check-work
+	@test "$(CONFIRM_LOCAL)" = yes || { echo "Set CONFIRM_LOCAL=yes for local Docker/Kubernetes mutations." >&2; exit 1; }
+
+local-runtime-build: confirm-local ## Build native local API/provisioner images from committed inputs
+	$(RUN) python operations/local/runtime-images.py build --execute
+
+local-runtime-inspect: confirm-local ## Verify immutable local image filesystems and import smoke checks
+	$(RUN) python operations/local/runtime-images.py inspect --execute
+
+local-runtime-load: confirm-local ## Load inspected runtime images into the existing management cluster only
+	$(RUN) python operations/local/runtime-images.py load-management --execute
+
+local-setup: confirm-local ## Register full-demo Recipes and config in the verified local management cluster
+	$(RUN) python operations/local/setup-demo.py --execute
+
+local-deploy-management: confirm-local ## Deploy local management through Radius; no child cluster creation
+	$(RUN) python operations/local/deploy-demo.py --execute
+
+local-export: check-work ## Export verified local topology/API access once; 3 means not ready yet
+	$(RUN) python harness/local/export-state.py --once
+
+local-test: confirm-local ## Run all local admissions, isolation checks, and both real parent outages
+	$(RUN) python harness/test-e2e.py --config .state/local/acceptance.json --mode all --execute
+
+local-clean-plan: check-work ## Preview exact local ownership and ordered whole-demo cleanup
+	$(RUN) python operations/local/cleanup.py
+
+local-clean: confirm-local ## Remove the verified local demo in Radius ownership order
+	$(RUN) python operations/local/cleanup.py --execute
+
+local-verify: check-work ## Verify a retained local cleanup record without contacting deleted clusters
+	@test -n "$(LOCAL_CLEANUP_RECORD)" || { echo "Set LOCAL_CLEANUP_RECORD to the exact cleanup record." >&2; exit 1; }
+	$(RUN) python operations/local/cleanup.py --verify "$(LOCAL_CLEANUP_RECORD)"
 
 require-azure: check-work
 	@test "$(ENV)" = azure || { echo "Local deployment is not implemented." >&2; exit 1; }

@@ -384,9 +384,61 @@ def inspect_runtime(commands: Commands) -> dict:
     return result
 
 
+def load_management(commands: Commands) -> dict:
+    from bootstrap import verify_management
+    from common import MANAGEMENT
+
+    manifest = json.loads((STATE / "runtime-images.json").read_text())
+    if manifest.get("content_verified") is not True:
+        raise LocalError("Inspect both runtime images before loading management")
+    names = references(manifest["source_revision"])
+    if manifest.get("architecture") != architecture(commands):
+        raise LocalError("Runtime images belong to a different Docker architecture")
+    verify_management(commands)
+    for role in COMPONENTS:
+        info = commands.json(docker("image", "inspect", names[role]))[0]
+        if (
+            manifest[role]["reference"] != names[role]
+            or manifest[role]["image_id"] != info["Id"]
+            or manifest[role]["source_hashes"] != expected_hashes(role)
+        ):
+            raise LocalError("Image or source changed after inspection")
+    for role in COMPONENTS:
+        commands.run(
+            ["kind", "load", "docker-image", "--name", MANAGEMENT, names[role]],
+            visible=True,
+            timeout=300,
+        )
+    verify_management(commands)
+    loaded = commands.run(
+        docker(
+            "exec",
+            f"{MANAGEMENT}-control-plane",
+            "ctr",
+            "--namespace",
+            "k8s.io",
+            "images",
+            "list",
+            "--quiet",
+        )
+    ).split()
+    if not all(reference in loaded for reference in names.values()):
+        raise LocalError("Management containerd is missing an inspected runtime image")
+    write_private(
+        STATE / "runtime-images-loaded.json",
+        {
+            "source_revision": manifest["source_revision"],
+            "management": MANAGEMENT,
+            "images": names,
+            "loaded_at": datetime.now(UTC).isoformat(),
+        },
+    )
+    return manifest
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("stage", choices=("build", "inspect"))
+    parser.add_argument("stage", choices=("build", "inspect", "load-management"))
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args(argv)
     if not args.execute:
@@ -395,7 +447,8 @@ def main(argv: list[str] | None = None) -> int:
     os.umask(0o077)
     try:
         commands = Commands()
-        value = build(commands) if args.stage == "build" else inspect_runtime(commands)
+        action = {"build": build, "inspect": inspect_runtime, "load-management": load_management}
+        value = action[args.stage](commands)
         print(
             json.dumps(
                 {
