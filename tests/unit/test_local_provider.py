@@ -477,16 +477,32 @@ def test_runtime_auth_uses_rotating_token_and_proves_parent_uid(provider, monkey
     assert provider._workload
 
 
-def test_management_workspace_startup_is_api_read_not_helm_discovery(provider, monkeypatch):
+@pytest.mark.parametrize("spelling", ["resourceGroups", "resourcegroups"])
+def test_management_workspace_startup_is_api_read_not_helm_discovery(
+    provider, monkeypatch, spelling
+):
     monkeypatch.setattr(provider, "verify_management_identity", lambda: None)
     provider.commands.run.side_effect = [
-        json.dumps({"id": SCOPE}),
-        json.dumps({"id": f"{SCOPE}/providers/Applications.Core/environments/management"}),
+        json.dumps({"id": SCOPE.replace("resourceGroups", spelling)}),
+        json.dumps(
+            {
+                "id": (f"{SCOPE}/providers/Applications.Core/environments/management").replace(
+                    "resourceGroups", spelling
+                )
+            }
+        ),
     ]
     provider.connect_management()
     calls = [call.args[0] for call in provider.commands.run.call_args_list]
     assert not any("create" in args or "secrets" in args for args in calls)
     assert "radplanes-local-management" in provider.radius_config.read_text()
+
+
+def test_management_workspace_still_refuses_a_different_group(provider, monkeypatch):
+    monkeypatch.setattr(provider, "verify_management_identity", lambda: None)
+    provider.commands.run.return_value = json.dumps({"id": SCOPE + "-foreign"})
+    with pytest.raises(ProvisioningError, match="management_radius_mismatch"):
+        provider.connect_management()
 
 
 def test_secret_permissions_are_named_and_no_docker_privilege_is_granted(provider):

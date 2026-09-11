@@ -26,6 +26,10 @@ ACCESS_NAMESPACE = "radplanes-local-access"
 API_VERSION = "2025-08-01-preview"
 
 
+def same_radius_id(actual: object, expected: str) -> bool:
+    return isinstance(actual, str) and actual.casefold() == expected.casefold()
+
+
 def private_ipv4(value: str) -> str:
     try:
         address = IPv4Address(value)

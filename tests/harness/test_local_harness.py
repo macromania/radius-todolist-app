@@ -607,8 +607,10 @@ class ExportTests(LocalStateCase):
         self.operator.all_ready = True
         subject = self.exporter()
         records = self.operator.resources()
-        with patch.object(subject, "kube", return_value=json.dumps(records)):
-            self.assertEqual(set(subject.resource_inventory({})), set(SLOTS[1:]))
+        for spelling in ("resourceGroups", "resourcegroups"):
+            body = json.dumps(records).replace("resourceGroups", spelling)
+            with patch.object(subject, "kube", return_value=body):
+                self.assertEqual(set(subject.resource_inventory({})), set(SLOTS[1:]))
         for field, suffix in (
             ("environment", "/Applications.Core/environments/management"),
             ("application", "/Applications.Core/applications/management"),

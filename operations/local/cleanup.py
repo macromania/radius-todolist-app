@@ -36,6 +36,8 @@ from common import (
     write_private,
 )
 
+from plane_demo.management.providers.local_config import same_radius_id
+
 SLOTS = ("management", "shared-control", "shared-data", "isolated-1-control", "isolated-1-data")
 CHILDREN = ("shared-data", "isolated-1-data", "shared-control", "isolated-1-control")
 API_VERSION = "2025-08-01-preview"
@@ -96,7 +98,8 @@ def backend_secret_name(resource: dict) -> str:
 
 def fault_support():
     spec = importlib.util.spec_from_file_location(
-        "plane_demo_cleanup_faults", ROOT / "harness/local/fault-parent-link.py",
+        "plane_demo_cleanup_faults",
+        ROOT / "harness/local/fault-parent-link.py",
     )
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -111,7 +114,8 @@ def selected_access(target: dict, slot: str) -> tuple[Path, dict, dict]:
     value = yaml.safe_load(path.read_text())
     context = f"radplanes-local-{slot}"
     require(
-        value.get("apiVersion") == "v1" and value.get("kind") == "Config"
+        value.get("apiVersion") == "v1"
+        and value.get("kind") == "Config"
         and all(len(value[key]) == 1 for key in ("contexts", "clusters", "users")),
         "Only one explicit kubeconfig identity is admitted",
     )
@@ -156,17 +160,27 @@ class Cleanup:
         self.inventory: dict = {}
 
     def step(self, action: str, identity: str, **proof) -> None:
-        self.record["steps"].append({
-            "at": stamp(), "action": action, "identity": identity, **proof,
-        })
+        self.record["steps"].append(
+            {
+                "at": stamp(),
+                "action": action,
+                "identity": identity,
+                **proof,
+            }
+        )
         if self.execute:
             write_private(self.path, self.record)
 
     def kube(self, slot: str, *args: str) -> list[str]:
         target = self.targets[slot]
         return [
-            "kubectl", "--kubeconfig", str(protected(target["kubeconfig"])),
-            "--context", target["context"], "--request-timeout=30s", *args,
+            "kubectl",
+            "--kubeconfig",
+            str(protected(target["kubeconfig"])),
+            "--context",
+            target["context"],
+            "--request-timeout=30s",
+            *args,
         ]
 
     def get(self, slot: str, kind: str, name: str, namespace: str = "") -> dict | None:
@@ -213,7 +227,9 @@ class Cleanup:
         context = ssl.create_default_context(cafile=str(files["ca"]))
         context.load_cert_chain(str(files["cert"]), str(files["key"]))
         with httpx.Client(
-            verify=context, trust_env=False, follow_redirects=False,
+            verify=context,
+            trust_env=False,
+            follow_redirects=False,
             timeout=httpx.Timeout(60, connect=5),
         ) as client:
             response = client.delete(
@@ -255,7 +271,8 @@ class Cleanup:
         metadata = stored["metadata"]
         labels = metadata.get("labels", {})
         require(
-            metadata["name"] == name and metadata.get("uid")
+            metadata["name"] == name
+            and metadata.get("uid")
             and metadata["namespace"] == "radius-system"
             and labels.get("tfstate") == "true"
             and labels.get("app.kubernetes.io/managed-by") == "terraform",
@@ -265,14 +282,18 @@ class Cleanup:
             gzip.decompress(base64.b64decode(stored["data"]["tfstate"], validate=True))
         )
         require(
-            isinstance(state["lineage"], str) and state["lineage"]
-            and type(state["serial"]) is int and state["serial"] > 0
+            isinstance(state["lineage"], str)
+            and state["lineage"]
+            and type(state["serial"]) is int
+            and state["serial"] > 0
             and state["terraform_version"] == "1.15.8",
             f"{slot}: Terraform state is incomplete or uses an unexpected version",
         )
         summary = {
-            "secret": name, "uid": metadata["uid"],
-            "lineage": state["lineage"], "serial": state["serial"],
+            "secret": name,
+            "uid": metadata["uid"],
+            "lineage": state["lineage"],
+            "serial": state["serial"],
         }
         require(
             "terraformState" not in target or target["terraformState"] == summary,
@@ -287,16 +308,21 @@ class Cleanup:
             "Full cleanup requires exactly the cluster, image-load, and access Terraform owners",
         )
         require(
-            len(kinds[0]["instances"]) == len(accesses[0]["instances"])
-            == len(image_loads[0]["instances"]) == 1,
+            len(kinds[0]["instances"])
+            == len(accesses[0]["instances"])
+            == len(image_loads[0]["instances"])
+            == 1,
             "Partial Terraform ownership",
         )
         attrs = kinds[0]["instances"][0]["attributes"]
         name = f"radplanes-local-{slot}"
         require(
-            attrs["name"] == name and attrs["id"] == f"{name}-{NODE_IMAGE}"
-            and attrs["node_image"] == NODE_IMAGE and attrs["completed"] is True
-            and attrs["kubeconfig"] and attrs["client_key"],
+            attrs["name"] == name
+            and attrs["id"] == f"{name}-{NODE_IMAGE}"
+            and attrs["node_image"] == NODE_IMAGE
+            and attrs["completed"] is True
+            and attrs["kubeconfig"]
+            and attrs["client_key"],
             "Terraform does not describe the completed, owned child",
         )
         image_load = image_loads[0]
@@ -306,11 +332,15 @@ class Cleanup:
             image_load.get("module") == "module.default"
             and image_load.get("name") == "images"
             and image_load.get("provider") == 'provider["terraform.io/builtin/terraform"]'
-            and type(instance.get("index_key")) is int and instance["index_key"] == 0
-            and instance.get("schema_version") == 0 and not instance.get("deposed")
+            and type(instance.get("index_key")) is int
+            and instance["index_key"] == 0
+            and instance.get("schema_version") == 0
+            and not instance.get("deposed")
             and not instance.get("status")
-            and image_attrs["input"] is None and image_attrs["output"] is None
-            and image_attrs.get("triggers_replace") == {
+            and image_attrs["input"] is None
+            and image_attrs["output"] is None
+            and image_attrs.get("triggers_replace")
+            == {
                 "type": ["object", {"cluster_id": "string", "images": ["list", "string"]}],
                 "value": {
                     "cluster_id": attrs["id"],
@@ -333,17 +363,21 @@ class Cleanup:
         )
         live = self.get("management", "secret", access["name"], NAMESPACE)
         require(
-            live and live["metadata"]["uid"] == access["uid"]
+            live
+            and live["metadata"]["uid"] == access["uid"]
             and live["metadata"].get("labels", {}).get("radplanes.local/slot") == slot
-            and live["metadata"].get("annotations", {}).get(
-                "radplanes.local/radius-resource"
-            ) == resource_id,
+            and same_radius_id(
+                live["metadata"].get("annotations", {}).get("radplanes.local/radius-resource"),
+                resource_id,
+            ),
             f"{slot}: access Secret ownership changed",
         )
         stored_access = yaml.safe_load(base64.b64decode(live["data"]["kubeconfig"], validate=True))
         require(
-            len(stored_access["contexts"]) == len(stored_access["clusters"])
-            == len(stored_access["users"]) == 1
+            len(stored_access["contexts"])
+            == len(stored_access["clusters"])
+            == len(stored_access["users"])
+            == 1
             and stored_access["current-context"] == f"radplanes-local-{slot}",
             "Ambiguous protected child access",
         )
@@ -375,7 +409,7 @@ class Cleanup:
         workspace = json.loads(self.rad(slot, "workspace", "show", "-o", "json"))
         require(
             workspace.get("connection") == {"kind": "kubernetes", "context": target["context"]}
-            and workspace.get("scope") == scope,
+            and same_radius_id(workspace.get("scope"), scope),
             f"{slot}: Radius workspace changed",
         )
         role = "management" if slot == "management" else slot.rsplit("-", 1)[1]
@@ -391,18 +425,29 @@ class Cleanup:
             name = app["name"]
             environment = slot if name == role else "provision-" + name.removeprefix("cluster-")
             require(
-                app["id"] == f"{SCOPE}/Applications.Core/applications/{name}"
-                and app["properties"]["environment"]
-                == f"{SCOPE}/Applications.Core/environments/{environment}",
+                same_radius_id(app["id"], f"{SCOPE}/Applications.Core/applications/{name}")
+                and same_radius_id(
+                    app["properties"]["environment"],
+                    f"{SCOPE}/Applications.Core/environments/{environment}",
+                ),
                 f"{slot}: foreign application/environment",
             )
         app_id = f"{SCOPE}/Applications.Core/applications/{role}"
         env_id = f"{SCOPE}/Applications.Core/environments/{slot}"
-        environment = json.loads(self.rad(
-            slot, "env", "show", slot, "--group", GROUP, "-o", "json",
-        ))
+        environment = json.loads(
+            self.rad(
+                slot,
+                "env",
+                "show",
+                slot,
+                "--group",
+                GROUP,
+                "-o",
+                "json",
+            )
+        )
         require(
-            environment["id"] == env_id
+            same_radius_id(environment["id"], env_id)
             and environment["properties"]["compute"]["namespace"] == f"radplanes-local-{slot}",
             f"{slot}: foreign Radius compute namespace",
         )
@@ -412,19 +457,25 @@ class Cleanup:
             kind, name, properties = resource["type"], resource["name"], resource["properties"]
             require(
                 re.fullmatch(r"[a-z][a-z0-9-]{0,62}", name)
-                and resource["id"] == f"{SCOPE}/{kind}/{name}"
+                and same_radius_id(resource["id"], f"{SCOPE}/{kind}/{name}")
                 and properties.get("provisioningState") in TERMINAL,
                 f"{slot}: partial or foreign Radius resource",
             )
             if kind == "Demo.Platform/clusters":
                 child = properties.get("slot")
                 require(
-                    slot == "management" and child in CHILDREN and name == child
+                    slot == "management"
+                    and child in CHILDREN
+                    and name == child
                     and child not in cluster_records
-                    and properties.get("environment")
-                    == f"{SCOPE}/Applications.Core/environments/provision-{child}"
-                    and properties.get("application")
-                    == f"{SCOPE}/Applications.Core/applications/cluster-{child}"
+                    and same_radius_id(
+                        properties.get("environment"),
+                        f"{SCOPE}/Applications.Core/environments/provision-{child}",
+                    )
+                    and same_radius_id(
+                        properties.get("application"),
+                        f"{SCOPE}/Applications.Core/applications/cluster-{child}",
+                    )
                     and properties.get("clusterId") == f"kind://radplanes-local-{child}"
                     and properties.get("clusterName") == f"radplanes-local-{child}"
                     and properties.get("bootstrapAccessRef")
@@ -434,12 +485,15 @@ class Cleanup:
                 cluster_records[child] = resource
             else:
                 require(
-                    kind in {
-                        "Applications.Core/containers", "Applications.Datastores/redisCaches",
-                        "Demo.Platform/postgreSqlDatabases", "Demo.Platform/gateways",
+                    kind
+                    in {
+                        "Applications.Core/containers",
+                        "Applications.Datastores/redisCaches",
+                        "Demo.Platform/postgreSqlDatabases",
+                        "Demo.Platform/gateways",
                     }
-                    and properties.get("application") == app_id
-                    and properties.get("environment") == env_id,
+                    and same_radius_id(properties.get("application"), app_id)
+                    and same_radius_id(properties.get("environment"), env_id),
                     f"{slot}: unknown or foreign Radius application resource",
                 )
         if slot == "management":
@@ -448,14 +502,26 @@ class Cleanup:
 
     def deployments(self) -> list[dict]:
         namespace = self.targets["management"]["namespace"]
-        deployments = items(self.commands.json(self.kube(
-            "management", "-n", namespace, "get", "deployments",
-            "-l", "radapp.io/application=management", "-o", "json",
-        )))
+        deployments = items(
+            self.commands.json(
+                self.kube(
+                    "management",
+                    "-n",
+                    namespace,
+                    "get",
+                    "deployments",
+                    "-l",
+                    "radapp.io/application=management",
+                    "-o",
+                    "json",
+                )
+            )
+        )
         result = []
         for component in ("management-api", "provisioner"):
             matches = [
-                item for item in deployments
+                item
+                for item in deployments
                 if item["metadata"].get("labels", {}).get("radapp.io/resource") == component
             ]
             require(len(matches) == 1, f"Expected one management {component} Deployment")
@@ -463,7 +529,8 @@ class Cleanup:
             metadata = deployment["metadata"]
             labels = metadata.get("labels", {})
             require(
-                metadata["name"] == component and metadata["namespace"] == namespace
+                metadata["name"] == component
+                and metadata["namespace"] == namespace
                 and metadata.get("uid")
                 and labels.get("radapp.io/application") == "management"
                 and labels.get("plane-demo/project") == "radplanes"
@@ -508,17 +575,35 @@ class Cleanup:
             self.inventory[slot] = self.radius_inventory(slot)
             self.verify_state_inventory(slot)
             self.record["targets"][slot] = {
-                key: target[key] for key in
-                ("clusterId", "clusterUid", "context", "namespace", "namespaceUid", "nodeId")
+                key: target[key]
+                for key in (
+                    "clusterId",
+                    "clusterUid",
+                    "context",
+                    "namespace",
+                    "namespaceUid",
+                    "nodeId",
+                )
             }
             if slot != "management":
                 self.state_owner(slot)
                 self.record["targets"][slot].update(
-                    terraformState=target["terraformState"], accessSecret=target["accessSecret"],
+                    terraformState=target["terraformState"],
+                    accessSecret=target["accessSecret"],
                 )
-        accesses = items(self.commands.json(self.kube(
-            "management", "-n", NAMESPACE, "get", "secrets", "-o", "json",
-        )))
+        accesses = items(
+            self.commands.json(
+                self.kube(
+                    "management",
+                    "-n",
+                    NAMESPACE,
+                    "get",
+                    "secrets",
+                    "-o",
+                    "json",
+                )
+            )
+        )
         require(
             len(accesses) == len(CHILDREN)
             and {value["metadata"]["name"] for value in accesses}
@@ -531,15 +616,18 @@ class Cleanup:
             image = self.record["images"][role]
             actual = self.commands.json(docker("image", "inspect", image["reference"]))
             require(
-                len(actual) == 1 and actual[0]["Id"] == image["imageId"]
+                len(actual) == 1
+                and actual[0]["Id"] == image["imageId"]
                 and [item["image"] for item in deployment["spec"]["template"]["spec"]["containers"]]
                 == [image["reference"]],
                 "Management runtime image differs from inspected/exported provenance",
             )
         self.record["deployments"] = [
             {
-                "name": item["metadata"]["name"], "uid": item["metadata"]["uid"],
-                "namespace": item["metadata"]["namespace"], "labels": item["metadata"]["labels"],
+                "name": item["metadata"]["name"],
+                "uid": item["metadata"]["uid"],
+                "namespace": item["metadata"]["namespace"],
+                "labels": item["metadata"]["labels"],
             }
             for item in self.owned_deployments
         ]
@@ -553,17 +641,28 @@ class Cleanup:
                 continue
             name = backend_secret_name(resource)
             expected[name] = resource
-        states = items(self.commands.json(self.kube(
-            slot, "-n", "radius-system", "get", "secrets", "-l", "tfstate=true", "-o", "json",
-        )))
+        states = items(
+            self.commands.json(
+                self.kube(
+                    slot,
+                    "-n",
+                    "radius-system",
+                    "get",
+                    "secrets",
+                    "-l",
+                    "tfstate=true",
+                    "-o",
+                    "json",
+                )
+            )
+        )
         require(
             len(states) == len(expected)
             and {value["metadata"]["name"] for value in states} == set(expected),
             f"{slot}: missing, extra, or chunked Terraform owner state",
         )
         self.record.setdefault("stateOwners", {})[slot] = [
-            {"name": value["metadata"]["name"], "uid": value["metadata"]["uid"]}
-            for value in states
+            {"name": value["metadata"]["name"], "uid": value["metadata"]["uid"]} for value in states
         ]
 
     def check_faults(self) -> None:
@@ -591,7 +690,8 @@ class Cleanup:
             slot = record.get("slot")
             require(slot in CHILDREN, "Unknown fault journal allocation")
             require(
-                record.get("environment") == "local" and record.get("project") == "radplanes"
+                record.get("environment") == "local"
+                and record.get("project") == "radplanes"
                 and record.get("component") == slot.rsplit("-", 1)[1] + "-reconciler"
                 and record.get("cluster_uid") == self.targets[slot]["clusterUid"]
                 and record.get("namespace_uid") == self.targets[slot]["namespaceUid"],
@@ -599,9 +699,9 @@ class Cleanup:
             )
             if record.get("creation_attempted"):
                 require(
-                    record.get("restored") is True and record.get("physical_restored") is True
-                    and record.get("original_rules_sha256")
-                    == record.get("restored_rules_sha256")
+                    record.get("restored") is True
+                    and record.get("physical_restored") is True
+                    and record.get("original_rules_sha256") == record.get("restored_rules_sha256")
                     and DOCKER_ID.fullmatch(record.get("original_rules_sha256", ""))
                     and record.get("restoration_probe", {}).get("ok") is True,
                     "Restore the recorded parent fault before cleanup",
@@ -610,7 +710,11 @@ class Cleanup:
         for slot in CHILDREN:
             component = slot.rsplit("-", 1)[1] + "-reconciler"
             fault = support.LocalParentFault(
-                configuration, slot, component, self.path, operator=run,
+                configuration,
+                slot,
+                component,
+                self.path,
+                operator=run,
                 kube_factory=lambda target: support.base.Kubectl(target, runner=run),
             )
             fault.verify_nodes()
@@ -639,7 +743,8 @@ class Cleanup:
             namespace, name = metadata["namespace"], metadata["name"]
             current = self.get("management", "deployment", name, namespace)
             require(
-                current and current["metadata"]["uid"] == metadata["uid"]
+                current
+                and current["metadata"]["uid"] == metadata["uid"]
                 and current["metadata"]["labels"] == metadata["labels"],
                 "Management Deployment changed since preflight",
             )
@@ -649,15 +754,35 @@ class Cleanup:
                 {"op": "replace", "path": "/spec/replicas", "value": 0},
             ]
             self.step("quiesce_requested", f"{namespace}/{name}", uid=metadata["uid"])
-            self.commands.run(self.kube(
-                "management", "-n", namespace, "patch", "deployment", name,
-                "--type=json", "-p", json.dumps(patch),
-            ))
+            self.commands.run(
+                self.kube(
+                    "management",
+                    "-n",
+                    namespace,
+                    "patch",
+                    "deployment",
+                    name,
+                    "--type=json",
+                    "-p",
+                    json.dumps(patch),
+                )
+            )
             deadline = time.monotonic() + 180
-            while items(self.commands.json(self.kube(
-                "management", "-n", namespace, "get", "pods", "-l",
-                f"radapp.io/application=management,radapp.io/resource={name}", "-o", "json",
-            ))):
+            while items(
+                self.commands.json(
+                    self.kube(
+                        "management",
+                        "-n",
+                        namespace,
+                        "get",
+                        "pods",
+                        "-l",
+                        f"radapp.io/application=management,radapp.io/resource={name}",
+                        "-o",
+                        "json",
+                    )
+                )
+            ):
                 require(time.monotonic() < deadline, "Management workloads did not terminate")
                 time.sleep(2)
             self.step("quiesced", f"{namespace}/{name}")
@@ -684,13 +809,16 @@ class Cleanup:
 
     def cluster_absent(self, slot: str) -> bool:
         resources = self.radius_list("management", "resource", "list")
-        if any(item["id"] == cluster_resource(slot) for item in resources):
+        if any(same_radius_id(item["id"], cluster_resource(slot)) for item in resources):
             return False
         target = self.targets[slot]
         if slot in self.docker_nodes() or target["nodeId"] in self.current_ids:
             return False
         return not self.get(
-            "management", "secret", target["terraformState"]["secret"], "radius-system",
+            "management",
+            "secret",
+            target["terraformState"]["secret"],
+            "radius-system",
         ) and not self.get("management", "secret", target["accessSecret"]["name"], NAMESPACE)
 
     def destroy(self) -> None:
@@ -707,7 +835,8 @@ class Cleanup:
             current = self.radius_list("management", "resource", "list")
             expected = self.inventory["management"]["clusters"][slot]
             require(
-                [item for item in current if item["id"] == cluster_resource(slot)] == [expected],
+                [item for item in current if same_radius_id(item["id"], cluster_resource(slot))]
+                == [expected],
                 "Management Radius cluster owner changed before deletion",
             )
             self.step("radius_cluster_delete_requested", cluster_resource(slot))
@@ -724,12 +853,34 @@ class Cleanup:
             "Management Radius resources remain; bootstrap deletion refused",
         )
         require(
-            not items(self.commands.json(self.kube(
-                "management", "-n", "radius-system", "get", "secrets",
-                "-l", "tfstate=true", "-o", "json",
-            ))) and not items(self.commands.json(self.kube(
-                "management", "-n", NAMESPACE, "get", "secrets", "-o", "json",
-            ))),
+            not items(
+                self.commands.json(
+                    self.kube(
+                        "management",
+                        "-n",
+                        "radius-system",
+                        "get",
+                        "secrets",
+                        "-l",
+                        "tfstate=true",
+                        "-o",
+                        "json",
+                    )
+                )
+            )
+            and not items(
+                self.commands.json(
+                    self.kube(
+                        "management",
+                        "-n",
+                        NAMESPACE,
+                        "get",
+                        "secrets",
+                        "-o",
+                        "json",
+                    )
+                )
+            ),
             "Terraform or access Secret owners remain; management deletion refused",
         )
         nodes = self.docker_nodes()
@@ -740,10 +891,18 @@ class Cleanup:
         )
         self.namespace("management", "kube-system", self.targets["management"]["clusterUid"])
         self.step("management_kind_delete_requested", nodes["management"]["Id"])
-        self.commands.run([
-            "kind", "delete", "cluster", "--name", MANAGEMENT,
-            "--kubeconfig", str(protected(self.targets["management"]["kubeconfig"])),
-        ], timeout=300)
+        self.commands.run(
+            [
+                "kind",
+                "delete",
+                "cluster",
+                "--name",
+                MANAGEMENT,
+                "--kubeconfig",
+                str(protected(self.targets["management"]["kubeconfig"])),
+            ],
+            timeout=300,
+        )
         self.verify_absent(self.record)
         self.step("all_project_containers_absent", "five-clusters")
 
@@ -776,24 +935,32 @@ def load_inputs() -> tuple[dict, dict]:
     config = LocalConfig.from_dict(read_json("provisioning.json"))
     export = read_json("acceptance.json")
     require(
-        export.get("version") == 1 and export.get("environment") == "local"
-        and export.get("project") == "radplanes" and set(export["targets"]) == set(SLOTS),
+        export.get("version") == 1
+        and export.get("environment") == "local"
+        and export.get("project") == "radplanes"
+        and set(export["targets"]) == set(SLOTS),
         "A complete local acceptance export is required",
     )
     targets = {}
     for slot, value in export["targets"].items():
         identity = value["local"]
         targets[slot] = {
-            "clusterId": value["cluster_id"], "clusterUid": value["cluster_uid"],
-            "namespaceUid": value["namespace_uid"], "namespace": value["namespace"],
-            "nodeId": identity["node"]["id"], "nodeAddress": identity["node"]["address"],
-            "context": value["context"], "workspace": value["context"], "group": GROUP,
+            "clusterId": value["cluster_id"],
+            "clusterUid": value["cluster_uid"],
+            "namespaceUid": value["namespace_uid"],
+            "namespace": value["namespace"],
+            "nodeId": identity["node"]["id"],
+            "nodeAddress": identity["node"]["address"],
+            "context": value["context"],
+            "workspace": value["context"],
+            "group": GROUP,
             "kubeconfig": "home/.kube/config" if slot == "management" else value["kubeconfig"],
             "radiusConfig": "cleanup-radius.yaml",
         }
         if slot != "management":
             targets[slot]["accessSecret"] = {
-                "name": identity["access_secret"], "uid": identity["access_secret_uid"],
+                "name": identity["access_secret"],
+                "uid": identity["access_secret_uid"],
                 "namespace": NAMESPACE,
             }
     bootstrap = read_json("management-created.json")
@@ -806,7 +973,8 @@ def load_inputs() -> tuple[dict, dict]:
         "Retain the matching exported management kubeconfig before cleanup",
     )
     require(
-        bootstrap.get("name") == MANAGEMENT and bootstrap.get("context") == MANAGEMENT
+        bootstrap.get("name") == MANAGEMENT
+        and bootstrap.get("context") == MANAGEMENT
         and bootstrap.get("secretEncryptionVerified") is True
         and bootstrap["nodeId"] == targets["management"]["nodeId"]
         and bootstrap["nodeAddress"] == config.management_cluster["nodeAddress"]
@@ -838,22 +1006,30 @@ def load_inputs() -> tuple[dict, dict]:
                 continue
             path = ROOT / relative
             require(
-                not Path(relative).is_absolute() and ".." not in path.parts
-                and path.is_file() and not path.is_symlink()
+                not Path(relative).is_absolute()
+                and ".." not in path.parts
+                and path.is_file()
+                and not path.is_symlink()
                 and digest(path.read_bytes()) == expected,
                 "Inspected runtime source differs from current project files",
             )
-    radius = {"workspaces": {"default": MANAGEMENT, "items": {
-        f"radplanes-local-{slot}": {
-            "connection": {"kind": "kubernetes", "context": f"radplanes-local-{slot}"},
-            "scope": SCOPE.rsplit("/providers", 1)[0],
+    radius = {
+        "workspaces": {
+            "default": MANAGEMENT,
+            "items": {
+                f"radplanes-local-{slot}": {
+                    "connection": {"kind": "kubernetes", "context": f"radplanes-local-{slot}"},
+                    "scope": SCOPE.rsplit("/providers", 1)[0],
+                }
+                for slot in SLOTS
+            },
         }
-        for slot in SLOTS
-    }}}
+    }
     path = STATE / "cleanup-radius.yaml"
     if path.exists() or path.is_symlink():
         require(
-            yaml.safe_load(protected(path).read_text()) == radius, "Foreign cleanup Radius config",
+            yaml.safe_load(protected(path).read_text()) == radius,
+            "Foreign cleanup Radius config",
         )
     else:
         write_private(path, yaml.safe_dump(radius))
@@ -883,40 +1059,62 @@ def main(argv: list[str] | None = None) -> int:
         if args.verify:
             record = read_json(args.verify)
             require(
-                record.get("version") == 1 and record.get("scope") == "cleanup"
+                record.get("version") == 1
+                and record.get("scope") == "cleanup"
                 and set(record["targets"]) == set(SLOTS)
                 and set(
-                    step["identity"] for step in record["steps"]
+                    step["identity"]
+                    for step in record["steps"]
                     if step["action"] == "radius_cluster_owners_absent"
-                ) == set(CHILDREN)
+                )
+                == set(CHILDREN)
                 and any(
                     step["action"] == "radius_application_absent"
-                    and step["identity"] == "management/management" for step in record["steps"]
+                    and step["identity"] == "management/management"
+                    for step in record["steps"]
                 ),
                 "Verification requires retained proof of each child Radius/state/access deletion",
             )
             cleanup = Cleanup(commands, {}, False)
             cleanup.verify_absent(record)
-            print(json.dumps({
-                "scope": "cleanup", "result": "resources_removed", "verifiedAt": stamp(),
-            }))
+            print(
+                json.dumps(
+                    {
+                        "scope": "cleanup",
+                        "result": "resources_removed",
+                        "verifiedAt": stamp(),
+                    }
+                )
+            )
             return 0
         targets, provenance = load_inputs()
         cleanup = Cleanup(commands, targets, args.execute)
         cleanup.record.update(provenance)
         cleanup.preflight()
         if not args.execute:
-            print(json.dumps({
-                "scope": "cleanup", "result": "preview", "destroysDemoData": True,
-                "order": ["quiesce-management", *CHILDREN, "management"],
-            }))
+            print(
+                json.dumps(
+                    {
+                        "scope": "cleanup",
+                        "result": "preview",
+                        "destroysDemoData": True,
+                        "order": ["quiesce-management", *CHILDREN, "management"],
+                    }
+                )
+            )
             return 0
         cleanup.destroy()
         cleanup.record.update(result="resources_removed", completedAt=stamp())
         write_private(cleanup.path, cleanup.record)
-        print(json.dumps({
-            "scope": "cleanup", "result": "resources_removed", "record": str(cleanup.path),
-        }))
+        print(
+            json.dumps(
+                {
+                    "scope": "cleanup",
+                    "result": "resources_removed",
+                    "record": str(cleanup.path),
+                }
+            )
+        )
         return 0
     except (Exception, KeyboardInterrupt) as error:
         message = (

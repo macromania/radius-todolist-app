@@ -102,6 +102,7 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F073 | 6 | High correctness | `providers/local.py` | environment registration | Radius 0.60.2 generic create does not support the supplied `--group` flag | Removed unsupported flag while retaining the exact seeded workspace scope; actual command-path tests and fix review pass |
 | F074 | 6 | Medium correctness | Runtime image and acceptance source manifests | copied local overlay | Host-side image inspection found the copied `dynamic-rp-overlay.yaml` missing from both expected source lists | Include the actual copied YAML in worker build/acceptance provenance, never the API; original guard and failed build retained |
 | F075 | 6 | High correctness | `providers/local.py` | Terraform init permissions | Root with only CHOWN cannot chmod a volume already owned by UID 65532 | Take ownership before mode changes, seed verified binaries, and hand ownership back last; no capabilities added; real restricted-container and management-RP checks pass |
+| F076 | 6 | High correctness | Local provider/export/cleanup | Radius resource-ID comparisons | The real API returns lowercase `resourcegroups`, which mismatched newly added case-sensitive comparisons | Reuse exact case-insensitive Radius-ID equality across all local ownership surfaces; foreign IDs remain refused; 187 tests and actual management identity reads pass |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -1337,3 +1338,20 @@ Failed setup inputs and inspected image records are retained under
 `history/terraform-init-permission/`. Only the two unchanged setup attempt files
 were cleared after those checks; no API onboarding operation was replayed.
 The privileged source must be rebuilt before proceeding to child provisioning.
+
+The rebuilt `fe753ca` images passed host-side inspection and management loading.
+The next setup passed the repaired Terraform stage and reached environment
+registration, but its final identity check exposed F076: Radius returned the
+correct group/environment with lowercase `resourcegroups`. The new local
+provider, exporter, and cleanup now share exact case-insensitive Radius-ID
+comparison, as the earlier gate already required. Kubernetes names, slots,
+network endpoints, credentials, image IDs, and namespace UIDs retain their
+existing checks; a different group/owner is not accepted.
+
+The provider/export/cleanup suite passed 187 tests and 13 subtests, including
+both wire spellings through complete cleanup and foreign-owner refusal. The
+direct walkthrough and independent security fix review passed. Actual
+management group/environment reads now pass the same guard. The second
+data-free setup attempt is archived under `history/radius-id-casing/`; checks
+again confirmed no child, Terraform state, database, PVC, or initialized plane
+credentials before clearing only its two attempt files for the rebuilt source.

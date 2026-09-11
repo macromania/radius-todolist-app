@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[2]
 STATE = ROOT / ".state/local"
 sys.path.insert(0, str(ROOT / "src"))
 
-from plane_demo.management.providers.local_config import LocalConfig  # noqa: E402
+from plane_demo.management.providers.local_config import LocalConfig, same_radius_id  # noqa: E402
 
 
 def load(name, path):
@@ -316,13 +316,17 @@ class Exporter(shared.Exporter):
             require(slot in SLOTS[1:] and slot not in result, "local_radius_allocation_mismatch")
             properties = item.get("properties", {})
             require(
-                item.get("id") == RESOURCE_PREFIX + "/" + RESOURCE_TYPE + "/" + slot
+                same_radius_id(item.get("id"), RESOURCE_PREFIX + "/" + RESOURCE_TYPE + "/" + slot)
                 and item.get("type") == RESOURCE_TYPE
                 and properties.get("slot") == slot
-                and properties.get("environment")
-                == RESOURCE_PREFIX + "/Applications.Core/environments/provision-" + slot
-                and properties.get("application")
-                == RESOURCE_PREFIX + "/Applications.Core/applications/cluster-" + slot,
+                and same_radius_id(
+                    properties.get("environment"),
+                    RESOURCE_PREFIX + "/Applications.Core/environments/provision-" + slot,
+                )
+                and same_radius_id(
+                    properties.get("application"),
+                    RESOURCE_PREFIX + "/Applications.Core/applications/cluster-" + slot,
+                ),
                 "local_radius_resource_identity_mismatch",
             )
             require(
@@ -369,7 +373,9 @@ class Exporter(shared.Exporter):
         uid = str(UUID(lines[0]))
         require(
             json.loads(lines[1]).get("radplanes.local/slot") == slot
-            and json.loads(lines[2]).get("radplanes.local/radius-resource") == resource["id"],
+            and same_radius_id(
+                json.loads(lines[2]).get("radplanes.local/radius-resource"), resource["id"]
+            ),
             "local_access_secret_ownership_mismatch",
         )
         try:

@@ -27,6 +27,7 @@ from plane_demo.management.providers.local_config import (
     SLOTS,
     LocalConfig,
     private_ipv4,
+    same_radius_id,
 )
 from plane_demo.management.provisioning import Cluster, ProvisioningError
 
@@ -316,7 +317,7 @@ class LocalProvider:
             ),
         ):
             actual = json.loads(self.rad("management", *arguments, "--output", "json"))["id"]
-            if actual != expected:
+            if not same_radius_id(actual, expected):
                 raise ProvisioningError("management_radius_mismatch")
 
     def verify_recipes(self) -> None:
@@ -561,8 +562,10 @@ class LocalProvider:
             or secret["metadata"]["name"] != name
             or secret["metadata"]["namespace"] != ACCESS_NAMESPACE
             or secret["metadata"].get("labels", {}).get("radplanes.local/slot") != slot
-            or secret["metadata"].get("annotations", {}).get("radplanes.local/radius-resource")
-            != resource_id
+            or not same_radius_id(
+                secret["metadata"].get("annotations", {}).get("radplanes.local/radius-resource"),
+                resource_id,
+            )
             or not secret["metadata"].get("uid")
         ):
             raise ProvisioningError("local_access_secret_mismatch")
