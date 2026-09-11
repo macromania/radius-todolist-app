@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import os
@@ -14,13 +13,13 @@ from pathlib import Path
 
 import yaml
 
+from plane_demo.management.providers import workloads
 from plane_demo.management.providers.commands import (
     Commands,
-    create_json,
     write_json,
     write_private,
 )
-from plane_demo.management.providers.credentials import Credentials, database_dsn
+from plane_demo.management.providers.credentials import Credentials
 from plane_demo.management.providers.redis_nic_tags import BASE_TAGS, ERRORS, Target, same_id
 from plane_demo.management.provisioning import (
     Cluster,
@@ -60,6 +59,17 @@ class AzureProvider:
         write_json(self.config_path, config.to_dict())
         self.commands.protect(credentials._data)
         self._verified = False
+
+    def expected_cluster_id(self, slot: str) -> str:
+        allocation = self.config.allocation(slot)
+        return (
+            f"{allocation['clusterResourceGroupId']}/providers/Microsoft.ContainerService/"
+            f"managedClusters/{allocation['clusterName']}"
+        )
+
+    def validate_endpoint(self, slot: str, value: str) -> str:
+        self.config.allocation(slot)
+        return endpoint(value)
 
     def paths(self, slot: str) -> tuple[str, Path]:
         self.config.allocation(slot)
@@ -768,31 +778,7 @@ class AzureProvider:
 
     @staticmethod
     def role_binding(namespace, name, subject_namespace, subject_name, rules):
-        return [
-            {
-                "apiVersion": "rbac.authorization.k8s.io/v1",
-                "kind": "Role",
-                "metadata": {"name": name, "namespace": namespace},
-                "rules": rules,
-            },
-            {
-                "apiVersion": "rbac.authorization.k8s.io/v1",
-                "kind": "RoleBinding",
-                "metadata": {"name": name, "namespace": namespace},
-                "roleRef": {
-                    "apiGroup": "rbac.authorization.k8s.io",
-                    "kind": "Role",
-                    "name": name,
-                },
-                "subjects": [
-                    {
-                        "kind": "ServiceAccount",
-                        "name": subject_name,
-                        "namespace": subject_namespace,
-                    }
-                ],
-            },
-        ]
+        return workloads.role_binding(namespace, name, subject_namespace, subject_name, rules)
 
     @staticmethod
     def management_permissions(namespace: str) -> list:
@@ -847,117 +833,7 @@ class AzureProvider:
         ]
 
     def initialize_database(self, slot: str) -> None:
-        self.config.allocation(slot)
-        role, namespace = self.names(slot)
-        intent = self.state / f"{slot}-database-intent.json"
-        roles = (
-            {
-                "mgmt_api",
-                "mgmt_provisioner",
-                *(item["reporting_role"] for item in self.config.pair_slots),
-            }
-            if role == "management"
-            else {"cp_api", "cp_reconciler", "dp_reconciler"}
-        )
-        marker = self.kube_get(slot, namespace, "configmap", "database-initialized")
-        if marker:
-            plane = self.credentials.plane(slot)
-            if {key: marker["data"][key] for key in ("serverId", "database")} != {
-                "serverId": plane["database"]["serverId"],
-                "database": plane["database"]["database"],
-            }:
-                raise ProvisioningError("database_marker_mismatch")
-            self.cleanup_initialization(slot, namespace, marker["data"].get("setupSecretName"))
-            return
-        if (
-            intent.exists()
-            or intent.is_symlink()
-            or self.kube_get(slot, namespace, "secret", "database-init")
-            or self.kube_get(slot, namespace, "job", "database-init")
-            or self.kube_get(slot, namespace, "secret", "postgres-setup")
-            or self.credentials.has_database(slot)
-            or self.database_resource_exists(slot)
-        ):
-            raise ProvisioningError("database_initialization_incomplete")
-        plane = self.credentials.ensure(slot, roles)
-        self.commands.protect(plane)
-        try:
-            create_json(
-                intent,
-                {
-                    "version": 1,
-                    "slot": slot,
-                    "application": role,
-                    "resourceType": TYPES["postgresql"][0],
-                    "resourceName": "postgres",
-                },
-            )
-        except FileExistsError:
-            raise ProvisioningError("database_initialization_incomplete") from None
-        self.deploy(slot, "database", role, {"databaseName": role})
-        properties = self.resource(slot, "postgresql", "postgres", role)
-        setup_name = properties.get("setupSecretName")
-        if not isinstance(setup_name, str) or not re.fullmatch(r"[a-z0-9-]+-setup", setup_name):
-            raise ProvisioningError("postgres_setup_contract_missing")
-        setup = self.kube_get(slot, namespace, "secret", setup_name)
-        if not setup:
-            raise ProvisioningError("postgres_setup_secret_missing")
-        password = base64.b64decode(setup["data"]["password"], validate=True).decode()
-        self.commands.protect(password)
-        dsn = database_dsn(properties, properties["username"], password)
-        self.commands.protect(dsn)
-        self.credentials.set_database(slot, properties)
-        variables = {
-            "BOOTSTRAP_DSN": dsn,
-            "BOOTSTRAP_KIND": role,
-            "ROLE_PASSWORDS_JSON": json.dumps(plane["passwords"]),
-        }
-        if role == "management":
-            variables["PAIR_SLOTS_JSON"] = json.dumps(self.config.pair_slots)
-        else:
-            variables["PAIR_ID"] = slot.removesuffix("-control")
-        self.secret(slot, namespace, "database-init", variables)
-        job = self.job(
-            namespace,
-            "database-init",
-            self.config.images["api"],
-            ["python", "-m", "plane_demo.setup.bootstrap"],
-            "database-init",
-        )
-        job["spec"]["template"]["spec"]["containers"][0]["envFrom"] = [
-            {"secretRef": {"name": "database-init"}}
-        ]
-        self.apply(slot, job, create=True)
-        try:
-            self.kubectl(
-                slot,
-                "-n",
-                namespace,
-                "wait",
-                "--for=condition=complete",
-                "job/database-init",
-                "--timeout=600s",
-            )
-        except ProvisioningError:
-            logs = self.kubectl(slot, "-n", namespace, "logs", "job/database-init", "--tail=100")
-            logger.error("database_initialization_failed %s", self.commands.redact(logs))
-            raise
-        self.apply(
-            slot,
-            {
-                "apiVersion": "v1",
-                "kind": "ConfigMap",
-                "metadata": {"name": "database-initialized", "namespace": namespace},
-                "immutable": True,
-                "data": {
-                    "serverId": properties["serverId"],
-                    "database": properties["database"],
-                    "setupSecretName": setup_name,
-                },
-            },
-            create=True,
-        )
-        self.cleanup_initialization(slot, namespace, setup_name)
+        workloads.initialize_database(self, slot)
 
     def database_resource_exists(self, slot: str) -> bool:
         output = self.rad(
@@ -1001,113 +877,10 @@ class AzureProvider:
 
     @staticmethod
     def job(namespace: str, name: str, image: str, command: list[str], account: str) -> dict:
-        return {
-            "apiVersion": "batch/v1",
-            "kind": "Job",
-            "metadata": {"name": name, "namespace": namespace},
-            "spec": {
-                "backoffLimit": 0,
-                "activeDeadlineSeconds": 900,
-                "template": {
-                    "metadata": {"labels": {"plane-demo/project": "radplanes"}},
-                    "spec": {
-                        "restartPolicy": "Never",
-                        "serviceAccountName": account,
-                        "automountServiceAccountToken": False,
-                        "securityContext": {
-                            "runAsNonRoot": True,
-                            "runAsUser": 10001,
-                            "runAsGroup": 10001,
-                            "fsGroup": 10001,
-                            "seccompProfile": {"type": "RuntimeDefault"},
-                        },
-                        "containers": [
-                            {
-                                "name": name,
-                                "image": image,
-                                "command": command,
-                                "securityContext": {
-                                    "allowPrivilegeEscalation": False,
-                                    "capabilities": {"drop": ["ALL"]},
-                                },
-                            }
-                        ],
-                    },
-                },
-            },
-        }
+        return workloads.job(namespace, name, image, command, account)
 
     def runtime_secrets(self, slot: str) -> None:
-        role, namespace = self.names(slot)
-        if role == "management":
-            self.secret(
-                slot,
-                namespace,
-                "management-api-runtime",
-                {
-                    "MANAGEMENT_DSN": self.credentials.dsn(slot, "mgmt_api"),
-                    "DEMO_KEY": self.credentials.plane(slot)["demoKey"],
-                },
-            )
-            self.secret(
-                slot,
-                namespace,
-                "provisioner-runtime",
-                {
-                    "MANAGEMENT_DSN": self.credentials.dsn(slot, "mgmt_provisioner"),
-                    "PROVIDER": "azure",
-                    "PROVISIONING_CONFIG": "/etc/plane-demo/provisioning.json",
-                    "PROVISIONING_CREDENTIALS_JSON": json.dumps(
-                        self.credentials.runtime_seed(self.config)
-                    ),
-                },
-            )
-        elif role == "control":
-            pair = slot.removesuffix("-control")
-            reporting_role = next(
-                item["reporting_role"] for item in self.config.pair_slots if item["pair_id"] == pair
-            )
-            self.secret(
-                slot,
-                namespace,
-                "control-api-runtime",
-                {
-                    "CONTROL_DSN": self.credentials.dsn(slot, "cp_api"),
-                    "DEMO_KEY": self.credentials.plane(slot)["demoKey"],
-                },
-            )
-            self.secret(
-                slot,
-                namespace,
-                "control-reconciler-runtime",
-                {
-                    "CONTROL_DSN": self.credentials.dsn(slot, "cp_reconciler"),
-                    "MANAGEMENT_DSN": self.credentials.dsn("management", reporting_role),
-                    "PAIR_ID": pair,
-                },
-            )
-        else:
-            pair = slot.removesuffix("-data")
-            plane = self.credentials.ensure(slot, set())
-            common = {"PAIR_ID": pair, "PROJECT_ID": "radplanes", "KUBE_NAMESPACE": namespace}
-            self.secret(
-                slot,
-                namespace,
-                "data-api-runtime",
-                {
-                    **common,
-                    "DEMO_KEY": plane["demoKey"],
-                },
-            )
-            self.secret(
-                slot,
-                namespace,
-                "data-reconciler-runtime",
-                {
-                    **common,
-                    "CONTROL_DSN": self.credentials.dsn(f"{pair}-control", "dp_reconciler"),
-                },
-            )
+        workloads.runtime_secrets(self, slot)
 
     def certificate(self, slot: str, domain: str) -> str:
         allocation = self.config.allocation(slot)

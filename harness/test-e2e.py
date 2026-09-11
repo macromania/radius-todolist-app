@@ -129,9 +129,34 @@ def source_hashes(component):
     return hashes
 
 
+def local_source_hashes(component):
+    paths = [ROOT / "pyproject.toml", ROOT / "uv.lock", *ROOT.glob("sql/*.sql")]
+    if component != "provisioner":
+        paths += [ROOT / f"src/plane_demo/{name}.py" for name in MODULES]
+    else:
+        paths += [
+            *ROOT.glob("src/plane_demo/**/*.py"),
+            *(ROOT / "operations" / name for name in COORDINATOR_SCRIPTS),
+            *ROOT.glob("operations/local/*.py"),
+            *(
+                path
+                for path in (ROOT / "infra/radius").rglob("*")
+                if path.is_file()
+                and path.suffix in {".bicep", ".yaml", ".json", ".tf", ".hcl", ".sh"}
+                and ".terraform" not in path.parts
+                and ".build" not in path.parts
+            ),
+        ]
+    return {
+        str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(paths)
+    }
+
+
 IDENTITY_PROBE = r"""
 import json,os,ssl,sys
 role=sys.argv[1]
+local=len(sys.argv)>2 and sys.argv[2]=="local"
 if role in ("management-api","control-api"):
     import psycopg
     from psycopg.rows import dict_row
@@ -142,6 +167,14 @@ if role in ("management-api","control-api"):
             "SELECT current_database() AS database,inet_server_addr()::text AS server_address"
         ).fetchone()
         identity.update(host=connection.info.host,port=connection.info.port)
+        if local:
+            from psycopg.conninfo import conninfo_to_dict
+            parameters=conninfo_to_dict(os.environ[name])
+            if not parameters.get("password") or parameters.get("sslmode")!="disable":
+                raise RuntimeError("local_postgresql_connection_contract")
+            if connection.info.ssl_in_use:
+                raise RuntimeError("local_postgresql_transport_contract")
+            identity["tls"]=False
         result={"postgresql":identity}
         if role=="management-api":
             result["pairs"]=connection.execute(
@@ -159,6 +192,17 @@ else:
                          "peer_address":connected.getpeername()[0],
                          "tls":isinstance(connected,ssl.SSLSocket)
                                and connected.version() is not None}}
+        if local:
+            import redis,secrets
+            if not connection.password: raise RuntimeError("redis_password_missing")
+            with redis.Redis(host=connection.host,port=connection.port,
+                             username=connection.username,password=secrets.token_urlsafe(32),
+                             socket_timeout=3,socket_connect_timeout=3) as wrong:
+                try: wrong.ping()
+                except redis.AuthenticationError: pass
+                else: raise RuntimeError("redis_wrong_password_not_rejected")
+            result["redis"]["authenticated"]=True
+            result["redis"]["wrong_password_rejected"]=True
     finally:
         store.connection_pool.release(connection)
         store.close()
@@ -236,10 +280,17 @@ class APIs:
                 "azure_endpoint_requires_trusted_https",
             )
         else:
+            ports = {
+                "management": 35490,
+                "control:shared": 35491,
+                "data:shared": 35492,
+                "control:isolated-1": 35493,
+                "data:isolated-1": 35494,
+            }
             require(
                 parsed.scheme == "http"
-                and parsed.hostname in {"127.0.0.1", "localhost"}
-                and parsed.port in range(35490, 35500),
+                and parsed.hostname == "127.0.0.1"
+                and parsed.port == ports.get(target),
                 "local_endpoint_not_reserved_loopback",
             )
         key_file = self.configuration.file(endpoint.get("key_file"), secret=True)
@@ -416,14 +467,15 @@ class Runner:
         continue_first_from: str | None = None,
         apis=None,
         kube_factory=faults.Kubectl,
-        fault_factory=faults.ParentFault,
+        fault_factory=None,
         clock=time.monotonic,
         sleep=time.sleep,
     ):
         self.configuration, self.mode = configuration, mode
         self.continue_first_from = continue_first_from
         self.apis = apis if apis is not None else APIs(configuration)
-        self.kube_factory, self.fault_factory = kube_factory, fault_factory
+        self.kube_factory = kube_factory
+        self.fault_factory = fault_factory or faults.fault_class(configuration)
         self.clock, self.sleep = clock, sleep
         self.run_id = uuid4().hex
         self.path = configuration.root / "evidence" / f"acceptance-{self.run_id}.json"
@@ -817,11 +869,28 @@ class Runner:
         container = kube.target.component(component)["container"]
         role = "provisioner" if component == "provisioner" else "api"
         expected_image = self.configuration.current().get("images", {}).get(role)
-        require(
-            isinstance(expected_image, str)
-            and re.fullmatch(r"[a-z0-9./_-]+@sha256:[a-f0-9]{64}", expected_image),
-            "configured_image_digest_missing",
-        )
+        if self.configuration.environment == "azure":
+            require(
+                isinstance(expected_image, str)
+                and re.fullmatch(r"[a-z0-9./_-]+@sha256:[a-f0-9]{64}", expected_image),
+                "configured_image_digest_missing",
+            )
+        else:
+            review = self.configuration.current().get("local_images", {})
+            source = self.record.get("source", {})
+            require(
+                review.get("version") == 1
+                and review.get("content_verified") is True
+                and review.get("source_revision") == source.get("commit")
+                and source.get("worktree_dirty") is False
+                and isinstance(expected_image, str)
+                and expected_image == f"localhost/radplanes-plane-{role}:{source.get('commit')}"
+                and review.get(role, {}).get("reference") == expected_image
+                and report_time(source.get("committed_at"))
+                <= report_time(review.get("inspected_at"))
+                <= report_time(self.record["started_at"]),
+                "local_image_review_mismatch",
+            )
         specs = [
             item for item in pod.get("spec", {}).get("containers", []) if item["name"] == container
         ]
@@ -840,7 +909,19 @@ class Runner:
             and re.search(r"sha256:[a-f0-9]{64}$", statuses[0]["imageID"]),
             "running_image_digest_missing",
         )
-        expected = source_hashes(component)
+        if self.configuration.environment == "local":
+            image = review[role]
+            mapping = kube.target.local.get("image_ids", {}).get(component, {})
+            require(
+                re.fullmatch(r"sha256:[a-f0-9]{64}", image.get("image_id", ""))
+                and mapping.get("image_id") == image["image_id"]
+                and mapping.get("running_image_id") == statuses[0]["imageID"],
+                "local_running_image_identity_mismatch",
+            )
+            expected = local_source_hashes(component)
+            require(image.get("source_hashes") == expected, "local_review_source_hash_mismatch")
+        else:
+            expected = source_hashes(component)
         actual = kube.exec_json(component, SOURCE_PROBE, json.dumps(list(expected)))
         require(actual.get("files") == expected, "deployed_source_hash_mismatch")
         require(
@@ -869,9 +950,33 @@ class Runner:
             for component in components:
                 self.verify_workload(kube, component)
             role = suffix + "-api"
-            instances[suffix] = kube.exec_json(role, IDENTITY_PROBE, role)
+            arguments = [role]
+            if self.configuration.environment == "local":
+                arguments.append("local")
+            instances[suffix] = kube.exec_json(role, IDENTITY_PROBE, *arguments)
             if suffix == "data" and self.configuration.environment == "azure":
                 require(instances[suffix]["redis"]["tls"] is True, "azure_redis_tls_not_enabled")
+            elif self.configuration.environment == "local":
+                identity = instances[suffix]["redis" if suffix == "data" else "postgresql"]
+                expected_host = (
+                    f"redis.{kube.target.namespace}.svc.cluster.local"
+                    if suffix == "data"
+                    else kube.target.local.get("node", {}).get("address")
+                )
+                require(
+                    identity.get("tls") is False
+                    and identity.get("port") == (6379 if suffix == "data" else 31543)
+                    and isinstance(expected_host, str)
+                    and bool(expected_host)
+                    and identity.get("host") == expected_host,
+                    "local_datastore_endpoint_mismatch",
+                )
+                if suffix == "data":
+                    require(
+                        identity.get("authenticated") is True
+                        and identity.get("wrong_password_rejected") is True,
+                        "local_redis_authentication_not_verified",
+                    )
             instances[suffix]["cluster_uid"] = kube.target.cluster_uid
         return instances
 
@@ -979,6 +1084,17 @@ class Runner:
             for key in ("control_cluster_id", "data_cluster_id")
         ]
         require(all(cluster_ids) and len(set(cluster_ids)) == 4, "cluster_ids_not_dedicated")
+        if self.configuration.environment == "local":
+            require(
+                isolated_pair == "isolated-1"
+                and cluster_ids
+                == [
+                    f"kind://radplanes-local-{pair}-{role}"
+                    for pair in ("shared", "isolated-1")
+                    for role in ("control", "data")
+                ],
+                "local_cluster_inventory_mismatch",
+            )
         cluster_uids = [self.configuration.target("management").cluster_uid] + [
             instances[role]["cluster_uid"]
             for instances in (shared_instances, isolated_instances)
@@ -1324,10 +1440,21 @@ class Runner:
                         "harness/test-e2e.py",
                         "harness/fault-parent-link.py",
                         "harness/export-state.py",
+                        "harness/local",
                         "images/api",
                         "images/provisioner",
                         "pyproject.toml",
                         "uv.lock",
+                        *(
+                            [
+                                "operations/local",
+                                "infra/radius",
+                                "images/local-provisioner",
+                                ".dockerignore",
+                            ]
+                            if self.configuration.environment == "local"
+                            else []
+                        ),
                         *source_files("provisioner"),
                     ]
                 ).strip(),
@@ -1336,10 +1463,6 @@ class Runner:
             self.record["source"] = faults.source_metadata()
             if self.continue_first_from is not None:
                 self.load_first_admission()
-            if self.mode in {"outages", "all", "verify-existing"}:
-                require(
-                    self.configuration.environment == "azure", "local_fault_strategy_unimplemented"
-                )
             self.record["outcome"] = "running"
             self.save("acceptance_started")
             self.management_image()

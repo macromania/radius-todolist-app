@@ -20,20 +20,34 @@ logger = logging.getLogger(__name__)
 
 
 class Commands:
-    def __init__(self, root: Path, guard: Callable[[], None] = lambda: None):
+    def __init__(
+        self,
+        root: Path,
+        guard: Callable[[], None] = lambda: None,
+        *,
+        state_root: Path | None = None,
+        local: bool = False,
+    ):
         self.root = root.resolve()
+        self.state_root = state_root or self.root / ".state/azure"
         self.guard = guard
         self.environment = dict(os.environ)
         self._original_home = Path.home().resolve()
         self._bicep = (self._original_home / ".rad/bin/bicep").resolve()
         self.environment.setdefault("AZURE_CONFIG_DIR", str(self._original_home / ".azure"))
+        if local:
+            self.environment = {
+                "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+                "HOME": str(self.state_root / "home"),
+                "LC_ALL": "C",
+            }
         self._secrets: set[str] = set()
 
     def radius_environment(self, kubeconfig: Path, context: str) -> dict[str, str]:
         self.guard()
         if not re.fullmatch(r"radplanes-[a-z0-9-]+", context):
             raise ProvisioningError("invalid_radius_context")
-        state = (self.root / ".state/azure").resolve()
+        state = self.state_root.resolve()
         kubeconfig = kubeconfig.resolve()
         if not kubeconfig.is_relative_to(state) or not kubeconfig.is_file():
             raise ProvisioningError("invalid_kubeconfig_path")
@@ -61,7 +75,6 @@ class Commands:
             **self.environment,
             "HOME": str(home),
             "KUBECONFIG": str(kubeconfig),
-            "AZURE_CONFIG_DIR": self.environment["AZURE_CONFIG_DIR"],
         }
 
     def protect(self, value) -> None:

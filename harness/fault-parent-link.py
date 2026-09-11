@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
+import importlib.util
 import ipaddress
 import json
 import os
@@ -13,9 +15,10 @@ import selectors
 import signal
 import stat
 import subprocess
+import sys
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -30,6 +33,13 @@ COMPONENT_DSN = {
 SLUG = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 UID = re.compile(r"[a-f0-9-]{16,64}\Z")
 POLICY_RESOURCE = "ciliumnetworkpolicies.cilium.io"
+LOCAL_SLOTS = (
+    "management",
+    "shared-control",
+    "shared-data",
+    "isolated-1-control",
+    "isolated-1-data",
+)
 
 
 class AcceptanceError(RuntimeError):
@@ -66,6 +76,7 @@ def source_metadata() -> dict:
             "--",
             "harness/test-e2e.py",
             "harness/fault-parent-link.py",
+            "harness/local",
             "src/plane_demo",
             "sql",
             "infra/radius/apps",
@@ -126,6 +137,7 @@ class Target:
     namespace_uid: str
     components: dict
     parent: dict
+    local: dict = field(default_factory=dict)
 
     def component(self, name: str) -> dict:
         value = self.components.get(name)
@@ -150,14 +162,26 @@ class Configuration:
         self.environment = value.get("environment", "")
         require(self.project == PROJECT, "invalid_project")
         require(self.environment in {"azure", "local"}, "invalid_environment")
+        require(
+            self.environment != "local" or self.root == ROOT / ".state/local",
+            "local_configuration_scope",
+        )
 
     def file(self, value: str, *, secret: bool = False) -> Path:
         require(isinstance(value, str) and bool(value), "missing_state_file")
+        if self.environment == "local":
+            raw = self.root / value
+            require(
+                all(not part.is_symlink() for part in [raw, *raw.parents]),
+                "local_state_symlink_refused",
+            )
         path = (self.root / value).resolve()
         require(path.is_relative_to(self.root), "state_path_escape")
         require(path.is_file(), "state_file_missing")
         if secret:
             require(stat.S_IMODE(path.stat().st_mode) & 0o077 == 0, "credential_file_permissions")
+            if self.environment == "local":
+                require(stat.S_IMODE(path.stat().st_mode) == 0o600, "credential_file_permissions")
         return path
 
     def current(self) -> dict:
@@ -179,9 +203,17 @@ class Configuration:
             bool(SLUG.fullmatch(namespace)) and namespace.startswith(self.project + "-"),
             "invalid_target_namespace",
         )
+        if self.environment == "local":
+            role = "management" if slot == "management" else slot.rsplit("-", 1)[-1]
+            require(
+                slot in LOCAL_SLOTS and namespace == f"radplanes-local-{slot}-{role}",
+                "local_target_namespace_mismatch",
+            )
         context = value.get("context", "")
         require(
-            isinstance(context, str) and context == self.project + "-" + slot,
+            isinstance(context, str)
+            and context
+            == self.project + ("-local-" if self.environment == "local" else "-") + slot,
             "unexpected_target_context",
         )
         require(
@@ -193,6 +225,8 @@ class Configuration:
         )
         kubeconfig = self.file(value.get("kubeconfig"), secret=True)
         self.verify_transport(kubeconfig, context)
+        if self.environment == "local":
+            self.verify_local_transport(kubeconfig, context, slot, value.get("local", {}))
         return Target(
             self.project,
             slot,
@@ -203,7 +237,43 @@ class Configuration:
             value["namespace_uid"],
             value.get("components", {}),
             value.get("parent", {}),
+            value.get("local", {}),
         )
+
+    @staticmethod
+    def verify_local_transport(path, context, slot, local):
+        import yaml
+
+        try:
+            value = yaml.safe_load(path.read_text())
+            require(
+                value.get("current-context") == context
+                and len(value["contexts"]) == len(value["clusters"]) == len(value["users"]) == 1,
+                "local_kubeconfig_shape_mismatch",
+            )
+            selected, cluster, user = (
+                value["contexts"][0],
+                value["clusters"][0],
+                value["users"][0],
+            )
+            fields = cluster["cluster"]
+            require(
+                selected["context"]["cluster"] == cluster["name"]
+                and selected["context"]["user"] == user["name"]
+                and set(fields) <= {"server", "certificate-authority-data", "tls-server-name"}
+                and fields.get("server") == f"https://127.0.0.1:{35495 + LOCAL_SLOTS.index(slot)}"
+                and (slot == "management" or fields.get("tls-server-name") == context)
+                and fields.get("tls-server-name") in (None, context)
+                and set(user["user"]) == {"client-certificate-data", "client-key-data"}
+                and hashlib.sha256(path.read_bytes()).hexdigest() == local.get("kubeconfig_sha256")
+                and hashlib.sha256(
+                    base64.b64decode(fields["certificate-authority-data"], validate=True)
+                ).hexdigest()
+                == local.get("ca_sha256"),
+                "local_kubeconfig_transport_mismatch",
+            )
+        except (OSError, KeyError, TypeError, ValueError, yaml.YAMLError):
+            raise AcceptanceError("local_kubeconfig_invalid") from None
 
     @staticmethod
     def verify_transport(path: Path, context: str):
@@ -495,6 +565,7 @@ class Probe:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
+                env=getattr(kube, "environment", None),
             )
         except OSError:
             raise AcceptanceError("pod_probe_start_failed") from None
@@ -620,6 +691,8 @@ def deny_policy(target: Target, component: str, cidrs: list[str], run_id: str) -
 
 
 class ParentFault:
+    environment = "azure"
+
     def __init__(
         self,
         configuration: Configuration,
@@ -632,7 +705,7 @@ class ParentFault:
         clock=time.monotonic,
         sleep=time.sleep,
     ):
-        require(configuration.environment == "azure", "local_fault_strategy_unimplemented")
+        require(configuration.environment == self.environment, "fault_environment_mismatch")
         require(component in COMPONENT_DSN, "unsupported_fault_component")
         self.target = configuration.target(slot)
         self.component = component
@@ -675,8 +748,7 @@ class ParentFault:
         self._save()
         return value
 
-    def activate(self):
-        self.kube.verify_scope()
+    def prepare_fault(self, pod):
         crd = self.kube.json("get", "customresourcedefinition", POLICY_RESOURCE)
         require(
             any(
@@ -689,6 +761,49 @@ class ParentFault:
             ),
             "cilium_policy_crd_not_ready",
         )
+        self.original = self.kube.policies()
+        self.record["original_policies"] = self.original
+
+    def plan_fault(self, cidrs):
+        self.policy = deny_policy(self.target, self.component, cidrs, self.run_id)
+        self.record["policy"] = self.policy
+
+    def create_fault(self):
+        # create, never apply: an existing object must never be overwritten.
+        self.kube.run("create", "-f", "-", payload=json.dumps(self.policy))
+        self.created = True
+        created = self.kube.json("get", POLICY_RESOURCE, self.policy["metadata"]["name"])
+        self.record["policy_uid"] = created["metadata"]["uid"]
+
+    def remove_fault(self):
+        self.kube.verify_scope()
+        name = self.policy["metadata"]["name"]
+        current = self.kube.optional(POLICY_RESOURCE, name)
+        if current:
+            require(
+                current["metadata"].get("labels", {}).get("plane-demo/fault-run") == self.run_id
+                and current.get("spec") == self.policy["spec"],
+                "fault_policy_ownership_changed",
+            )
+            if self.record.get("policy_uid"):
+                require(
+                    current["metadata"]["uid"] == self.record["policy_uid"],
+                    "fault_policy_uid_changed",
+                )
+            self.kube.delete_uid(
+                "ciliumnetworkpolicies",
+                name,
+                current["metadata"]["uid"],
+                group="cilium.io/v2",
+            )
+            while self.kube.optional(POLICY_RESOURCE, name) is not None:
+                require(self.clock() < self.recovery_deadline, "fault_policy_not_deleted")
+                self.sleep(1)
+        require(self.kube.policies() == self.original, "original_policies_changed")
+        self.record["restored_policies"] = self.original
+
+    def activate(self):
+        self.kube.verify_scope()
         pod = self.kube.pod(self.component)
         self.pod_uid = pod["metadata"]["uid"]
         self.record["pod_uid"] = self.pod_uid
@@ -696,26 +811,20 @@ class ParentFault:
             {"name": item["name"], "image_id": item.get("imageID")}
             for item in pod.get("status", {}).get("containerStatuses", [])
         ]
-        self.original = self.kube.policies()
-        self.record["original_policies"] = self.original
+        self.prepare_fault(pod)
         self.probe = self.probe_factory(self.kube, self.component, pod)
         baseline = self.probe.request("baseline")
         require(baseline.get("ok") is True, "parent_baseline_not_healthy")
         self.addresses = sorted(baseline.get("ips", []))
         cidrs = parent_cidrs(self.target, self.addresses)
         require(self.probe.request("local").get("ok") is True, "local_baseline_not_healthy")
-        self.policy = deny_policy(self.target, self.component, cidrs, self.run_id)
-        self.record["policy"] = self.policy
+        self.plan_fault(cidrs)
         self.record["baseline"] = baseline
         self.record["outcome"] = "activating"
         self.creation_attempted = True
         self.record["creation_attempted"] = True
         self._save()
-        # create, never apply: an existing object must never be overwritten.
-        self.kube.run("create", "-f", "-", payload=json.dumps(self.policy))
-        self.created = True
-        created = self.kube.json("get", POLICY_RESOURCE, self.policy["metadata"]["name"])
-        self.record["policy_uid"] = created["metadata"]["uid"]
+        self.create_fault()
         self._save()
         deadline = self.clock() + 30
         while True:
@@ -754,37 +863,12 @@ class ParentFault:
         self.record.pop("physical_restored_at", None)
         try:
             if self.creation_attempted:
-                self.kube.verify_scope()
-                name = self.policy["metadata"]["name"]
-                current = self.kube.optional(POLICY_RESOURCE, name)
-                if current:
-                    require(
-                        current["metadata"].get("labels", {}).get("plane-demo/fault-run")
-                        == self.run_id
-                        and current.get("spec") == self.policy["spec"],
-                        "fault_policy_ownership_changed",
-                    )
-                    if self.record.get("policy_uid"):
-                        require(
-                            current["metadata"]["uid"] == self.record["policy_uid"],
-                            "fault_policy_uid_changed",
-                        )
                 self.recovery_started = self.clock()
                 self.recovery_deadline = self.recovery_started + RECOVERY_SECONDS
                 self.record["restoration_started_at"] = utc_now()
                 self.record["recovery_started_monotonic"] = self.recovery_started
                 self.record["recovery_deadline_monotonic"] = self.recovery_deadline
-                if current:
-                    self.kube.delete_uid(
-                        "ciliumnetworkpolicies",
-                        name,
-                        current["metadata"]["uid"],
-                        group="cilium.io/v2",
-                    )
-                    while self.kube.optional(POLICY_RESOURCE, name) is not None:
-                        require(self.clock() < self.recovery_deadline, "fault_policy_not_deleted")
-                        self.sleep(1)
-                require(self.kube.policies() == self.original, "original_policies_changed")
+                self.remove_fault()
                 if self.probe:
                     self.probe.close()
                 self.probe = self.probe_factory(
@@ -800,7 +884,6 @@ class ParentFault:
                     require(self.clock() < self.recovery_deadline, "parent_link_not_restored")
                     self.sleep(1)
                 self.record["restoration_probe"] = result
-                self.record["restored_policies"] = self.original
                 self.record["physical_restored"] = True
                 self.record["physical_restored_at"] = utc_now()
         except Exception as error:
@@ -890,6 +973,21 @@ class ParentFault:
         return fault
 
 
+def fault_class(configuration):
+    if configuration.environment == "azure":
+        return ParentFault
+    name = "plane_demo_local_fault_" + __name__
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(
+            name, ROOT / "harness/local/fault-parent-link.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        module.base = sys.modules[__name__]
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name].LocalParentFault
+
+
 @contextmanager
 def interruption_is_failure():
     def interrupted(_signal, _frame):
@@ -917,9 +1015,10 @@ def main(argv=None) -> int:
     try:
         require(60 <= args.duration <= 600, "fault_duration_must_be_60_to_600_seconds")
         configuration = Configuration(args.config)
+        selected_fault = fault_class(configuration)
         if args.restore:
             with interruption_is_failure():
-                fault = ParentFault.from_evidence(configuration, args.restore)
+                fault = selected_fault.from_evidence(configuration, args.restore)
                 fault.restore()
             print(
                 json.dumps(
@@ -930,8 +1029,13 @@ def main(argv=None) -> int:
         require(bool(args.slot) and bool(args.component), "slot_and_component_required")
         evidence = configuration.root / "evidence" / f"fault-{uuid4().hex}.json"
         with interruption_is_failure():
-            fault = ParentFault(configuration, args.slot, args.component, evidence)
+            fault = selected_fault(configuration, args.slot, args.component, evidence)
             fault.record["source"] = source_metadata()
+            if configuration.environment == "local":
+                require(
+                    fault.record["source"]["worktree_dirty"] is False,
+                    "local_fault_source_worktree_dirty",
+                )
             with fault:
                 deadline = time.monotonic() + args.duration
                 while time.monotonic() < deadline:

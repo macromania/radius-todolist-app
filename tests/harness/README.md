@@ -28,7 +28,7 @@ environment's `evidence/` directory with mode `0600`.
 
 Provenance covers both management workloads, not just its API. The provisioner
 check includes coordinator/provider Python, copied administrative scripts, SQL,
-and Radius application/type sources. Every checked workload must use its
+and Radius application/type sources. On Azure, every checked workload must use its
 configured digest-pinned image reference and expose a running image digest.
 Those references/digests and exact source hashes are recorded separately,
 including the replacement data API pod after restart.
@@ -36,6 +36,146 @@ Redis identity evidence reports `tls: true` only for the connected
 `ssl.SSLSocket` with a negotiated protocol version, not a connection option or
 redis-py attribute. PING runs and must succeed even under optimized Python.
 The Redis output remains limited to host, port, peer address, and TLS status.
+
+## Local five-cluster acceptance
+
+The local implementation uses the **same** `Runner.scenario`, configuration,
+counter/auth, timeline, idempotency, and outage checks as Azure. There is no
+local shortcut around the second shared tenant's paused-data-reconciler
+admission, four distinct child cluster IDs, five live cluster UIDs, either
+outage, or the absolute 30-second recovery deadline. Offline command-path tests
+are not a claim that the full local scenario passed. The parent must review,
+deploy, export, and run the live checks; see [the local contract](../../docs/local.md).
+
+After committed, inspected native runtime images and management deployment:
+
+```sh
+# Read-only: exit 3 means the expected child state is incomplete, not failure.
+uv run python harness/local/export-state.py --once
+
+# Keep this foreground process, or a parent-owned attached async process, running
+# through admissions. Wait for export-status.json ready_for_onboarding: true.
+uv run python harness/local/export-state.py --watch --timeout 10800
+
+# Mutations and API requests require the explicit execution switch.
+uv run python harness/test-e2e.py --config .state/local/acceptance.json --mode all --execute
+
+./harness/api.sh local management GET /tenants/shared-a
+./harness/api.sh local control:shared GET /tenants/shared-a
+./harness/api.sh local data:isolated-1 POST /tenants/isolated-c/counter
+```
+
+The only provisioning input is the protected `.state/local/provisioning.json`
+written for `LocalConfig`: version 1, provider `local`, project `radplanes`,
+five fixed allocations, four reviewed Recipe references, native image references
+and `imageId` values, and the management cluster's UID, decoded-PEM CA SHA-256,
+internal node address, and Kubernetes Service address. No tenant supplies these
+values. The exporter reads `.state/local/runtime-images.json`, requires matching
+committed source, image IDs, inspected contents, and timestamps, and compares the
+exact reviewed source file list with **running Pod files**. It also maps each
+Pod's reported image ID through `crictl inspecti` on its verified node to the
+reviewed Docker configuration digest. If CRI reports a manifest digest instead,
+the exporter reads the node's containerd content using `ctr --namespace k8s.io`,
+hashes the raw manifest and configuration bytes (including an index's unique
+reviewed Linux/native-platform manifest when present), and requires that exact manifest
+to reference the reviewed configuration digest. Neither a different digest nor
+a matching tag can skip the running-source check. Acceptance repeats that check, including
+the replacement data API Pod after restart. Local tag/ID support does not relax
+Azure's registry digest-pinned reference requirement.
+
+Slots are `management`, `shared-control`, `shared-data`, `isolated-1-control`,
+and `isolated-1-data`. Cluster IDs are `kind://radplanes-local-<slot>`; contexts
+are `radplanes-local-<slot>`, never `kind-` prefixed. Gateways use only
+`http://127.0.0.1:35490` through `:35494` in that order. Host Kubernetes API
+ports are 35495–35499, with verified CA transport. Namespaces are
+`radplanes-local-<slot>-<role>`. Labels and service accounts retain their
+existing `plane-demo/project=radplanes` and component names.
+
+Every pass verifies the recorded management Docker ID and encryption proof,
+each exact kind node name/label/ID, its unique private address on the `kind`
+network, and the live Kubernetes/namespace UIDs. Child credentials come only
+from each named, Radius-owned access Secret in `radplanes-local-access`, after
+checking the cluster resource's `bootstrapAccessRef`, Secret slot label, and
+resource-ID annotation. Only the `kubeconfig` field and ownership metadata are
+read, never a Secret list or whole Secret. Its internal address, explicit
+certificate name, CA, and certificate/key profile are checked before changing
+only the endpoint to the reserved host loopback port. An existing protected
+export must match exactly before it is used; it is never rewritten to adopt a
+changed cluster or credential. The bootstrap kubeconfig is not modified.
+
+Only `DEMO_KEY` from each named `ROLE-api-runtime` Secret is copied, into a
+mode-0600 key file. Keys, kubeconfigs, and endpoint generations are immutable.
+Each progressively published `acceptance.json` points to its own immutable
+endpoint generation; `endpoints.json` remains the API client's atomic projection.
+A single-writer lock protects publication. Missing children and unfinished
+rollouts may remain pending; authentication, changed ownership, transport,
+image/source, and key failures do not become an empty inventory or fake readiness.
+The exporter never edits live resources or global CLI/HOME configurations.
+
+Local parent PostgreSQL is the verified **parent node's private IPv4 address
+on port 31543**, with no host port mapping. This local transport intentionally
+uses `sslmode=disable`; Azure PostgreSQL verification is unchanged. A data API
+connects to its own namespaced Redis DNS endpoint on port 6379 with `tls: false`.
+The acceptance probe performs a real authenticated PING, rejects a wrong
+password, and records the local non-TLS result explicitly. Azure still requires
+a negotiated TLS socket.
+
+### Local fault mechanism and recovery
+
+kind's default CNI does not enforce NetworkPolicy. Local fault proof therefore
+uses `docker exec` with the pinned kind node's existing `crictl`, `stat`, `bash`,
+`nsenter`, and `iptables` tools. No live package installation or additional Pod
+image is used. The operator tool has Docker daemon access; **runtime API and
+provisioner containers receive none**.
+
+Before each mutation, the harness verifies the exact node, cluster/namespace
+UIDs, deployment/ReplicaSet/Pod ownership, component service account, CRI
+container and sandbox Pod UID, PID, and network namespace inode. It opens a
+descriptor for that namespace and refuses the node's network namespace. The
+only rule inserted is an `OUTPUT` TCP `DROP` to the exact parent IPv4 `/32` and
+port 31543, with a unique run comment. It changes no host/node/global networking,
+policy defaults, unrelated rules, or other Pods. The protected journal is written
+**before** insertion. There is no ephemeral container or cleanup Pod.
+
+The existing interactive probe opens the real parent DSN from the reconciler
+before insertion and must prove both that connection and a fresh connection
+fail, while the reconciler's local database/Kubernetes prerequisite still works.
+The normal outage checks then send ten exact counter increments over at least
+60 seconds. During the control-parent fault, two control API updates remain
+pending, the data API restarts without its parent, and only the newest version
+may apply after recovery.
+
+`finally` removes only the exact recorded rule, checks the original `OUTPUT`
+rule hash, and proves fresh parent connectivity. The same absolute 30-second
+budget includes removal, probe cleanup, and reporting/latest-version convergence.
+A replaced Pod, changed namespace, or failed removal is an explicit failed
+restoration, not permission to touch a replacement. Preserve the evidence and
+investigate; do not flush rules or reset clusters. After an interruption, only
+the recorded, still-owned rule may be restored:
+
+```sh
+uv run python harness/fault-parent-link.py --config .state/local/acceptance.json \
+  --restore .state/local/evidence/RECORDED-FAULT.json --execute
+```
+
+Standalone local faults route through the same command (or
+`harness/local/fault-parent-link.py`) using `--slot shared-control
+--component control-reconciler --duration 60 --execute`. Restore-only success
+is not acceptance. The Azure-only first-admission continuation remains
+Azure-only; local execution must not reinterpret historical Azure evidence.
+
+Cleanup tooling can call `assert_restored_for_cleanup(commands.run, configuration)`
+from `harness/local/fault-parent-link.py`, using that module's
+`base.Configuration`. This read-only helper requires a complete five-target
+export, validates protected fault journals, and reuses the exact node/Pod/CRI
+network-namespace guards. Attempted faults must have successful restoration
+markers and matching recorded/current Pod, sandbox, and original/restored/live
+`OUTPUT` hashes. Every current reconciler must be free of owned fault markers.
+Historical failure fields may remain after a successful explicit restoration;
+they do not override current restoration proof. Changed journals invalidate the
+check. The helper returns non-secret journal hashes and live identity/rule
+observations for the cleanup owner's journal; it writes nothing and never
+inserts or removes a rule.
 
 ## Operator state contract
 

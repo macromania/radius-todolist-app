@@ -94,11 +94,12 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F065 | 5 | High correctness | `operations/local/common.py` | native PUT media type | `kubectl replace --raw` did not send the JSON media type required by dynamic-RP | Explicit JSON over project CA/client-certificate authenticated HTTP transport; no child/state created by the rejected request; live retry pending |
 | F066 | 5 | Medium security | `operations/local/common.py` | unreleased transport candidate | Kubernetes ApiClient still followed redirects when connection retries were zero, allowing authenticated PUT replay | Candidate replaced before live use with HTTPX `follow_redirects=False`; real-client 301/302/307/308 same/foreign-origin and disconnect tests prove one request only; fix review clean |
 | F067 | 6 | High security | `operations/local/runtime-images.py` | initial image inspection | Candidate-executed hash reporting did not bind inspection to the guarded build or verify administrative binaries | Require recorded immutable build IDs and trusted host-side filesystem/tool/Python-runtime hashing before import smoke tests; 17 focused tests and independent fix review pass; actual builds pending |
-| F068 | 6 | High correctness | `operations/local/module-server.py` | ConfigMap mount handling | Rejecting all symlinks also rejects Kubernetes' legitimate atomic ConfigMap projection | Restore containment-checked projected-file support with checksum verification; assigned for correction before deployment |
-| F069 | 6 | High correctness | Local provider and exporter | aggregate endpoint publication | Provider-generated `endpoints.json` conflicts with the exporter's strict ownership marker | Make the exporter the sole aggregate publisher; provider retains only per-slot endpoint records |
-| F070 | 6 | High correctness | `harness/local/export-state.py` | child Radius ownership | Export validation expects different application/environment owners from the provider's `cluster-SLOT`/`provision-SLOT` records | Validate those exact real owners and add producer-shaped fixtures |
-| F071 | 6 | High correctness | `harness/test-e2e.py` | local PostgreSQL identity | Local acceptance expects service DNS/5432 instead of the approved node-private-IP/31543 output | Match the real local connection contract while preserving Azure checks |
-| F072 | 6 | High correctness | `operations/local/cleanup.py` | Terraform ownership inventory | Full-demo state includes `terraform_data.images[0]`, but cleanup accepts only the two gate resources | Validate the exact image-import resource and configured inputs, not arbitrary extra resources |
+| F068 | 6 | High correctness | `operations/local/module-server.py` | ConfigMap mount handling | Rejecting all symlinks also rejects Kubernetes' legitimate atomic ConfigMap projection | Fixed: containment-checked AtomicWriter projection and checksum verification; startup/escape regressions and fix review pass |
+| F069 | 6 | High correctness | Local provider and exporter | aggregate endpoint publication | Provider-generated `endpoints.json` conflicts with the exporter's strict ownership marker | Fixed: exporter is sole aggregate publisher; provider writes per-slot records only; ownership regression and review pass |
+| F070 | 6 | High correctness | `harness/local/export-state.py` | child Radius ownership | Export validation expects different application/environment owners from the provider's `cluster-SLOT`/`provision-SLOT` records | Fixed: exact real owners validated, with producer-shaped positive and wrong-owner refusal tests |
+| F071 | 6 | High correctness | `harness/test-e2e.py` | local PostgreSQL identity | Local acceptance expects service DNS/5432 instead of the approved node-private-IP/31543 output | Fixed: exact target node IP and port 31543, foreign node/port refusal, and unchanged Azure checks |
+| F072 | 6 | High correctness | `operations/local/cleanup.py` | Terraform ownership inventory | Full-demo state includes `terraform_data.images[0]`, but cleanup accepts only the two gate resources | Fixed: exact third image-import owner and configured inputs checked; arbitrary extra state remains refused |
+| F073 | 6 | High correctness | `providers/local.py` | environment registration | Radius 0.60.2 generic create does not support the supplied `--group` flag | Removed unsupported flag while retaining the exact seeded workspace scope; actual command-path tests and fix review pass |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -1279,3 +1280,28 @@ rubber-duck review reproduced five producer/consumer mismatches (F068-F072).
 Passing mock tests did not prove those contracts. Corrections remain required
 before building or deploying the full local runtime; no live tenant admission
 has been attempted with this implementation.
+
+F068-F072 are corrected against the actual producer contracts, not relaxed
+aliases. The module server accepts contained atomic ConfigMap projections;
+only the exporter publishes aggregate endpoints; child owners match
+`provision-SLOT`/`cluster-SLOT`; PostgreSQL identity matches the exact private
+node and 31543; cleanup recognizes only the configured image-import Terraform
+resource in addition to the kind cluster/access Secret. The fix walkthrough
+and independent security review passed.
+
+An additional actual CLI-help check found F073 before execution: generic
+`resource create` has no `--group` flag. Environment registration now uses its
+already explicit, verified workspace group rather than an unsupported flag;
+custom cluster Bicep deployment keeps its supported group flag. Command-path
+regressions and the independent security fix review passed. The focused
+provider/export/cleanup/Recipe integration suite passed 235 tests and 13 subtests.
+These corrections require new native image builds and a fresh full acceptance
+run; they do not change the earlier one-child proof.
+
+The integrated source now passes 847 Python tests and 258 subtests, with
+50 explicit dependency skips, all 23 Bicep files, three generated extensions,
+21 Terraform mock-provider tests, Ruff, and ShellCheck. The shared application
+declarations, dependency modules, type schemas, SQL, and public API image
+allowlist remain unchanged. These are source/readiness checks; the next
+boundary is a native image build, host-side content verification, management
+deployment, and actual five-cluster acceptance.

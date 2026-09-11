@@ -15,6 +15,8 @@ import psycopg
 from plane_demo.management.providers.azure import AzureProvider
 from plane_demo.management.providers.commands import Commands
 from plane_demo.management.providers.credentials import Credentials
+from plane_demo.management.providers.local import LocalProvider
+from plane_demo.management.providers.local_config import LocalConfig
 from plane_demo.management.provisioning import OperatorConfig, ProvisioningError, provision_pair
 from plane_demo.shared.db import ProvisionerAlreadyRunning, provisioner_session
 
@@ -95,15 +97,16 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
         selected = os.environ.get("PROVIDER")
-        if selected == "local":
-            from plane_demo.management.providers.local import unsupported
-
-            unsupported()
-        if selected != "azure":
+        if selected not in ("azure", "local"):
             raise ProvisioningError("provider_required")
         root = Path(os.environ.get("PROJECT_ROOT", os.getcwd())).resolve()
-        config = OperatorConfig.load(
-            Path(os.environ.get("PROVISIONING_CONFIG", "/etc/plane-demo/provisioning.json"))
+        config_path = Path(
+            os.environ.get("PROVISIONING_CONFIG", "/etc/plane-demo/provisioning.json")
+        )
+        config = (
+            LocalConfig.load(config_path)
+            if selected == "local"
+            else OperatorConfig.load(config_path)
         )
         seed_json = os.environ.get("PROVISIONING_CREDENTIALS_JSON")
         seed = (
@@ -115,13 +118,19 @@ def main() -> int:
                 ).read_text()
             )
         )
-        credentials = Credentials(root / ".state/azure/credentials.json", seed)
+        credentials = Credentials(
+            root / ".state" / selected / "credentials.json", seed, environment=selected
+        )
         credentials.assert_management(config)
         dsn = os.environ.get("MANAGEMENT_DSN", "")
         if not dsn or dsn != credentials.dsn("management", "mgmt_provisioner"):
             raise ProvisioningError("provisioner_dsn_mismatch")
-        commands = Commands(root)
-        provider = AzureProvider(config, root, credentials, commands)
+        if isinstance(config, LocalConfig):
+            commands = Commands(root, state_root=root / ".state/local", local=True)
+            provider = LocalProvider(config, root, credentials, commands)
+        else:
+            commands = Commands(root)
+            provider = AzureProvider(config, root, credentials, commands)
 
         def terminate(_signum, _frame):
             raise SystemExit(143)

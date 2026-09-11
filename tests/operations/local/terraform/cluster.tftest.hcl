@@ -132,7 +132,86 @@ run "bounded_recipe_contract" {
   }
 }
 
-run "reject_other_slots" {
+run "shared_data_ports" {
+  command   = plan
+  state_key = "shared-data"
+  variables {
+    context = {
+      resource = {
+        id = "/planes/radius/local/resourceGroups/radplanes-local/providers/Demo.Platform/clusters/shared-data"
+        properties = {
+          environment = "/planes/radius/local/resourceGroups/radplanes-local/providers/Applications.Core/environments/management"
+          slot        = "shared-data"
+        }
+      }
+    }
+  }
+  assert {
+    condition     = kind_cluster.child.name == "radplanes-local-shared-data" && kind_cluster.child.kind_config[0].networking[0].api_server_port == 35497 && kind_cluster.child.kind_config[0].node[0].extra_port_mappings[0].host_port == 35492
+    error_message = "Shared data must retain its exact name and fixed reservations."
+  }
+}
+
+run "isolated_control_ports" {
+  command   = plan
+  state_key = "isolated-control"
+  variables {
+    context = {
+      resource = {
+        id = "/planes/radius/local/resourceGroups/radplanes-local/providers/Demo.Platform/clusters/isolated-1-control"
+        properties = {
+          environment = "/planes/radius/local/resourceGroups/radplanes-local/providers/Applications.Core/environments/management"
+          slot        = "isolated-1-control"
+        }
+      }
+    }
+  }
+  assert {
+    condition     = kind_cluster.child.name == "radplanes-local-isolated-1-control" && kind_cluster.child.kind_config[0].networking[0].api_server_port == 35498 && kind_cluster.child.kind_config[0].node[0].extra_port_mappings[0].host_port == 35493
+    error_message = "Isolated control must retain its exact name and fixed reservations."
+  }
+}
+
+run "isolated_data_ports" {
+  command   = plan
+  state_key = "isolated-data"
+  variables {
+    context = {
+      resource = {
+        id = "/planes/radius/local/resourceGroups/radplanes-local/providers/Demo.Platform/clusters/isolated-1-data"
+        properties = {
+          environment = "/planes/radius/local/resourceGroups/radplanes-local/providers/Applications.Core/environments/management"
+          slot        = "isolated-1-data"
+        }
+      }
+    }
+  }
+  assert {
+    condition     = kind_cluster.child.name == "radplanes-local-isolated-1-data" && kind_cluster.child.kind_config[0].networking[0].api_server_port == 35499 && kind_cluster.child.kind_config[0].node[0].extra_port_mappings[0].host_port == 35494
+    error_message = "Isolated data must retain its exact name and fixed reservations."
+  }
+}
+
+run "image_import_is_in_create_graph" {
+  command = plan
+  variables {
+    images = ["localhost/radplanes-plane-api:0123456789abcdef0123456789abcdef01234567"]
+  }
+  assert {
+    condition     = length(terraform_data.images) == 1 && terraform_data.images[0].triggers_replace.images == var.images
+    error_message = "Image references must trigger the post-kind-create import resource."
+  }
+}
+
+run "gate_does_not_import_images" {
+  command = plan
+  assert {
+    condition     = length(terraform_data.images) == 0
+    error_message = "Default gate behavior must not load application images."
+  }
+}
+
+run "reject_unknown_slots" {
   command = plan
   variables {
     context = {
@@ -140,10 +219,26 @@ run "reject_other_slots" {
         id = "unused"
         properties = {
           environment = "unused"
-          slot        = "isolated-1-control"
+          slot        = "isolated-2-control"
         }
       }
     }
   }
   expect_failures = [var.context]
+}
+
+run "reject_foreign_images" {
+  command = plan
+  variables {
+    images = ["docker.io/library/postgres:latest"]
+  }
+  expect_failures = [var.images]
+}
+
+run "reject_shell_image_injection" {
+  command = plan
+  variables {
+    images = ["localhost/radplanes-plane-api:0123456789abcdef0123456789abcdef01234567;id"]
+  }
+  expect_failures = [var.images]
 }

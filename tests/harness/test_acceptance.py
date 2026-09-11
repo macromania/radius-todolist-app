@@ -340,14 +340,13 @@ class FaultTests(StateCase):
         self.write_config()
         fault.restore()
 
-    def test_local_fault_mode_fails_before_kubernetes(self):
+    def test_local_configuration_requires_its_own_state_before_kubernetes(self):
         self.values["environment"] = "local"
         self.write_config()
-        configuration = faults.Configuration(self.config_path)
         factory = Mock()
-        with self.assertRaisesRegex(Error, "local_fault_strategy_unimplemented"):
+        with self.assertRaisesRegex(Error, "local_configuration_scope"):
             faults.ParentFault(
-                configuration,
+                faults.Configuration(self.config_path),
                 "shared-control",
                 "control-reconciler",
                 self.root / "evidence" / "fault.json",

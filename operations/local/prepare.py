@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import tarfile
+from pathlib import Path
 
 from common import (
     ENVIRONMENT_ID,
@@ -31,19 +32,46 @@ MODULE_FILES = (
     "main.tf",
     "outputs.tf",
     "node-address.sh",
+    "load-images.sh",
 )
+RECIPE_FILES = {
+    "cluster": MODULE_FILES,
+    **{
+        name: tuple(path for path in MODULE_FILES if not path.endswith(".sh"))
+        for name in ("postgresql", "redis", "gateway")
+    },
+}
+RECIPE_TYPES = {
+    "cluster": "Demo.Platform/clusters",
+    "postgresql": "Demo.Platform/postgreSqlDatabases",
+    "redis": "Applications.Datastores/redisCaches",
+    "gateway": "Demo.Platform/gateways",
+}
 
 
-def module_archive() -> bytes:
-    root = ROOT / "infra/radius/recipes/local/cluster"
+def source_bytes(path: Path) -> bytes:
+    if not path.is_relative_to(ROOT):
+        raise LocalError("Recipe sources must stay inside the repository")
+    for entry in (path, *path.parents):
+        if not entry.is_relative_to(ROOT):
+            break
+        if entry.is_symlink():
+            raise LocalError(f"Missing or symlinked Recipe source: {path.relative_to(ROOT)}")
+    if not path.is_file():
+        raise LocalError(f"Missing or symlinked Recipe source: {path.relative_to(ROOT)}")
+    return path.read_bytes()
+
+
+def module_archive(recipe: str = "cluster") -> bytes:
+    if recipe not in RECIPE_FILES:
+        raise LocalError(f"Unknown local Recipe: {recipe}")
+    root = ROOT / "infra/radius/recipes/local" / recipe
     output = io.BytesIO()
     with gzip.GzipFile(fileobj=output, mode="wb", mtime=0, filename="") as compressed:
         with tarfile.open(fileobj=compressed, mode="w") as archive:
-            for name in MODULE_FILES:
+            for name in RECIPE_FILES[recipe]:
                 path = root / name
-                if path.is_symlink() or not path.is_file():
-                    raise LocalError(f"Missing or symlinked Recipe source: {name}")
-                data = path.read_bytes()
+                data = source_bytes(path)
                 info = tarfile.TarInfo(name)
                 info.size, info.mode = len(data), 0o644
                 archive.addfile(info, io.BytesIO(data))
@@ -52,7 +80,8 @@ def module_archive() -> bytes:
 
 def manifests(archive: bytes) -> tuple[list[dict], dict, str]:
     sha = digest(archive)
-    server_code = (ROOT / "operations/local/module-server.py").read_text()
+    server_path = ROOT / "operations/local/module-server.py"
+    server_code = source_bytes(server_path).decode()
     name = f"local-module-{digest(archive + server_code.encode())[:20]}"
     labels = {"app": name}
     url = f"http://{name}.radius-system.svc.cluster.local:18080/{sha}.tar.gz"
@@ -140,6 +169,44 @@ def manifests(archive: bytes) -> tuple[list[dict], dict, str]:
         },
     }
     return objects, environment, name
+
+
+def recipe_manifests() -> tuple[list[dict], dict, dict]:
+    """Return server objects, Radius Recipe mappings, and public per-module identities."""
+    objects, recipes, modules = [], {}, {}
+    for recipe, resource_type in RECIPE_TYPES.items():
+        archive = module_archive(recipe)
+        server_objects, environment, name = manifests(archive)
+        template = environment["properties"]["recipes"]["Demo.Platform/clusters"]["default"]
+        objects.extend(server_objects)
+        recipes[resource_type] = {"default": template}
+        modules[recipe] = {
+            "url": template["templatePath"],
+            "sha256": digest(archive),
+            "moduleServer": name,
+            "resourceType": resource_type,
+        }
+    return objects, recipes, modules
+
+
+def recipe_bundle() -> dict:
+    """All content is source-only; no CLI, live state, or credential reads."""
+    objects, recipes, modules = recipe_manifests()
+    source_paths = [
+        *sorted((ROOT / "infra/radius/apps").glob("*.bicep")),
+        *sorted((ROOT / "infra/radius/modules").glob("*.bicep")),
+        *sorted((ROOT / "infra/radius/types").glob("*.yaml")),
+        *sorted((ROOT / "infra/radius/recipes/azure").glob("*.bicep")),
+    ]
+    return {
+        "objects": objects,
+        "recipes": recipes,
+        "modules": modules,
+        "sharedSourceHashes": {
+            str(path.relative_to(ROOT)): digest(source_bytes(path)) for path in source_paths
+        },
+        "liveStatus": "not-run",
+    }
 
 
 def prepare() -> dict:

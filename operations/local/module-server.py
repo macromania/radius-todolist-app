@@ -3,11 +3,24 @@
 import hashlib
 import http.server
 import os
+import re
 from pathlib import Path
 
 
-def handler(archive: Path, expected: str):
-    content = archive.read_bytes()
+def handler(archive: Path, expected: str, *, module_root: Path = Path("/module")):
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise ValueError("Module archive digest is invalid")
+    root = module_root.absolute()
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("Module archive directory is invalid")
+    resolved = archive.resolve(strict=True)
+    if (
+        not archive.absolute().is_relative_to(root)
+        or not resolved.is_relative_to(root.resolve(strict=True))
+        or not resolved.is_file()
+    ):
+        raise ValueError("Module archive path is outside the module directory or not a file")
+    content = resolved.read_bytes()
     if hashlib.sha256(content).hexdigest() != expected:
         raise ValueError("Module archive digest mismatch")
 
@@ -29,10 +42,14 @@ def handler(archive: Path, expected: str):
     return StaticModule
 
 
-if __name__ == "__main__":
+def serve(module_root: Path = Path("/module")) -> None:
     sha = os.environ["MODULE_SHA256"]
     server = http.server.HTTPServer(
         ("0.0.0.0", 18080),
-        handler(Path("/module/archive.tar.gz"), sha),
+        handler(module_root / "archive.tar.gz", sha, module_root=module_root),
     )
     server.serve_forever()
+
+
+if __name__ == "__main__":
+    serve()

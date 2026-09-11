@@ -10,13 +10,13 @@ resource "kind_cluster" "child" {
 
     networking {
       api_server_address = "127.0.0.1"
-      api_server_port    = 35496
+      api_server_port    = local.ports.api
     }
 
     node {
       role = "control-plane"
       labels = {
-        "radplanes.local/slot" = "shared-control"
+        "radplanes.local/slot" = var.context.resource.properties.slot
       }
       kubeadm_config_patches = [yamlencode({
         apiVersion = "kubeadm.k8s.io/v1beta3"
@@ -28,7 +28,7 @@ resource "kind_cluster" "child" {
 
       extra_port_mappings {
         container_port = 31480
-        host_port      = 35491
+        host_port      = local.ports.gateway
         listen_address = "127.0.0.1"
         protocol       = "TCP"
       }
@@ -40,12 +40,31 @@ data "external" "child_address" {
   program = ["sh", "${path.module}/node-address.sh", kind_cluster.child.name]
 }
 
+resource "terraform_data" "images" {
+  count = length(var.images) == 0 ? 0 : 1
+
+  triggers_replace = {
+    cluster_id = kind_cluster.child.id
+    images     = var.images
+  }
+
+  provisioner "local-exec" {
+    command = "sh \"${path.module}/load-images.sh\""
+    environment = {
+      LOCAL_CLUSTER = kind_cluster.child.name
+      LOCAL_IMAGES  = join("\n", var.images)
+    }
+  }
+}
+
 resource "kubernetes_secret_v1" "access" {
+  depends_on = [terraform_data.images]
+
   metadata {
     name      = "${local.cluster_name}-access"
     namespace = "radplanes-local-access"
     labels = {
-      "radplanes.local/slot" = "shared-control"
+      "radplanes.local/slot" = var.context.resource.properties.slot
     }
     annotations = {
       "radplanes.local/radius-resource" = var.context.resource.id

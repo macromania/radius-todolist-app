@@ -247,7 +247,7 @@ def test_module_archive_is_deterministic_and_allowlisted(local_state):
 def test_static_module_server_has_no_directory_or_arbitrary_file_access(tmp_path, request_path):
     archive = tmp_path / "archive"
     archive.write_bytes(b"non-secret-module")
-    handler = server.handler(archive, common.digest(archive.read_bytes()))
+    handler = server.handler(archive, common.digest(archive.read_bytes()), module_root=tmp_path)
     instance = object.__new__(handler)
     instance.path = request_path
     instance.send_error = Mock()
@@ -259,9 +259,9 @@ def test_static_module_server_checks_bytes_and_serves_exact_hash(tmp_path):
     archive = tmp_path / "archive"
     archive.write_bytes(b"non-secret-module")
     with pytest.raises(ValueError, match="digest"):
-        server.handler(archive, "wrong")
+        server.handler(archive, "wrong", module_root=tmp_path)
     sha = common.digest(archive.read_bytes())
-    handler = server.handler(archive, sha)
+    handler = server.handler(archive, sha, module_root=tmp_path)
     instance = object.__new__(handler)
     instance.path, instance.wfile = f"/{sha}.tar.gz", io.BytesIO()
     instance.send_response, instance.send_header, instance.end_headers = Mock(), Mock(), Mock()

@@ -268,9 +268,23 @@ class PairResult:
     data_url: str
 
 
-class Provider(Protocol):
-    config: OperatorConfig
+class ProvisioningConfig(Protocol):
+    @property
+    def images(self) -> Mapping: ...
 
+    @property
+    def pair_slots(self) -> list[dict[str, str]]: ...
+
+    def allocation(self, slot: str) -> Mapping: ...
+    def to_dict(self) -> dict: ...
+
+
+class Provider(Protocol):
+    @property
+    def config(self) -> ProvisioningConfig: ...
+
+    def expected_cluster_id(self, slot: str) -> str: ...
+    def validate_endpoint(self, slot: str, value: str) -> str: ...
     def ensure_child_cluster(self, slot: str) -> Cluster: ...
     def bootstrap_child(self, cluster: Cluster) -> None: ...
     def deploy_plane(self, slot: str, observe: Callable[[str], None]) -> str: ...
@@ -291,17 +305,16 @@ def provision_pair(
     ):
         raise ProvisioningError("invalid_pair_assignment")
     slots = [f"{request.pair_id}-{role}" for role in ("control", "data")]
-    allocations = [provider.config.allocation(slot) for slot in slots]
-    expected_ids = [
-        f"{item['clusterResourceGroupId']}/providers/Microsoft.ContainerService/"
-        f"managedClusters/{item['clusterName']}"
-        for item in allocations
-    ]
+    expected_ids = [provider.expected_cluster_id(slot) for slot in slots]
     if pair["stage"] == "available":
         if [pair["control_cluster_id"], pair["data_cluster_id"]] != expected_ids:
             raise ProvisioningError("pair_inventory_mismatch")
         observe("reuse-pair")
-        return PairResult(*expected_ids, endpoint(pair["control_url"]), endpoint(pair["data_url"]))
+        urls = [
+            provider.validate_endpoint(slot, pair[f"{role}_url"])
+            for slot, role in zip(slots, ("control", "data"), strict=True)
+        ]
+        return PairResult(*expected_ids, *urls)
     clusters = []
     for role, slot in zip(("control", "data"), slots, strict=True):
         observe(f"{role}-cluster")
