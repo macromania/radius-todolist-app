@@ -376,3 +376,24 @@ not an unwired Helm value. Keep provider errors visible and inspect logs for
 credential markers without exporting their contents. Check default service-account
 identities by their source namespace for get/list/watch access to protected
 namespaces; one account's denial is not another account's permission proof.
+
+## D040 - Separate the data API identity from Radius's generated Secret reader
+
+Radius 0.60.2 generates a namespace-wide Secret-reader Role and RoleBinding
+for every container's default service account, before applying the supported
+Kubernetes Pod patch. Base manifests cannot override that Role. A token-bearing
+data API must not use that generated identity: it would expose the reconciler's
+parent PostgreSQL credential even when that credential is absent from API
+environment variables.
+
+Keep the Radius resource, generated compatibility account, labels, Redis
+connection, and Secret-backed environment injection named as before. Select
+the precreated `data-api-runtime` service account through the workload's
+`runtimeServiceAccount` Pod override. Bind only the existing ConfigMap-get Role
+to that account. Both providers create it before deployment; kubelet performs
+Secret injection without granting the Pod permission to read Secrets.
+
+This is a targeted security correction, not an authentication redesign. The
+acceptance harness must verify the running API account and perform authenticated
+Secret GET/list denial checks inside its Pod, as well as checking ConfigMap-get
+permission and refusing write, Pod-create, and token-minting rights.

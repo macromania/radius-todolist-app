@@ -695,6 +695,8 @@ class AzureProvider:
             accounts.append("provisioner")
         else:
             accounts.append(f"{role}-reconciler")
+        if role == "data":
+            accounts.append("data-api-runtime")
         resources = []
         for account in accounts:
             metadata = {"name": account, "namespace": namespace}
@@ -711,7 +713,7 @@ class AzureProvider:
                     "kind": "ServiceAccount",
                     "metadata": metadata,
                     "automountServiceAccountToken": account
-                    in {"provisioner", "data-api", "data-reconciler"},
+                    in {"provisioner", "data-api-runtime", "data-reconciler"},
                 }
             )
         if not self.kube_get(slot, namespace, "configmap", "acme-challenges"):
@@ -732,7 +734,7 @@ class AzureProvider:
                     namespace,
                     account + "-configmaps",
                     namespace,
-                    account,
+                    "data-api-runtime" if account == "data-api" else account,
                     [{"apiGroups": [""], "resources": ["configmaps"], "verbs": verbs}],
                 )
         if role == "management":

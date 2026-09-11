@@ -721,6 +721,27 @@ def test_full_cleanup_uses_owners_and_independent_read_only_verify(scenario, cap
     assert "synthetic-key" not in capsys.readouterr().out
 
 
+def test_verify_accepts_documented_repository_relative_record(scenario, monkeypatch):
+    old_state, _, fake = scenario
+    assert cleanup.main(["--execute"]) == 0
+    (original,) = old_state.glob("evidence/cleanup-*.json")
+    record = json.loads(original.read_text())
+    root = old_state.parent / "project"
+    root.mkdir(mode=0o700)
+    state = root / ".state/local"
+    monkeypatch.setattr(cleanup, "ROOT", root)
+    monkeypatch.setattr(cleanup, "STATE", state)
+    monkeypatch.setattr(common, "STATE", state)
+    common.write_private(state / "evidence" / original.name, record)
+    fake.calls.clear()
+    fake.mutations.clear()
+    assert cleanup.main(["--verify", ".state/local/evidence/" + original.name]) == 0
+    assert not fake.mutations
+    assert all(call[0] == "docker" for call in fake.calls)
+    assert cleanup.main(["--verify", ".state/local/../outside.json"]) == 1
+    assert not fake.mutations
+
+
 @pytest.mark.parametrize(
     "failure",
     [

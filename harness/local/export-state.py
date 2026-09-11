@@ -459,7 +459,8 @@ class Exporter(shared.Exporter):
             raise
         require(
             pod["metadata"].get("namespace") == access.namespace
-            and pod["spec"].get("serviceAccountName") == component
+            and pod["spec"].get("serviceAccountName")
+            == ("data-api-runtime" if component == "data-api" else component)
             and pod["spec"].get("nodeName") == self.identities[access.slot]["node"]["name"],
             "local_workload_identity_mismatch",
         )

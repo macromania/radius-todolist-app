@@ -27,6 +27,10 @@ only Docker inventory/inspection; it never connects to deleted Kubernetes
 clusters or writes a new cleanup result. Neither mode builds images, provisions
 clusters, or touches Azure.
 
+`--verify` accepts the documented repository-relative `.state/local/evidence/...`
+path, a state-relative `evidence/...` path, or an absolute path inside protected
+`.state/local`. Parent traversal and symlinked paths remain refused.
+
 ## Required ownership evidence
 
 Export state while **all five clusters remain reachable**:

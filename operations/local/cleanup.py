@@ -1174,7 +1174,10 @@ def main(argv: list[str] | None = None) -> int:
         commands = Commands()
         commands.deadline = time.monotonic() + 2700
         if args.verify:
-            record = read_json(args.verify)
+            path = Path(args.verify)
+            if not path.is_absolute() and path.parts[:2] == (".state", "local"):
+                path = ROOT / path
+            record = read_json(path)
             require(
                 record.get("version") == 1
                 and record.get("scope") == "cleanup"

@@ -150,7 +150,7 @@ class Operator:
             },
             "spec": {
                 "nodeName": self.node(slot)["Name"][1:],
-                "serviceAccountName": component,
+                "serviceAccountName": "data-api-runtime" if component == "data-api" else component,
                 "containers": [
                     {
                         "name": component,
@@ -435,6 +435,17 @@ class Operator:
                         {
                             "files": {} if self.running_source_wrong else SOURCES,
                             "parent_dsn_present": not args[1].startswith("data-api"),
+                        }
+                    )
+                if code == runner.DATA_API_PERMISSIONS_PROBE:
+                    permissions = json.loads(args[-1])
+                    if getattr(self, "data_api_secret_access", False):
+                        permissions["secrets:get"] = True
+                    return json.dumps(
+                        {
+                            "permissions": permissions,
+                            "parent_secret_get_status": 403,
+                            "secret_list_status": 403,
                         }
                     )
                 if code == shared.PARENT_PROBE:
@@ -1201,6 +1212,20 @@ class LocalRunnerTests(LocalStateCase):
                 self.operator.postgres_host, self.operator.postgres_port = host, port
                 with self.assertRaisesRegex(faults.AcceptanceError, "datastore_endpoint_mismatch"):
                     subject.workload_evidence("shared")
+
+    def test_workload_run_path_proves_api_secret_denial_and_rejects_extra_rights(self):
+        subject = self.make_runner()
+        subject.workload_evidence("shared")
+        events = [e for e in subject.record["events"] if e["type"] == "data_api_permissions"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["service_account"], "data-api-runtime")
+        self.assertEqual(events[0]["parent_secret_get_status"], 403)
+        self.assertTrue(
+            any(runner.DATA_API_PERMISSIONS_PROBE in argv for argv, _ in self.operator.calls)
+        )
+        self.operator.data_api_secret_access = True
+        with self.assertRaisesRegex(faults.AcceptanceError, "secret_boundary_not_verified"):
+            subject.workload_evidence("shared")
 
     def test_mapped_manifest_id_acceptance_still_executes_running_source_probe(self):
         running, digest = self.manifest_image()

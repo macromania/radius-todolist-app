@@ -127,7 +127,10 @@ class HarnessRunCase(base.StateCase):
 
     def kube(self, slot):
         target = SimpleNamespace(
-            slot=slot, cluster_uid=slot, component=lambda name: {"container": name}
+            slot=slot,
+            cluster_uid=slot,
+            component=lambda name: {"container": name},
+            namespace=f"radplanes-{slot}-{slot.rsplit('-', 1)[-1]}",
         )
         kube = Mock(target=target)
 
@@ -137,7 +140,12 @@ class HarnessRunCase(base.StateCase):
             uid = self.pods.setdefault((slot, component), str(uuid4()))
             return {
                 "metadata": {"uid": uid},
-                "spec": {"containers": [{"name": component, "image": image}]},
+                "spec": {
+                    "containers": [{"name": component, "image": image}],
+                    "serviceAccountName": "data-api-runtime"
+                    if component == "data-api"
+                    else component,
+                },
                 "status": {"containerStatuses": [{"name": component, "imageID": image}]},
             }
 
@@ -145,6 +153,12 @@ class HarnessRunCase(base.StateCase):
             self.probe_calls.append((slot, component, script))
             if script == module.SOURCE_PROBE:
                 return {"files": {"source.py": "c" * 64}, "parent_dsn_present": False}
+            if script == module.DATA_API_PERMISSIONS_PROBE:
+                return {
+                    "permissions": json.loads(_args[-1]),
+                    "parent_secret_get_status": 403,
+                    "secret_list_status": 403,
+                }
             self.assertEqual(script, module.IDENTITY_PROBE)
             if self.identity_error:
                 raise Error(self.identity_error)
@@ -356,12 +370,13 @@ class FirstContinuationTests(HarnessRunCase):
             ["shared", "shared", "isolated-1"],
         )
         self.assertEqual(
-            self.probe_calls[2:8],
+            self.probe_calls[2:9],
             [
                 ("shared-control", "control-api", module.SOURCE_PROBE),
                 ("shared-control", "control-reconciler", module.SOURCE_PROBE),
                 ("shared-control", "control-api", module.IDENTITY_PROBE),
                 ("shared-data", "data-api", module.SOURCE_PROBE),
+                ("shared-data", "data-api", module.DATA_API_PERMISSIONS_PROBE),
                 ("shared-data", "data-reconciler", module.SOURCE_PROBE),
                 ("shared-data", "data-api", module.IDENTITY_PROBE),
             ],

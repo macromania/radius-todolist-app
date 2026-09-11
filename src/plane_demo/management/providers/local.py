@@ -993,13 +993,15 @@ class LocalProvider:
             "database-init",
             "provisioner" if role == "management" else f"{role}-reconciler",
         ]
+        if role == "data":
+            accounts.append("data-api-runtime")
         resources = [
             {
                 "apiVersion": "v1",
                 "kind": "ServiceAccount",
                 "metadata": {"name": account, "namespace": namespace},
                 "automountServiceAccountToken": account
-                in {"provisioner", "data-api", "data-reconciler"},
+                in {"provisioner", "data-api-runtime", "data-reconciler"},
             }
             for account in accounts
         ]
@@ -1034,7 +1036,7 @@ class LocalProvider:
                     namespace,
                     account + "-configmaps",
                     namespace,
-                    account,
+                    "data-api-runtime" if account == "data-api" else account,
                     [{"apiGroups": [""], "resources": ["configmaps"], "verbs": verbs}],
                 )
         if role == "management":

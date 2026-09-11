@@ -560,6 +560,41 @@ def test_storage_recipe_permissions_are_only_for_the_data_namespace(provider, mo
     ]
 
 
+@pytest.mark.parametrize("slot", ["shared-data", "isolated-1-data"])
+def test_data_api_runtime_account_has_only_configmap_get(provider, monkeypatch, slot):
+    emitted = []
+    monkeypatch.setattr(
+        provider,
+        "apply",
+        lambda _, value, **__: emitted.extend(value if isinstance(value, list) else [value]),
+    )
+    monkeypatch.setattr(provider, "kube_get", lambda *_: None)
+    provider.prerequisites(slot)
+    accounts = {
+        value["metadata"]["name"]: value for value in emitted if value["kind"] == "ServiceAccount"
+    }
+    assert accounts["data-api-runtime"]["automountServiceAccountToken"] is True
+    assert accounts["data-api"]["automountServiceAccountToken"] is False
+    binding = next(
+        v
+        for v in emitted
+        if v["kind"] == "RoleBinding" and v["metadata"]["name"] == "data-api-configmaps"
+    )
+    assert binding["subjects"] == [
+        {
+            "kind": "ServiceAccount",
+            "name": "data-api-runtime",
+            "namespace": provider.names(slot)[1],
+        }
+    ]
+    role = next(
+        v
+        for v in emitted
+        if v["kind"] == "Role" and v["metadata"]["name"] == binding["roleRef"]["name"]
+    )
+    assert role["rules"] == [{"apiGroups": [""], "resources": ["configmaps"], "verbs": ["get"]}]
+
+
 def test_local_runtime_secrets_keep_api_and_worker_credentials_separate(provider, monkeypatch):
     emitted = {}
     monkeypatch.setattr(provider, "secret", lambda _, __, name, data: emitted.update({name: data}))

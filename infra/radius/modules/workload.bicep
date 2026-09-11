@@ -6,6 +6,7 @@ param name string
 param image string
 param entrypoint string
 param serviceAccount string
+param runtimeServiceAccount string = serviceAccount
 param runtimeSecretName string = ''
 param settings object = {}
 param volumes array = []
@@ -99,7 +100,7 @@ resource workload 'Applications.Core/containers@2023-10-01-preview' = {
       kubernetes: {
         base: recreate ? '${string(accountBase)}\n---\n${string(deploymentBase)}' : string(accountBase)
         pod: {
-          serviceAccountName: serviceAccount
+          serviceAccountName: runtimeServiceAccount
           automountServiceAccountToken: automountToken
           securityContext: {
             runAsNonRoot: true

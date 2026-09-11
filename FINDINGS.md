@@ -7,9 +7,11 @@ are not passing checks. Runtime artifacts containing credentials stay out of Git
 
 Implementation started 2026-09-09. Azure admission, separately scoped functional/
 outage proof, fresh Redis lifecycle, and teardown are verified. The local
-executor gate passed. Full local acceptance remains incomplete: its first
-admission failed on Redis PVC permission, now corrected. The failed three-cluster
-environment was removed through its owners on September 11 before a fresh run.
+executor gate and fresh five-cluster local acceptance passed, including both
+parent outages and separately recorded datastore persistence. Both deployed
+environments have been removed through their owners. Final local security review
+found Radius's default data-API Secret access; the declarative runtime-identity
+correction is implemented and reviewed, but still requires fresh live proof.
 
 ## Phase 0 - Foundations
 
@@ -112,6 +114,13 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F080 | 6 | High correctness | `operations/local/cleanup.py` | Radius inventory | Bare resource listing is environment-filtered and omits child wrappers and Core containers without explicit environment | Inventory validated applications explicitly; permit omitted container environment only under its validated parent; custom owners still require exact environment |
 | F081 | 6 | High correctness | `operations/local/cleanup.py` | Post-deletion verification | CLI application-scoped resource listing requires the already-deleted application to exist | Use the authenticated native resource-group inventory after deletion; actual data deletion and the original failed reset record remain separately recorded |
 | F082 | 6 | Medium safety | `operations/local/cleanup.py` | Complete owner absence | Application-only inventory can miss orphans; previously deleted known IDs can reappear during later removals | Cross-check complete native workload inventory, reject all remaining child Terraform state, track removed IDs cumulatively, and require final management native emptiness; regressions, fix reviews, and real reset pass |
+| F083 | 6 | Medium verification | Private persistence probe | Pod termination | API-restart helper overrides datastore shutdown grace to five seconds while the candidate claimed graceful shutdown | Preserve the configured Pod grace and UID precondition; explicitly make no clean-exit/crash-durability claim; corrected before datastore mutation |
+| F084 | 6 | Medium verification | Private persistence probe | Durable API snapshots | Reduced status projections omit persisted histories and report details | Compare complete management/control API fields and full paginated histories plus complete data responses; actual bound rerun passes |
+| F085 | 6 | Medium verification | Private persistence evidence | Verifier provenance | Original supplemental result names only application source and omits post-state digests | Separate rerun binds verifier/tests/helpers/inputs to hashes and clean source, retaining post-API and post-database digests; independently verified |
+| F086 | 6 | Medium security | Shared data workload and provider prerequisites | API Kubernetes identity | Radius generates namespace-wide Secret-reader permissions for the mounted data-API account, exposing parent `CONTROL_DSN` through the Kubernetes API | Use a distinct ConfigMap-get-only runtime account through the supported Pod override; shared Azure/local source and actual-token denial tests reviewed; fresh live proof pending |
+| F087 | 6 | Medium verification | Private PostgreSQL persistence snapshot | Security catalogs | Role/RLS flags omit policy predicates, memberships, and object ACLs | Include ordered policies, memberships, schema/relation/column/function privileges and definitions; all three real PostgreSQL queries and bound persistence rerun pass |
+| F088 | 6 | Medium correctness | `operations/local/cleanup.py` | Verification path input | Documented repository-relative record path was interpreted as state-relative twice | Normalize only the known `.state/local` prefix, then retain private-path/traversal/symlink guards; exact documented command and entrypoint regression pass |
+| F089 | 6 | Medium verification | Data API permission probe | Named grants | Unnamed authorization reviews miss resource-name-limited token minting or ConfigMap mutation grants | Add named account/map/parent-Secret reviews and ConfigMap watch checks; executable probe and named-grant refusal tests and fix review pass |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -1478,3 +1487,78 @@ the reset journals were retained. No broad state-directory cleanup occurred.
 The final source checkpoint passed `make check`: **872 tests, 263 subtests,
 50 explicit dependency skips, 23 Bicep files, 24 Terraform mock-provider tests,
 Ruff, and ShellCheck**. Fresh images and a new full acceptance run remain required.
+
+### Fresh full local proof and final security correction, 2026-09-11
+
+Fresh native arm64 API/provisioner images from committed `786c553` passed
+host-side filesystem, administrative-tool, interpreter, extension, and source
+inspection before loading. Fresh management used a newly verified encryption
+key and cluster identity. Real HTTP health/authentication, worker readiness,
+bound PostgreSQL/provisioner PVCs, and zero tenant/operation rows were checked.
+
+Full `all` run **`5ff3571f29664fbc9639b175c0b5e870` passed**, from
+**10:48:17Z to 11:17:50Z**, after its source commit. It created two shared tenants
+and one isolated tenant through management Radius, with exactly five distinct
+clusters. It proved shared reuse, isolation, paused-data-reconciler immediate-child
+readiness, 17 workload source/image observations, configuration/counters,
+authentication, complete timelines, and repeated-poll idempotency.
+
+Both real parent PostgreSQL links were blocked in the reconciler Pod network
+namespace. Data remained available for 65.35 and 64.60 seconds; management
+reporting recovered in 10.34 seconds. A data API replacement while its parent
+remained blocked recovered in 7.27 seconds; control reconnection applied only
+the latest requested version. Original network rules were restored exactly:
+physical restoration took 4.23 seconds for management and 2.61 for control.
+This is one passing fresh run, not a relabeled continuation of failed `49f9dc`.
+
+The supplemental persistence probe was corrected for F083-F085 and F087 before
+its final, separately named run. Bound proof
+`persistence-5ff3571f29664fbc9639b175c0b5e870-bound.json` passed from
+**11:46:11Z to 11:47:24Z**. All three PostgreSQL and both Redis Pods acquired
+new UIDs while retaining their StatefulSet, PVC, and PV identities. Complete
+API state/history/counters/configuration and PostgreSQL system/security catalogs
+matched before and after. Per-instance recovery was 9.36-12.76 seconds. Verifier,
+17 tests, imported helpers, configuration, inspected images, and acceptance
+evidence are hash-bound; post-state/database digests were independently checked.
+The result hashes to
+`eab1393fab6eb526ae5c4c78349681e1f78a3e3dc7278908cd96f1c3508b0e60`.
+The earlier unbound result remains unchanged. This is Pod-replacement persistence,
+not a clean-process-exit, forced-crash, or HA claim.
+
+A live five-node resource sample measured roughly 9.22 GiB across the kind nodes
+on the existing 10-CPU, 23.43-GiB Docker Desktop daemon. No daemon configuration
+or unrelated project was changed; this is one observation, not a capacity limit.
+
+The phase correctness review accepted the full scenario evidence but requested
+the stronger supplemental provenance. The security review found F086 by making
+an actual authenticated Secret request from the data API Pod: absent environment
+credentials were not sufficient while Radius granted its token Secret access.
+The original full acceptance result therefore does not prove this security
+boundary. The reviewed fix preserves Radius's resource/account names and Redis
+connection but selects a precreated `data-api-runtime` account with ConfigMap
+`get` only. Radius builds its generated RoleBinding before the supported Pod
+override; no Role patch, timing window, new controller, or Radius fork is used.
+Both Azure/local prerequisites and local export agree. Acceptance now checks the
+actual Pod identity, authenticated Secret GET/list 403 responses, and broad/named
+permission denials, including the F089 token-minting case.
+
+Before changing image inputs, the original five-cluster environment was removed
+using the normal operator, not the partial-reset helper. Cleanup
+**`e29e3d2caf0e`** ran **11:47:46Z-11:53:00Z** in Radius owner order.
+Independent verification passed at **11:56:47Z**, retaining all 13 unrelated
+containers. F088 was then corrected and the exact documented relative-path
+verification passed at **12:03:46Z**; its output is retained in
+`evidence/cleanup-e29e3d2caf0e-verified.log`.
+Fresh images and a new run must prove the final API-identity correction before
+phase close. Historical Azure proof predates this shared-source correction;
+no new Azure deployment is claimed.
+
+The final identity/probe source passes **890 tests, 264 subtests, 50 explicit
+dependency skips, 23 Bicep files, 24 Terraform mock-provider tests, Ruff, and
+ShellCheck**. Azure continuation fixtures exercise the same runtime-account
+contract; no compatibility bypass was added. Only 36 named inputs from the
+verified deleted deployment were archived under
+`history/acceptance-5ff3571f29664fbc9639b175c0b5e870/`, including the two restored
+fault journals. Their original acceptance references describe their former
+paths; archived bytes and retirement hashes preserve the evidence without
+letting obsolete Pod identities become active fault-cleanup inputs.

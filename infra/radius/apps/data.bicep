@@ -23,6 +23,7 @@ module api '../modules/workload.bicep' = {
     image: image
     entrypoint: 'plane_demo.data.api'
     serviceAccount: 'data-api'
+    runtimeServiceAccount: 'data-api-runtime'
     runtimeSecretName: 'data-api-runtime'
     api: true
     automountToken: true

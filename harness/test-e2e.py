@@ -87,6 +87,70 @@ print(json.dumps({"files":result,"parent_dsn_present":
                  any(name in os.environ for name in ("MANAGEMENT_DSN","CONTROL_DSN"))}))
 """
 
+DATA_API_PERMISSIONS_PROBE = r"""
+import json,sys
+from kubernetes import client,config
+from kubernetes.client.exceptions import ApiException
+namespace=sys.argv[1]
+expected=json.loads(sys.argv[2])
+config.load_incluster_config()
+authorization=client.AuthorizationV1Api()
+permissions={}
+for key,allowed in expected.items():
+    resource,verb,*name=key.split(":")
+    attributes={"namespace":namespace,"verb":verb,"group":"","resource":resource}
+    if "/" in resource:
+        attributes["resource"],attributes["subresource"]=resource.split("/",1)
+    if name:
+        attributes["name"]=name[0]
+    review=authorization.create_self_subject_access_review(
+        body={"apiVersion":"authorization.k8s.io/v1","kind":"SelfSubjectAccessReview",
+              "spec":{"resourceAttributes":attributes}})
+    permissions[key]=review.status.allowed
+    if review.status.allowed is not allowed:
+        raise RuntimeError("data_api_kubernetes_permissions_exceed_contract")
+core=client.CoreV1Api()
+for action in (lambda:core.read_namespaced_secret("data-reconciler-runtime",namespace),
+               lambda:core.list_namespaced_secret(namespace,limit=1)):
+    try:
+        action()
+    except ApiException as error:
+        if error.status!=403:
+            raise RuntimeError("data_api_secret_denial_not_authenticated_forbidden") from None
+    else:
+        raise RuntimeError("data_api_can_read_namespace_secrets")
+print(json.dumps({"permissions":permissions,"parent_secret_get_status":403,
+                  "secret_list_status":403}))
+"""
+
+
+def data_api_permissions(tenants):
+    expected = {
+        resource + ":" + verb: resource == "configmaps" and verb == "get"
+        for resource, verbs in (
+            ("configmaps", ("get", "list", "watch", "create", "update", "patch", "delete")),
+            ("secrets", ("get", "list", "watch", "create", "update", "patch", "delete")),
+            ("pods", ("create",)),
+            ("serviceaccounts/token", ("create",)),
+        )
+        for verb in verbs
+    }
+    for account in (
+        "data-api",
+        "data-api-runtime",
+        "data-reconciler",
+        "database-init",
+        "challenge",
+    ):
+        expected[f"serviceaccounts/token:create:{account}"] = False
+    for tenant in tenants:
+        for verb in ("list", "watch", "create", "update", "patch", "delete"):
+            expected[f"configmaps:{verb}:tenant-{tenant}"] = False
+    for verb in ("get", "list", "watch", "create", "update", "patch", "delete"):
+        expected[f"secrets:{verb}:data-reconciler-runtime"] = False
+    return expected
+
+
 COORDINATOR_SCRIPTS = [
     "project.py",
     "install-radius.py",
@@ -931,6 +995,30 @@ class Runner:
         )
         if component == "data-api":
             require(actual.get("parent_dsn_present") is False, "data_api_has_parent_dsn")
+            require(
+                pod["spec"].get("serviceAccountName") == "data-api-runtime",
+                "data_api_runtime_identity_mismatch",
+            )
+            expected_permissions = data_api_permissions(self.names)
+            permissions = kube.exec_json(
+                component,
+                DATA_API_PERMISSIONS_PROBE,
+                kube.target.namespace,
+                json.dumps(expected_permissions),
+            )
+            require(
+                permissions.get("permissions") == expected_permissions
+                and permissions.get("parent_secret_get_status") == 403
+                and permissions.get("secret_list_status") == 403,
+                "data_api_secret_boundary_not_verified",
+            )
+            self.save(
+                "data_api_permissions",
+                slot=kube.target.slot,
+                pod_uid=pod["metadata"]["uid"],
+                service_account="data-api-runtime",
+                **permissions,
+            )
         self.save(
             "workload_image",
             slot=kube.target.slot,

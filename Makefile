@@ -94,7 +94,7 @@ local-verify: check-work ## Verify a retained local cleanup record without conta
 	$(RUN) python operations/local/cleanup.py --verify "$(LOCAL_CLEANUP_RECORD)"
 
 require-azure: check-work
-	@test "$(ENV)" = azure || { echo "Local deployment is not implemented." >&2; exit 1; }
+	@test "$(ENV)" = azure || { echo "This target is Azure-only; use the explicit local-* targets." >&2; exit 1; }
 
 confirm-azure: require-azure
 	@test "$(CONFIRM_AZURE)" = yes || { echo "Set CONFIRM_AZURE=yes for Azure mutations." >&2; exit 1; }

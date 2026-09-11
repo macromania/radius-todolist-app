@@ -1158,8 +1158,19 @@ def test_scoped_data_rbac_and_tokenless_public_accounts(provider, monkeypatch):
         binding = bindings[account + "-configmaps"]
         assert binding["roleRef"]["name"] == account + "-configmaps"
         assert binding["subjects"] == [
-            {"kind": "ServiceAccount", "name": account, "namespace": "radplanes-shared-data-data"}
+            {
+                "kind": "ServiceAccount",
+                "name": "data-api-runtime" if account == "data-api" else account,
+                "namespace": "radplanes-shared-data-data",
+            }
         ]
+    accounts = {
+        resource["metadata"]["name"]: resource
+        for resource in resources
+        if resource["kind"] == "ServiceAccount"
+    }
+    assert accounts["data-api-runtime"]["automountServiceAccountToken"] is True
+    assert accounts["data-api"]["automountServiceAccountToken"] is False
     challenge = next(
         resource
         for resource in resources

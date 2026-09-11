@@ -469,6 +469,7 @@ class ConfigAndHTTPTests(StateCase):
             ("parent_probe", faults.PROBE_CODE),
             ("source_probe", runner_module.SOURCE_PROBE),
             ("identity_probe", runner_module.IDENTITY_PROBE),
+            ("data_api_permissions_probe", runner_module.DATA_API_PERMISSIONS_PROBE),
         ):
             with self.subTest(name=name):
                 compile(code, name, "exec")

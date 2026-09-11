@@ -120,6 +120,14 @@ Runtime roles are `NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS`.
 Project schemas revoke `PUBLIC` access/default object privileges and public
 function execution. Public schema creation is revoked.
 
+The data API Pod uses Kubernetes account `data-api-runtime`, with only
+namespace-scoped ConfigMap `get`. Radius's generated `data-api` account is not
+the API's runtime identity: Radius 0.60.2 otherwise grants it namespace Secret
+reads. Redis credentials are still injected by kubelet through the unchanged
+`redis` connection. No parent DSN is present in the API environment, and its
+mounted identity must receive authenticated 403 responses when getting
+`data-reconciler-runtime` or listing Secrets. These are distinct checks.
+
 The immutable `management.login_pairs` table binds database `session_user` to a
 pair. FORCE RLS protects management tenants, events, and pairs. The control
 schema similarly binds its three runtime logins to one pair. A child has
