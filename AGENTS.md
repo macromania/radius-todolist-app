@@ -6,7 +6,7 @@ example; its scripts and deployment targets are intentionally removed.
 
 ## Scope and current status
 
-- Azure comes first; local provisioning is not implemented.
+- Azure is complete. Local provisioning is implemented; full live acceptance is pending.
 - Azure onboarding, functional/outage behavior, and fresh Redis lifecycle are proven.
 - Azure teardown is verified; archived Azure state is not a live deployment.
 - Use [FINDINGS.md](FINDINGS.md) for actual results, not assumptions from code.
@@ -39,6 +39,7 @@ or database status values when changing Python module paths.
 - `infra/radius/types/*.yaml` defines custom Radius API contracts.
 - The adjacent `.tgz` files are ignored generated Bicep extensions.
 - `infra/radius/recipes/azure/` implements clusters, PostgreSQL, Redis, and gateways.
+- `infra/radius/recipes/local/` implements kind and persistent local dependencies.
 - `infra/radius/environments/azure.bicep` maps types to Recipes.
 - `infra/radius/bicepconfig.json` applies to the Radius subtree.
 - [docs/azure-infrastructure.md](docs/azure-infrastructure.md) defines the contracts.
@@ -53,6 +54,7 @@ Do not replace those abstractions with direct cluster creation in Python.
 - `operations/project.py` scopes bootstrap commands and project configuration.
 - `operations/deploy-plane.py` and `run-management-job.py` coordinate deployment.
 - [docs/provisioning.md](docs/provisioning.md) explains prerequisites and ownership.
+- [docs/local-provider.md](docs/local-provider.md) and [docs/local-cleanup.md](docs/local-cleanup.md) define local operations.
 - `harness/api.sh` is the operator's thin API client.
 - `harness/export-state.py` exports protected local access/acceptance state.
 - `harness/test-e2e.py` and `fault-parent-link.py` drive acceptance and faults.

@@ -8,10 +8,10 @@ The corrected Redis create/tag/delete lifecycle and final Azure teardown are
 also verified. Local Radius-owned cluster creation, access, and deletion are
 proven; the full local tenant flow is being implemented.
 
-This pass organizes the repository, not the application design. SQL,
-authentication, provisioning, and reconciliation simplification are deferred
-until the agreed scenario works end to end. The obsolete todo example is
-preserved in Git history, not as a second deployment path.
+The runtime, platform operations, and acceptance harness are grouped separately.
+Deeper SQL, authentication, provisioning, and reconciliation simplification is
+deferred until the agreed scenario works end to end in both environments.
+The obsolete todo example remains in Git history, not as a second deployment path.
 
 ## How the demo works
 
@@ -56,7 +56,7 @@ a data API restart while control PostgreSQL was unreachable.
 | [`infra/radius/modules/`](infra/radius/modules/) | Reusable workload, challenge, gateway, database, and child-cluster templates |
 | [`infra/radius/types/`](infra/radius/types/) | Custom Radius resource API contracts; YAML source, ignored generated `.tgz` extensions |
 | [`infra/radius/recipes/`](infra/radius/recipes/) | Infrastructure implementations of those contracts |
-| [`infra/radius/environments/`](infra/radius/environments/) | Recipe selection and environment configuration; Azure only so far |
+| [`infra/radius/environments/`](infra/radius/environments/) | Environment contracts; local operations register equivalent Recipe maps through Radius |
 | [`images/`](images/) | API and privileged provisioner image packaging |
 | [`operations/`](operations/) | Platform bootstrap, deployment, image/Recipe publication, certificates, and cleanup |
 | [`harness/`](harness/) | Demo-driving API client, state export, acceptance runner, and fault injection |
@@ -89,8 +89,9 @@ make check
 
 `make check` runs Ruff, offline tests, all Bicep compiles, generated Radius
 extensions, Terraform mock-provider tests, and ShellCheck. Terraform 1.14-1.15
-is required for the local Recipe checks; CI uses pinned 1.15.8. It does not build/push images, create resources, or
-use deployed databases. Real PostgreSQL/Redis tests require explicitly disposable
+is required for the local Recipe checks; CI uses pinned 1.15.8. It does not
+build/push images, create resources, or use deployed databases. Real
+PostgreSQL/Redis tests require explicitly disposable
 dependencies; see [test inputs](docs/contracts.md#validation).
 
 The demonstrated Azure environment has been removed. Its protected
@@ -110,12 +111,16 @@ make install-radius ENV=azure CONFIRM_AZURE=yes
 Reviewed Recipes, verified image contents, and the validated operator
 configuration are required before `make deploy-management CONFIRM_AZURE=yes`.
 That target **submits** the operator Job; verify its completion separately.
-There is no implemented local deployment target or automatic certificate-renewal
-target. The [Azure contract](docs/azure-infrastructure.md) describes the
+Local build/setup/deployment/acceptance/cleanup targets are implemented, but
+their full live acceptance is still in progress. There is no automatic
+certificate-renewal target. The [Azure contract](docs/azure-infrastructure.md) describes the
 integration gates; [FINDINGS.md](FINDINGS.md) records what actually ran.
 The [local executor gate](docs/local.md) passed real cluster creation, encrypted
 state, child TLS, PostgreSQL/Envoy connectivity, and owner-driven deletion.
 The full five-cluster tenant scenario and its local outages remain unproven.
+See [local provider stages](docs/local-provider.md),
+[local Recipes](docs/local-recipes.md), and
+[local ownership-ordered cleanup](docs/local-cleanup.md) for their exact contracts.
 The fresh admission run stopped on harness endpoint discovery after all three
 operations succeeded. A separate `verify-existing` run passed the remaining
 functional and outage checks; it does not claim another fresh admission.
