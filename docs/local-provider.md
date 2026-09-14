@@ -7,6 +7,10 @@ see [the gate evidence](local.md) and [FINDINGS.md](../FINDINGS.md) for exact ru
 
 ## Fresh local run
 
+For the self-paced manual walkthrough, use
+[RUN_LOCAL_SCENARIOS.md](../RUN_LOCAL_SCENARIOS.md). The sequence below describes
+the provider stages and the automated acceptance alternative.
+
 The local tools resolve Docker Desktop's `desktop-linux` context before
 switching subprocesses to a project-scoped HOME. They pin the returned local
 Unix socket for the process instead of using an account-specific path or the

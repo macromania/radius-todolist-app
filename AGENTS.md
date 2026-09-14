@@ -3,6 +3,8 @@
 Read [README.md](README.md) first. This repository now contains the three-plane
 tenant demonstration, not the old todo example. Git history preserves that
 example; its scripts and deployment targets are intentionally removed.
+Manual walkthroughs are in [RUN_AZURE_SCENARIOS.md](RUN_AZURE_SCENARIOS.md)
+and [RUN_LOCAL_SCENARIOS.md](RUN_LOCAL_SCENARIOS.md).
 
 ## Scope and current status
 

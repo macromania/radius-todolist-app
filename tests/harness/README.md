@@ -1,5 +1,10 @@
 # Opt-in three-plane acceptance
 
+For individual manual requests and experiments, use
+[the Azure guide](../../RUN_AZURE_SCENARIOS.md) or
+[the local guide](../../RUN_LOCAL_SCENARIOS.md). This document describes the
+automated harness and its contracts.
+
 These scripts perform **real HTTP requests and Kubernetes mutations** only when
 called with `--execute`. The normal unit/integration suites never invoke them.
 Live Azure and local results, their source revisions, and teardown proofs are

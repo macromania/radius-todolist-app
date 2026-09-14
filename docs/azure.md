@@ -1,5 +1,8 @@
 # Azure implementation and operations
 
+For the manual setup, scenarios, and cleanup, follow
+[RUN_AZURE_SCENARIOS.md](../RUN_AZURE_SCENARIOS.md).
+
 Azure was implemented and proved before local. Historical admission and
 existing-state functional/outage checks have separate evidence scopes; failed
 records were not relabeled. The demonstrated Azure resources and temporary
