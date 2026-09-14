@@ -121,10 +121,10 @@ preflight: require-azure ## Inspect Azure prerequisites and write scoped local c
 bootstrap-preview: require-azure ## Prepare bootstrap inputs and run Azure what-if
 	$(RUN) python operations/project.py bootstrap-preview --environment "$(ENV)"
 
-validate-azure: require-azure ## Run real Azure what-if/validation and record template hashes
+validate-azure: require-azure ## Optionally run Azure what-if/validation and record diagnostic hashes
 	$(RUN) python operations/validate-bootstrap.py
 
-bootstrap: confirm-azure ## Create the foundation from previously validated inputs
+bootstrap: confirm-azure ## Compile and deploy the scoped Azure foundation
 	$(RUN) python operations/project.py bootstrap --environment "$(ENV)"
 
 install-radius: confirm-azure ## Install management Radius after bootstrap

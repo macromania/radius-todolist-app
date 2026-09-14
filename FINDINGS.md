@@ -1640,3 +1640,24 @@ compiles, 24 Terraform mock-provider tests, Ruff, and ShellCheck**. A read-only
 Docker Desktop context/version check succeeded. No images were rebuilt and no
 cloud or cluster resources were created or changed for this documentation task;
 earlier deployment evidence remains scoped to its recorded source revisions.
+
+### Technology-first POC flow, 2026-09-14
+
+The user excluded cost governance and pre-spending controls from the POC.
+Azure preflight no longer queries compute quota or rejects deployment against
+a hard-coded 48-vCPU threshold. Bootstrap compiles and submits its current
+inputs without requiring a prior validation approval file. What-if and
+standalone validation remain optional technical diagnostics.
+
+The walkthrough now prepares the required Bicep/extension artifacts and focuses
+on what each deployment/scenario demonstrates. It no longer frames the steps
+as spending decisions. Subscription/resource targeting, credential separation,
+explicit mutation selection, and actual success/failure checks are unchanged.
+Azure's actual service errors are still reported rather than hidden.
+
+Tests exercise direct bootstrap without a prior approval, an ignored stale
+diagnostic, optional preview, and failed deployment output. The focused
+walkthrough and narrow security review found no remaining issue.
+`make check` passed **917 tests, 264 subtests, 50 dependency skips, 23 Bicep
+compiles, 24 Terraform mock-provider tests, Ruff, and ShellCheck**.
+No deployment or cloud mutation was performed for this change.

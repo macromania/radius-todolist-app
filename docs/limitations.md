@@ -4,9 +4,8 @@ This is a trusted-operator architecture demonstration, not a production tenant
 platform. These limits are recorded in the [decisions](../DECISIONS.md);
 they are not unresolved implementation failures.
 
-- Shared demo keys are not hostile-tenant authentication or spending controls.
-  Synthetic data only. A leaked management key can create costly infrastructure;
-  the user declined additional product-level admission limits.
+- Shared demo keys provide simple per-plane API access. Production tenant
+  authentication is outside the POC. Use synthetic data.
 - There is one provisioner, no HA workflow engine, no automatic retry/adoption
   of interrupted infrastructure work, and no tenant migration or deletion API.
   A restarted provisioner marks old running operations interrupted.

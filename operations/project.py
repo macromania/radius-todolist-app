@@ -149,20 +149,6 @@ def preflight(environment: str) -> None:
     parsed_ip = ipaddress.ip_address(public_ip)
     if parsed_ip.version != 4 or not parsed_ip.is_global:
         raise ValueError("Operator IP must be a public IPv4 address")
-    usage = az("vm", "list-usage", "--location", LOCATION)
-    capacity = {
-        item["name"]["value"]: {
-            "current": int(item["currentValue"]),
-            "limit": int(item["limit"]),
-        }
-        for item in usage
-        if item["name"]["value"] in {"cores", "standardDSv5Family"}
-    }
-    for name in ("cores", "standardDSv5Family"):
-        if name not in capacity or capacity[name]["limit"] - capacity[name]["current"] < 48:
-            raise CommandError(
-                f"Insufficient compute capacity for ten D4s_v5 nodes plus surge: {name}"
-            )
     postgres = az("postgres", "flexible-server", "list-skus", "--location", LOCATION)
     if not any(item.get("supportedServerEditions") for item in postgres):
         raise CommandError(
@@ -199,7 +185,6 @@ def preflight(environment: str) -> None:
         "node_vm_size": "Standard_D4s_v5",
         "node_count": 2,
         "tags": TAGS,
-        "capacity": capacity,
         "postgres_available": True,
     }
     write_json(state_dir(environment) / "context.json", context)
@@ -271,20 +256,6 @@ def bootstrap(preview: bool) -> None:
         run([*args, "--result-format", "ResourceIdOnly"])
         return
     require_confirmation("azure")
-    validation = state / "validation.json"
-    if not validation.exists():
-        raise CommandError(
-            "Run azure-validate and record .state/azure/validation.json before deploying"
-        )
-    approval = json.loads(validation.read_text())
-    import hashlib
-
-    if approval.get("template_sha256") != hashlib.sha256(template.read_bytes()).hexdigest():
-        raise CommandError("Validated template hash differs from the current bootstrap")
-    if approval.get("parameters_sha256") != hashlib.sha256(parameter_file.read_bytes()).hexdigest():
-        raise CommandError("Validated parameters differ from the current bootstrap")
-    if approval.get("status") != "passed":
-        raise CommandError("Azure validation has not passed")
     deployment = json.loads(run([*args, "--output", "json"], capture=True))
     if deployment.get("properties", {}).get("provisioningState") != "Succeeded":
         raise CommandError("Bootstrap deployment did not succeed")

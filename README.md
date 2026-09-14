@@ -3,6 +3,8 @@
 Run this demo one step at a time. You will create tenants, inspect each plane,
 change configuration, disconnect parent databases, and restore the system.
 Use the checkpoints as stopping points when learning or presenting to a team.
+The focus is Radius provisioning, the boundaries between planes, and their
+behavior during configuration changes and outages.
 
 The order is:
 
@@ -77,11 +79,12 @@ creating resources.
 ```bash
 uv sync --locked
 git status --short
-make check
+make check-bicep
 ```
 
-Expect a clean worktree and passing checks. `make check` creates no clusters,
-builds no images, and does not query deployed databases.
+Expect a clean worktree. `make check-bicep` compiles the infrastructure and
+generates the Radius extensions needed by the images. To explore the unit and
+infrastructure tests separately, run `make check`; it creates no clusters.
 
 Keep source unchanged during the demo. Image and export checks bind the
 deployment to the committed source. Never run two local deployments concurrently:
@@ -93,35 +96,39 @@ You create the platform that accepts tenant requests and provisions child planes
 
 Azure has two manual preparation handoffs: **inspect built image contents** and
 **assemble the provisioning configuration**. There is no reusable Azure command
-that completes those handoffs. Review them before spending on the foundation.
-Do not substitute a matching digest or a changed verification flag for inspection.
+that completes those handoffs. They connect the application code and deployment
+inputs to the infrastructure created below.
 
-### Validate and create the foundation
+### Create the foundation
 
-You check the intended Azure changes before spending, then create management
-AKS and publish the Recipes and images it will use.
+You create management AKS and publish the Recipes and images that Radius
+will use to provision the child planes.
 
 ```bash
 make preflight ENV=azure
-make bootstrap-preview ENV=azure
-make validate-azure ENV=azure
-```
-
-Review the what-if and generated parameters. Preflight checks account scope,
-operator access, quota, regional availability, and resource ownership.
-
-Then run each stage:
-
-```bash
 make bootstrap ENV=azure CONFIRM_AZURE=yes
 make install-radius ENV=azure CONFIRM_AZURE=yes
 make publish-recipes ENV=azure CONFIRM_AZURE=yes
 make build-publish ENV=azure CONFIRM_AZURE=yes
 ```
 
+Preflight establishes the Azure account, operator access, and service
+availability. Bootstrap compiles the Bicep, submits the deployment, and reports
+Azure's provisioning result.
+
 Checkpoint: management AKS and Radius exist. The new files under `.state/azure`
 include `bootstrap.outputs.json`, `recipes.json`, and `images.json`.
 Image build output still records `content_verified: false`.
+
+To inspect generated resources or troubleshoot an Azure template error, these
+diagnostics are available separately:
+
+```bash
+make bootstrap-preview ENV=azure
+make validate-azure ENV=azure
+```
+
+They are optional technical tools, not prerequisites for deploying the demo.
 
 ### Complete the two handoffs
 
@@ -651,7 +658,7 @@ have `config_applied`.
 
 The helper allows 60-600 seconds; use `--duration 600` for a longer explanation.
 If the timer expires early, confirm restoration and repeat rather than claiming
-later observations happened during the outage. The automated recovery budget
+later observations happened during the outage. The automated recovery target
 is 30 seconds from restoration start; manual observation alone is not a benchmark.
 
 #### Interrupted fault
@@ -862,6 +869,5 @@ state are retained intentionally. See [local cleanup](docs/local-cleanup.md).
 | Harness pieces to inspect | `harness/api.py`, exporters, [`Runner.scenario`, `management_outage`, `control_outage`](harness/test-e2e.py), [harness reference](tests/harness/README.md) |
 | Results and limits | [Findings](FINDINGS.md), [decisions](DECISIONS.md), [limitations](docs/limitations.md) |
 
-Use synthetic data. Shared demo keys are not production tenant authentication
-or cost-abuse protection. Keep source and credentials separate, and never
-broaden network access to get past a failed prerequisite.
+Use synthetic data. Shared demo keys keep the API examples simple; production
+tenant authentication is outside this POC. Keep credentials separate from source.

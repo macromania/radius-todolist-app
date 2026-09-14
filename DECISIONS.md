@@ -410,3 +410,18 @@ This removes account-specific host paths without changing Docker defaults,
 management's daemon-access boundary, or child ownership checks. The README uses
 one-stage Make commands and teaches the Azure scenarios before repeating them
 with local Recipes.
+
+## D042 - Keep the POC focused on technology and learning
+
+Cost governance and budget restrictions are outside this POC. The user has
+explicitly requested an unconstrained demo focused on Radius, the three-plane
+architecture, and observable behavior.
+
+Do not require a separate approval artifact or impose a hard-coded compute
+capacity threshold before deploying. Bicep compilation and Azure's actual
+deployment result establish technical success or failure. What-if and standalone
+validation remain optional tools for understanding or troubleshooting templates.
+
+Resource ownership, credential separation, and correct state transitions remain
+part of the technical implementation. They are not a cost-approval workflow.
+Keep the walkthrough centered on what each step creates or demonstrates.

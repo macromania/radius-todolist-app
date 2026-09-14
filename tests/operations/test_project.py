@@ -37,12 +37,7 @@ class PreflightTests(unittest.TestCase):
             if args[0] == "curl":
                 return "8.8.8.8"
             if args[:3] == ["az", "vm", "list-usage"]:
-                return json.dumps(
-                    [
-                        {"name": {"value": name}, "currentValue": 0, "limit": 100}
-                        for name in ("cores", "standardDSv5Family")
-                    ]
-                )
+                self.fail("The POC preflight must not impose a quota threshold")
             if args[:3] == ["az", "group", "list"]:
                 return "[]"
             if args[:3] == ["az", "postgres", "flexible-server"]:
@@ -78,6 +73,8 @@ class PreflightTests(unittest.TestCase):
                 self.assertIn("--subscription", command)
                 self.assertEqual(command[command.index("--subscription") + 1], project.SUBSCRIPTION)
         self.assertFalse(any(command[:3] == ["az", "account", "set"] for command in commands))
+        self.assertNotIn("capacity", result)
+        self.assertFalse(any(command[:3] == ["az", "vm", "list-usage"] for command in commands))
 
     def test_graph_redirect_does_not_forward_token(self):
         connection = MagicMock()
@@ -94,10 +91,6 @@ class PreflightTests(unittest.TestCase):
     def test_restricted_postgres_fails_before_persisting_deployment_context(self):
         replies = [
             {"id": project.SUBSCRIPTION, "tenantId": "11111111-1111-1111-1111-111111111111"},
-            [
-                {"name": {"value": name}, "currentValue": 0, "limit": 100}
-                for name in ("cores", "standardDSv5Family")
-            ],
             [{"supportedServerEditions": [], "reason": "Subscriptions are restricted"}],
         ]
         with (
@@ -127,6 +120,79 @@ class PreflightTests(unittest.TestCase):
         for invalid in ("", "ERROR: key not found", "/subscriptions/other"):
             with self.assertRaises(ValueError):
                 project.uuid(invalid, "test")
+
+
+class BootstrapTests(unittest.TestCase):
+    def exercise(self, *, diagnostic=None, preview=False, status="Succeeded"):
+        context = {
+            "operator_ip": "8.8.8.8",
+            "operator_object_id": "22222222-2222-2222-2222-222222222222",
+            "kubernetes_version": "1.35.7",
+            "node_vm_size": "Standard_D4s_v5",
+            "node_count": 2,
+        }
+        calls = []
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary)
+            if diagnostic is not None:
+                (state / "validation.json").write_text(diagnostic)
+
+            def run(args, **kwargs):
+                calls.append(args)
+                if args[0] == str(project.BICEP):
+                    Path(args[args.index("--outfile") + 1]).write_text('{"compiled":true}')
+                    return ""
+                self.assertEqual(args[:3], ["az", "deployment", "sub"])
+                return json.dumps(
+                    {
+                        "properties": {
+                            "provisioningState": status,
+                            "outputs": {"foundation": {"value": {"project": "radplanes"}}},
+                        }
+                    }
+                )
+
+            with (
+                patch.object(project, "load_context", return_value=context),
+                patch.object(project, "state_dir", return_value=state),
+                patch.object(project, "run", side_effect=run),
+                patch.dict(project.os.environ, {"CONFIRM_AZURE": "yes"}),
+            ):
+                if status == "Succeeded":
+                    project.bootstrap(preview=preview)
+                else:
+                    with self.assertRaisesRegex(project.CommandError, "did not succeed"):
+                        project.bootstrap(preview=preview)
+                output = state / "bootstrap.outputs.json"
+                self.assertEqual(output.exists(), not preview and status == "Succeeded")
+                if output.exists():
+                    self.assertEqual(
+                        json.loads(output.read_text()),
+                        {"foundation": {"project": "radplanes"}},
+                    )
+            self.assertTrue((state / "bootstrap.parameters.json").exists())
+        return calls
+
+    def test_bootstrap_compiles_and_deploys_without_prior_approval(self):
+        calls = self.exercise()
+        deployment = calls[-1]
+        self.assertEqual(deployment[3], "create")
+        self.assertEqual(
+            deployment[deployment.index("--subscription") + 1],
+            project.SUBSCRIPTION,
+        )
+        self.assertFalse(any("what-if" in call or "validate" in call for call in calls))
+
+    def test_optional_stale_diagnostic_does_not_block_deployment(self):
+        self.exercise(diagnostic="old diagnostic, not deployment authority")
+
+    def test_preview_remains_an_explicit_diagnostic(self):
+        calls = self.exercise(preview=True)
+        self.assertEqual(calls[-1][3], "what-if")
+        self.assertFalse(any("create" in call for call in calls))
+
+    def test_failed_deployment_is_not_reported_as_success(self):
+        self.exercise(status="Failed")
 
 
 if __name__ == "__main__":

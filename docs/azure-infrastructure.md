@@ -113,8 +113,9 @@ or Azure Envoy/Contour ingress is configured.
 The small-node default follows the current AKS system-pool documentation,
 updated 2026-08-21: at least four vCPUs per system node and two system nodes.
 The old two-vCPU node SKU is therefore not reused. This is ten nodes / forty
-vCPUs for the five-cluster allocation, before upgrades. The parent must validate
-that actual quota and include upgrade surge capacity before deployment.
+vCPUs for the five-cluster allocation, before upgrades. This describes the
+topology, not a POC admission limit. Azure reports any actual capacity or
+service-availability failure during provisioning.
 The optional read-only `az vm list-skus` probe produced no output over four
 minutes and was stopped; SKU availability and quota are not claimed verified.
 

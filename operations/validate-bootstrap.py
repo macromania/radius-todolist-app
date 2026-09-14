@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the exact bootstrap inputs before a real Azure deployment."""
+"""Optionally inspect and validate bootstrap inputs for troubleshooting."""
 
 import hashlib
 import json
