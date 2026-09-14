@@ -44,4 +44,8 @@ For the design, read [architecture](docs/architecture.md) and
 choices; [FINDINGS.md](FINDINGS.md) records results and their source revisions.
 [Limitations](docs/limitations.md) describe the POC's scope.
 
+The [state-removal ExecPlan](docs/plans/remove-state-dependency.md) describes the
+planned `.env` configuration, live discovery, and service-owned credentials and
+progress. It is a reviewed plan, not yet the implemented command surface.
+
 Use synthetic data and keep credentials separate from source.

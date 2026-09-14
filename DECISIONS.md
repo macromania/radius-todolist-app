@@ -425,3 +425,26 @@ validation remain optional tools for understanding or troubleshooting templates.
 Resource ownership, credential separation, and correct state transitions remain
 part of the technical implementation. They are not a cost-approval workflow.
 Keep the walkthrough centered on what each step creates or demonstrates.
+
+## D043 - Replace workstation deployment state with explicit owners
+
+Approved for the next implementation phase on September 14, 2026. A small
+initializer creates or replaces one git-ignored `.env` with environment,
+project/deployment identity, Azure starting settings when applicable, and
+explicitly supplied credentials when needed. Parse it as configuration, never
+as executable shell input. Generated manifests and CLI working files are
+disposable.
+
+Use the shared project Key Vault for Azure application credentials and
+Kubernetes Secrets locally. Discover endpoints and kubeconfigs through APIs
+for every independent operator action; do not persist that metadata in the
+database or `.env`. Keep tenant/configuration/operation records and reports in
+their existing database/resource owners. This does not change child-initiated
+PostgreSQL polling or add upstream calls to data API requests.
+
+Local remains cloud-free and script/kind/Kubernetes-driven, with no mounted
+checkout files. Standard kind/Docker execution, Kubernetes volumes, and Radius
+child ownership remain explicit infrastructure mechanisms. The full
+[revised ExecPlan](docs/plans/remove-state-dependency.md) defines the interfaces,
+local executor tradeoff, and fresh-checkout/empty-worker acceptance. This
+decision is planned, not implemented by the documentation revision.

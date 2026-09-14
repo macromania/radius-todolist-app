@@ -1661,3 +1661,20 @@ walkthrough and narrow security review found no remaining issue.
 `make check` passed **917 tests, 264 subtests, 50 dependency skips, 23 Bicep
 compiles, 24 Terraform mock-provider tests, Ruff, and ShellCheck**.
 No deployment or cloud mutation was performed for this change.
+
+### State-removal plan revision, 2026-09-14
+
+The user approved `.env` starting configuration, shared Azure Key Vault
+credentials, live API-only endpoint/kubeconfig discovery, disposable generated
+files, and database/resource-owned operation progress. The revised plan is
+`docs/plans/remove-state-dependency.md`; it preserves cloud-free local behavior
+and the original plane boundaries.
+
+Rubber-duck review identified missing execution details for private-vault
+operator access, deterministic naming, command/runtime stages, transaction-owned
+SQL initialization, prepared local artifacts, and restoration after actual
+fault-client loss. These are now explicit, along with the node-owned encryption
+bootstrap and the remaining kind executor's Docker connection. Initial and
+follow-up security reviews found no vulnerabilities; the follow-up rubber-duck
+review found the plan ready. No implementation, `.env` creation, state migration,
+or live resource change was performed.
