@@ -194,8 +194,10 @@ declarations. Local deployment skips certificate administration. Their challenge
 containers remain harmless, and the local gateway Recipe uses HTTP regardless
 of the Azure challenge/HTTPS phase properties.
 
-The existing SQL bootstrap Job, role names, credentials, runtime Secrets, and
-initialization markers are shared with Azure. Local PostgreSQL outputs must
+The SQL bootstrap Job, role names, credentials, runtime Secrets, and read-only
+schema observation are shared with Azure. Committed database metadata is the
+initialization authority, not a workstation file or ConfigMap. Local PostgreSQL
+outputs must
 match the plane's private node IP, port `31543`, database name, `plane_setup`,
 `tlsRequired: false`, `kubernetes://NAMESPACE/statefulsets/postgres`, and
 `postgres-setup`. Only that temporary setup Secret and bootstrap Job/Secret

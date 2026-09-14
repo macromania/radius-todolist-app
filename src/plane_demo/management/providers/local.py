@@ -117,6 +117,8 @@ def decode_access(value: str, context: str, *, child: bool) -> tuple[dict, bytes
 
 
 class LocalProvider:
+    radius_scope = SCOPE
+
     def __init__(
         self,
         config: LocalConfig,
@@ -162,7 +164,7 @@ class LocalProvider:
         return self.config.allocation(slot)["context"], self.state / f"{slot}.kubeconfig"
 
     def inspect_pair(self, pair_id: str) -> PairResult:
-        return workloads.inspect_pair(self, pair_id, SCOPE)
+        return workloads.inspect_pair(self, pair_id, self.radius_scope)
 
     @staticmethod
     def names(slot: str) -> tuple[str, str]:
@@ -888,7 +890,9 @@ class LocalProvider:
         self.publish_modules(cluster.slot)
         self.register(cluster.slot)
 
-    def secret(self, slot: str, namespace: str, name: str, values: dict) -> None:
+    def secret(
+        self, slot: str, namespace: str, name: str, values: dict, *, create: bool = False
+    ) -> None:
         self.commands.protect(values)
         self.apply(
             slot,
@@ -899,6 +903,7 @@ class LocalProvider:
                 "type": "Opaque",
                 "stringData": values,
             },
+            create=create,
         )
 
     @staticmethod

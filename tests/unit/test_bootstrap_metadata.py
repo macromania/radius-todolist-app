@@ -128,3 +128,42 @@ def test_source_or_configuration_mismatch_stops_before_catalog_query(expected):
     with pytest.raises(ValueError, match="schema_version_mismatch"):
         bootstrap.initialized(connection, "control", ROLES, other)
     assert not any(call == bootstrap.CATALOG_QUERY for call, _ in connection.calls)
+
+
+def test_observation_entrypoint_needs_no_role_passwords_and_uses_read_only_transaction(
+    monkeypatch, expected
+):
+    connection = Connection(expected, existing=True)
+    monkeypatch.setattr(bootstrap.psycopg, "connect", lambda *a, **kw: connection)
+    for key, value in {
+        "BOOTSTRAP_MODE": "observe",
+        "BOOTSTRAP_DSN": "synthetic-not-used",
+        "BOOTSTRAP_KIND": "control",
+        "SQL_DIRECTORY": "sql",
+        "PAIR_ID": "shared",
+    }.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("ROLE_PASSWORDS_JSON", raising=False)
+    monkeypatch.delenv("PAIR_SLOTS_JSON", raising=False)
+    bootstrap.main()
+    assert connection.completed
+    assert connection.calls[0][0] == "SET TRANSACTION READ ONLY"
+    assert all(call.lstrip().startswith("SELECT") for call, _ in connection.calls[1:])
+
+
+@pytest.mark.parametrize(
+    ("existing", "changed", "error"),
+    [
+        (False, False, "database_schema_version_missing"),
+        (True, True, "database_schema_contract_changed"),
+    ],
+)
+def test_observation_never_initializes_a_missing_or_changed_schema(
+    monkeypatch, expected, existing, changed, error
+):
+    connection = Connection(expected, existing=existing, changed=changed)
+    monkeypatch.setattr(bootstrap.psycopg, "connect", lambda *a, **kw: connection)
+    with pytest.raises(ValueError, match=error):
+        bootstrap.observe("synthetic-not-used", "control", [], Path("sql"), "shared")
+    assert not connection.completed
+    assert all(call.lstrip().startswith("SELECT") for call, _ in connection.calls[1:])

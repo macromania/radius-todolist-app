@@ -1,4 +1,5 @@
 import base64
+import copy
 import hashlib
 import importlib.util
 import json
@@ -103,6 +104,9 @@ def config(raw_local):
 def db_properties(slot="management", host="172.18.0.2"):
     role, namespace = LocalProvider.names(slot)
     return {
+        "provisioningState": "Succeeded",
+        "application": f"{SCOPE}/providers/Applications.Core/applications/{role}",
+        "environment": f"{SCOPE}/providers/Applications.Core/environments/{slot}",
         "host": host,
         "port": 31543,
         "database": role,
@@ -729,7 +733,7 @@ def test_database_bootstrap_uses_real_job_and_only_deletes_temporary_setup_secre
             if kind == "secret"
             and name == "postgres-setup"
             and provider.credentials.has_database("management") is False
-            and (provider.state / "management-database-intent.json").exists()
+            and deployment.called
             else None
         ),
     )
@@ -737,7 +741,9 @@ def test_database_bootstrap_uses_real_job_and_only_deletes_temporary_setup_secre
     deployment = MagicMock()
     monkeypatch.setattr(provider, "deploy", deployment)
     emitted = []
-    monkeypatch.setattr(provider, "apply", lambda _, value, **__: emitted.append(value))
+    monkeypatch.setattr(
+        provider, "apply", lambda _, value, **__: emitted.append(copy.deepcopy(value))
+    )
     provider.initialize_database("management")
     deployment.assert_called_once_with(
         "management", "database", "management", {"databaseName": "management"}
@@ -748,7 +754,12 @@ def test_database_bootstrap_uses_real_job_and_only_deletes_temporary_setup_secre
         "-m",
         "plane_demo.setup.bootstrap",
     ]
-    secret = next(value for value in emitted if value["kind"] == "Secret")
+    assert "BOOTSTRAP_DSN" not in emitted[0]["stringData"]
+    secret = next(
+        value
+        for value in emitted
+        if value["kind"] == "Secret" and "BOOTSTRAP_DSN" in value["stringData"]
+    )
     assert conninfo_to_dict(secret["stringData"]["BOOTSTRAP_DSN"])["sslmode"] == "disable"
     calls = [call.args[0] for call in provider.commands.run.call_args_list]
     assert any("wait" in args and "job/database-init" in args for args in calls)
@@ -758,6 +769,40 @@ def test_database_bootstrap_uses_real_job_and_only_deletes_temporary_setup_secre
         for args in calls
         for retained in ("secret/postgres-credentials", "secret/postgres-server")
     )
+
+
+def test_local_existing_database_runs_read_only_observer_job(provider, monkeypatch):
+    monkeypatch.setattr(provider, "database_resource_exists", lambda _: True)
+    monkeypatch.setattr(provider, "rad", lambda *_: json.dumps({"properties": db_properties()}))
+    node = {
+        "metadata": {
+            "name": provider.config.allocation("management")["clusterName"] + "-control-plane"
+        },
+        "status": {"addresses": [{"type": "InternalIP", "address": "172.18.0.2"}]},
+    }
+    provider.commands.run.side_effect = lambda args, **kwargs: (
+        json.dumps(node) if "get" in args and "node" in args else ""
+    )
+    deploy = MagicMock()
+    monkeypatch.setattr(provider, "deploy", deploy)
+    emitted = []
+    monkeypatch.setattr(
+        provider, "apply", lambda _, value, **__: emitted.append(copy.deepcopy(value))
+    )
+    provider.initialize_database("management")
+    deploy.assert_not_called()
+    secret, job = emitted
+    values = secret["stringData"]
+    assert values["BOOTSTRAP_MODE"] == "observe"
+    assert "ROLE_PASSWORDS_JSON" not in values
+    assert conninfo_to_dict(values["BOOTSTRAP_DSN"])["user"] == "mgmt_provisioner"
+    assert job["spec"]["template"]["spec"]["containers"][0]["command"] == [
+        "python",
+        "-m",
+        "plane_demo.setup.bootstrap",
+    ]
+    assert not (provider.state / "management-database-intent.json").exists()
+    assert not any(value["kind"] == "ConfigMap" for value in emitted)
 
 
 @pytest.mark.parametrize(

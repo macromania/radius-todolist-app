@@ -93,15 +93,12 @@ def initialized(connection, kind: str, roles: set[str], expected: dict) -> bool:
     return True
 
 
-def initialize(
-    dsn: str,
+def schema_contract(
     kind: str,
-    passwords: dict[str, str],
     slots: list[dict[str, str]],
-    schema_directory: Path = Path("sql"),
-    pair_id: str = "",
-    initialization_id: str | None = None,
-) -> None:
+    schema_directory: Path,
+    pair_id: str,
+) -> tuple[set[str], str, dict]:
     if kind not in {"management", "control"}:
         raise ValueError("BOOTSTRAP_KIND must be management or control")
     roles = (
@@ -118,15 +115,8 @@ def initialize(
             raise ValueError("management allocation requires a shared slot")
     elif not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,31}", pair_id):
         raise ValueError("control initialization requires PAIR_ID")
-    if set(passwords) != roles:
-        raise ValueError("ROLE_PASSWORDS_JSON must match precisely the runtime role names")
-    if any(
-        not re.fullmatch(r"[a-z][a-z0-9_]{0,62}", role)
-        or role in OWNERS
-        or len(passwords[role]) < 32
-        for role in roles
-    ):
-        raise ValueError("invalid runtime role name or password shorter than 32 characters")
+    if any(not re.fullmatch(r"[a-z][a-z0-9_]{0,62}", role) or role in OWNERS for role in roles):
+        raise ValueError("invalid runtime role name")
     schema = (schema_directory / f"{kind}.sql").read_text()
     expected = {
         "configuration": {
@@ -135,6 +125,39 @@ def initialize(
         },
         "schema_sha256": hashlib.sha256(schema.encode()).hexdigest(),
     }
+    return roles, schema, expected
+
+
+def observe(
+    dsn: str,
+    kind: str,
+    slots: list[dict[str, str]],
+    schema_directory: Path = Path("sql"),
+    pair_id: str = "",
+) -> None:
+    roles, _, expected = schema_contract(kind, slots, schema_directory, pair_id)
+    with psycopg.connect(dsn, connect_timeout=10) as connection:
+        connection.execute("SET TRANSACTION READ ONLY")
+        connection.execute("SELECT pg_advisory_xact_lock(35510,3)")
+        if not initialized(connection, kind, roles, expected):
+            raise ValueError("database_schema_version_missing")
+    logger.info("database_initialization_verified kind=%s version=%s", kind, SCHEMA_VERSION)
+
+
+def initialize(
+    dsn: str,
+    kind: str,
+    passwords: dict[str, str],
+    slots: list[dict[str, str]],
+    schema_directory: Path = Path("sql"),
+    pair_id: str = "",
+    initialization_id: str | None = None,
+) -> None:
+    roles, schema, expected = schema_contract(kind, slots, schema_directory, pair_id)
+    if set(passwords) != roles:
+        raise ValueError("ROLE_PASSWORDS_JSON must match precisely the runtime role names")
+    if any(len(passwords[role]) < 32 for role in roles):
+        raise ValueError("runtime password shorter than 32 characters")
     operation = UUID(initialization_id) if initialization_id else uuid4()
     with psycopg.connect(dsn, connect_timeout=10) as connection:
         connection.execute("SELECT pg_advisory_xact_lock(35510,3)")
@@ -283,6 +306,18 @@ def initialize(
 
 def main() -> None:
     try:
+        mode = os.environ.get("BOOTSTRAP_MODE", "initialize")
+        if mode == "observe":
+            observe(
+                required("BOOTSTRAP_DSN"),
+                required("BOOTSTRAP_KIND"),
+                json.loads(os.environ.get("PAIR_SLOTS_JSON", "[]")),
+                Path(os.environ.get("SQL_DIRECTORY", "/app/sql")),
+                os.environ.get("PAIR_ID", ""),
+            )
+            return
+        if mode != "initialize":
+            raise ValueError("invalid bootstrap mode")
         initialize(
             required("BOOTSTRAP_DSN"),
             required("BOOTSTRAP_KIND"),

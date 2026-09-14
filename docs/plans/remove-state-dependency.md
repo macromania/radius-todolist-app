@@ -51,7 +51,8 @@ general-purpose workflow/retry engine.
 - [ ] Implement temporary workspaces and live metadata discovery.
 - [ ] Move Azure credentials to Key Vault and local credentials to Kubernetes.
 - [x] (2026-09-14) Remove database endpoint inventories and observe live shared-pair resources. Correct Radius ownership checks after rubber-duck review; both fix reviews, 265 focused tests, and 45 real PostgreSQL integration cases pass.
-- [ ] Remove remaining filesystem operation markers and wire transaction-owned database observation into providers.
+- [x] (2026-09-14) Wire read-only transaction-owned database observation into both providers and replace database intent files with the actual init Secret. Unit and real PostgreSQL checks pass; corrected the orphan runtime-Secret gap found in review.
+- [ ] Remove remaining cluster/bootstrap filesystem operation markers.
 - [ ] Simplify local bootstrap and remove checkout-file mount dependencies.
 - [ ] Wire manual commands, API response contracts, scenarios, and cleanup.
 - [ ] Prove Azure first and local second, including fresh-checkout and empty-worker recovery.

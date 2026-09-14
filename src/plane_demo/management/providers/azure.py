@@ -41,6 +41,8 @@ CONTAINER_CERTIFICATE_COMMAND = ("python", "/app/scripts/operations/run-certific
 
 
 class AzureProvider:
+    radius_scope = "/planes/radius/local/resourceGroups/radplanes"
+
     def __init__(
         self,
         config: OperatorConfig,
@@ -284,9 +286,7 @@ class AzureProvider:
         )
 
     def inspect_pair(self, pair_id: str) -> PairResult:
-        return workloads.inspect_pair(
-            self, pair_id, "/planes/radius/local/resourceGroups/radplanes"
-        )
+        return workloads.inspect_pair(self, pair_id, self.radius_scope)
 
     def connect_management(self) -> None:
         host = os.environ.get("KUBERNETES_SERVICE_HOST", "")
@@ -670,7 +670,9 @@ class AzureProvider:
         role = "management" if slot == "management" else slot.rsplit("-", 1)[1]
         return role, f"radplanes-{slot}-{role}"
 
-    def secret(self, slot: str, namespace: str, name: str, values: dict) -> None:
+    def secret(
+        self, slot: str, namespace: str, name: str, values: dict, *, create: bool = False
+    ) -> None:
         self.commands.protect(values)
         self.apply(
             slot,
@@ -681,6 +683,7 @@ class AzureProvider:
                 "type": "Opaque",
                 "stringData": values,
             },
+            create=create,
         )
 
     def prerequisites(self, slot: str) -> None:

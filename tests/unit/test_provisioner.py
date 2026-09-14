@@ -129,6 +129,9 @@ def credentials(path, config):
 
 def database_properties():
     return {
+        "provisioningState": "Succeeded",
+        "application": f"{RADIUS_SCOPE}/providers/Applications.Core/applications/management",
+        "environment": MANAGEMENT_ENVIRONMENT,
         "host": "pg-demo.postgres.database.azure.com",
         "port": 5432,
         "database": "management",
@@ -1071,15 +1074,18 @@ def test_database_initialization_uses_secret_stdin_and_a_short_lived_job(provide
 
     def deploy(*_args):
         nonlocal deployed
-        intent = provider.state / "management-database-intent.json"
-        assert json.loads(intent.read_text())["resourceName"] == "postgres"
-        assert intent.stat().st_mode & 0o777 == 0o600
+        assert applied[0]["metadata"]["name"] == "database-init"
+        assert "ROLE_PASSWORDS_JSON" in applied[0]["stringData"]
+        assert "BOOTSTRAP_DSN" not in applied[0]["stringData"]
+        assert not (provider.state / "management-database-intent.json").exists()
         deployed = True
 
     monkeypatch.setattr(provider, "deploy", deploy)
     monkeypatch.setattr(provider, "database_resource_exists", MagicMock(return_value=False))
     monkeypatch.setattr(provider, "resource", MagicMock(return_value=properties))
-    monkeypatch.setattr(provider, "apply", lambda slot, payload, **kwargs: applied.append(payload))
+    monkeypatch.setattr(
+        provider, "apply", lambda slot, payload, **kwargs: applied.append(copy.deepcopy(payload))
+    )
     monkeypatch.setattr(
         provider,
         "kube_get",
@@ -1090,7 +1096,8 @@ def test_database_initialization_uses_secret_stdin_and_a_short_lived_job(provide
         ),
     )
     provider.initialize_database("management")
-    secret, job, marker = applied
+    intent, secret, job = applied
+    assert intent["kind"] == "Secret"
     assert secret["kind"] == "Secret"
     assert secret["stringData"]["BOOTSTRAP_KIND"] == "management"
     assert SECRET in conninfo_to_dict(secret["stringData"]["BOOTSTRAP_DSN"])["password"]
@@ -1098,13 +1105,13 @@ def test_database_initialization_uses_secret_stdin_and_a_short_lived_job(provide
     container = job["spec"]["template"]["spec"]["containers"][0]
     assert container["command"] == ["python", "-m", "plane_demo.setup.bootstrap"]
     assert container["envFrom"] == [{"secretRef": {"name": "database-init"}}]
-    assert marker["metadata"]["name"] == "database-initialized"
+    assert not any(value["kind"] == "ConfigMap" for value in applied)
     calls = [call.args[0] for call in provider.commands.run.call_args_list]
     assert "job/database-init" in calls[-1] and "secret/postgres-setup" in calls[-1]
     assert all(SECRET not in arg for command in calls for arg in command)
 
 
-def test_database_marker_skips_reinitialization_and_partial_job_is_not_replayed(
+def test_committed_database_is_observed_instead_of_trusting_file_or_configmap_markers(
     provider, monkeypatch
 ):
     marker = {
@@ -1114,11 +1121,23 @@ def test_database_marker_skips_reinitialization_and_partial_job_is_not_replayed(
         }
     }
     monkeypatch.setattr(provider, "kube_get", lambda *args: marker)
+    monkeypatch.setattr(provider, "database_resource_exists", lambda _: True)
+    monkeypatch.setattr(provider, "resource", lambda *_: database_properties())
     (provider.state / "management-database-intent.json").write_text("{}")
     deploy = MagicMock()
     monkeypatch.setattr(provider, "deploy", deploy)
     provider.initialize_database("management")
     deploy.assert_not_called()
+    inputs = [
+        json.loads(call.kwargs["stdin"])
+        for call in provider.commands.run.call_args_list
+        if call.kwargs.get("stdin")
+    ]
+    secret = next(value for value in inputs if value.get("kind") == "Secret")
+    assert secret["stringData"]["BOOTSTRAP_MODE"] == "observe"
+    assert "ROLE_PASSWORDS_JSON" not in secret["stringData"]
+    assert conninfo_to_dict(secret["stringData"]["BOOTSTRAP_DSN"])["user"] == "mgmt_provisioner"
+    monkeypatch.setattr(provider, "database_resource_exists", lambda _: False)
     monkeypatch.setattr(
         provider,
         "kube_get",
@@ -1129,16 +1148,83 @@ def test_database_marker_skips_reinitialization_and_partial_job_is_not_replayed(
     deploy.assert_not_called()
 
 
-def test_missing_marker_never_replays_a_retained_database_attempt(provider, monkeypatch):
+def test_failed_database_observation_never_replays_initialization(provider, monkeypatch):
     monkeypatch.setattr(provider, "kube_get", lambda *_: None)
     monkeypatch.setattr(provider, "deploy", MagicMock())
-    with pytest.raises(ProvisioningError, match="database_initialization_incomplete"):
+    monkeypatch.setattr(provider, "database_resource_exists", lambda _: True)
+    monkeypatch.setattr(provider, "resource", lambda *_: database_properties())
+
+    def kubectl(*args, **kwargs):
+        if "wait" in args:
+            raise ProvisioningError("command_failed")
+        return ""
+
+    monkeypatch.setattr(provider, "kubectl", kubectl)
+    cleanup = MagicMock()
+    monkeypatch.setattr(provider, "cleanup_initialization", cleanup)
+    with pytest.raises(ProvisioningError, match="command_failed"):
         provider.initialize_database("management")
     provider.deploy.assert_not_called()
+    cleanup.assert_not_called()
 
 
-@pytest.mark.parametrize("existing", ["radius-resource", "setup-secret"])
-def test_unmarked_gate_database_is_rejected_without_promotion(provider, monkeypatch, existing):
+@pytest.mark.parametrize(
+    "field",
+    [
+        "provisioningState",
+        "application",
+        "environment",
+        "database",
+        "username",
+    ],
+)
+def test_database_owner_mismatch_stops_before_credentials_are_bound(provider, monkeypatch, field):
+    properties = database_properties()
+    properties[field] = "foreign"
+    saved = provider.credentials.path.read_bytes()
+    monkeypatch.setattr(provider, "database_resource_exists", lambda _: True)
+    monkeypatch.setattr(provider, "resource", lambda *_: properties)
+    with pytest.raises(ProvisioningError, match="database_owner_mismatch"):
+        provider.initialize_database("management")
+    assert provider.credentials.path.read_bytes() == saved
+    provider.commands.run.assert_not_called()
+
+
+def test_observer_job_collision_only_cleans_its_created_secret(provider, monkeypatch):
+    monkeypatch.setattr(provider, "database_resource_exists", lambda _: True)
+    monkeypatch.setattr(provider, "resource", lambda *_: database_properties())
+    created = []
+
+    def apply(slot, value, **kwargs):
+        if value["kind"] == "Job":
+            raise ProvisioningError("job_creation_failed")
+        created.append(copy.deepcopy(value))
+
+    monkeypatch.setattr(provider, "apply", apply)
+    with pytest.raises(ProvisioningError, match="job_creation_failed"):
+        provider.initialize_database("management")
+    name = created[0]["metadata"]["name"]
+    assert name.startswith("database-observe-")
+    command = provider.commands.run.call_args.args[0]
+    assert f"secret/{name}" in command
+    assert not any(argument.startswith("job/") for argument in command)
+
+
+@pytest.mark.parametrize(
+    ("slot", "existing_kind", "existing_name"),
+    [
+        ("management", "secret", "postgres-setup"),
+        ("management", "secret", "database-init"),
+        ("management", "job", "database-init"),
+        ("management", "secret", "management-api-runtime"),
+        ("management", "secret", "provisioner-runtime"),
+        ("shared-control", "secret", "control-api-runtime"),
+        ("shared-control", "secret", "control-reconciler-runtime"),
+    ],
+)
+def test_orphan_bootstrap_resources_prevent_new_database(
+    provider, monkeypatch, slot, existing_kind, existing_name
+):
     del provider.credentials.plane("management")["database"]
     provider.credentials.save()
     saved = provider.credentials.path.read_bytes()
@@ -1147,29 +1233,35 @@ def test_unmarked_gate_database_is_rejected_without_promotion(provider, monkeypa
         provider,
         "kube_get",
         lambda slot, namespace, kind, name: (
-            {"metadata": {"name": name}}
-            if existing == "setup-secret" and name == "postgres-setup"
-            else None
+            {"metadata": {"name": name}} if (kind, name) == (existing_kind, existing_name) else None
         ),
     )
-    provider.commands.run.return_value = json.dumps([{"name": "postgres"}])
+    provider.commands.run.return_value = "[]"
     with pytest.raises(ProvisioningError, match="database_initialization_incomplete"):
-        provider.initialize_database("management")
+        provider.initialize_database(slot)
     provider.deploy.assert_not_called()
     assert provider.credentials.path.read_bytes() == saved
     assert not (provider.state / "management-database-intent.json").exists()
     assert not any("delete" in call.args[0] for call in provider.commands.run.call_args_list)
-    if existing == "radius-resource":
-        args = provider.commands.run.call_args.args[0]
-        assert "list" in args and "Demo.Platform/postgreSqlDatabases" in args
-        assert "--group" in args and "radplanes" in args
+    args = provider.commands.run.call_args.args[0]
+    assert "list" in args and "Demo.Platform/postgreSqlDatabases" in args
+    assert "--group" in args and "radplanes" in args
 
 
 def test_interruption_after_recipe_before_metadata_cannot_replay(provider, monkeypatch):
     del provider.credentials.plane("management")["database"]
     provider.credentials.save()
     passwords = copy.deepcopy(provider.credentials.plane("management")["passwords"])
-    monkeypatch.setattr(provider, "kube_get", lambda *_: None)
+    objects = {}
+
+    def lookup(slot, namespace, kind, name):
+        return objects.get((kind, name))
+
+    def apply(slot, value, **kwargs):
+        objects[(value["kind"].lower(), value["metadata"]["name"])] = copy.deepcopy(value)
+
+    monkeypatch.setattr(provider, "kube_get", lookup)
+    monkeypatch.setattr(provider, "apply", apply)
     provider.commands.run.return_value = "[]"
     deploy = MagicMock()
     monkeypatch.setattr(provider, "deploy", deploy)
@@ -1184,15 +1276,15 @@ def test_interruption_after_recipe_before_metadata_cannot_replay(provider, monke
         "management", "database", "management", {"databaseName": "management"}
     )
     assert not provider.credentials.has_database("management")
-    intent = provider.state / "management-database-intent.json"
-    assert json.loads(intent.read_text())["slot"] == "management"
+    assert ("secret", "database-init") in objects
+    assert not (provider.state / "management-database-intent.json").exists()
     restarted = AzureProvider(
         provider.config,
         provider.root,
         Credentials(provider.credentials.path),
         provider.commands,
     )
-    monkeypatch.setattr(restarted, "kube_get", lambda *_: None)
+    monkeypatch.setattr(restarted, "kube_get", lookup)
     monkeypatch.setattr(restarted, "deploy", MagicMock())
     with pytest.raises(ProvisioningError, match="database_initialization_incomplete"):
         restarted.initialize_database("management")
@@ -1549,12 +1641,10 @@ def test_management_deploy_preserves_coordinator_identity_and_certificate_comman
 
     def run_command(args, **kwargs):
         nonlocal gateway_reads
-        if "get" in args and "database-initialized" in args:
-            return json.dumps(
-                {
-                    "data": {"serverId": "postgres-resource", "database": "management"},
-                }
-            )
+        if "list" in args and "Demo.Platform/postgreSqlDatabases" in args:
+            return json.dumps([{"name": "postgres"}])
+        if "show" in args and "Demo.Platform/postgreSqlDatabases" in args:
+            return json.dumps({"properties": database_properties()})
         if args[0] == "rad" and "deploy" in args:
             path = args[args.index("--parameters") + 1].removeprefix("@")
             deployments.append(json.loads(Path(path).read_text())["parameters"])

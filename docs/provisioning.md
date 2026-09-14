@@ -283,46 +283,46 @@ provisioner's service-account annotation in Radius's declared workload base,
 instead of relying solely on the earlier Kubernetes annotation. Public API
 service accounts do not receive that identity.
 
-### Fresh database protocol
+### Database initialization and observation
 
-1. Check immutable `database-initialized` ConfigMap. If present, verify the
-   stored server/database matches retained credentials; skip Recipe and SQL
-   initialization and finish deleting any success-path setup artifacts.
-2. Without the marker, reject any retained database metadata, existing
-   `database-init` Secret/Job, `postgres-setup` Secret, Radius PostgreSQL resource
-   named `postgres`, or `SLOT-database-intent.json`. Radius inventory lookup
-   failures also stop the operation; they are not treated as an absent database.
-   Do not replay or change passwords, even if no credentials file existed when
-   an earlier integration gate created the database.
-3. Generate/retain runtime passwords, then exclusively create
-   `.state/azure/SLOT-database-intent.json` with mode `0600`. Flush the file and
-   directory before invoking the Recipe. The intent contains only slot,
-   application, and resource identifiers, and remains after both success and
-   failure. A crash after Recipe submission but before database metadata is
-   saved therefore cannot cause a later invocation to replay the Recipe.
+1. Query Radius for the current PostgreSQL resource. A lookup error is not
+   absence. Before using its connection properties, check readiness,
+   application/environment ownership, database name, and setup username.
+2. For an existing database, run a short-lived observation Job using its
+   existing runtime login. `BOOTSTRAP_MODE=observe` selects a read-only
+   transaction that verifies the committed schema version, source, configuration,
+   and catalog fingerprint. It receives no role-password bundle and performs no
+   DDL. Missing credentials, missing metadata, and schema drift stop the
+   operation rather than triggering initialization.
+3. For an absent database, reject surviving init/setup resources and either
+   plane runtime Secret. Generate or retain runtime passwords, then exclusively
+   create the actual `database-init` Secret before invoking the Recipe. This
+   resource records that initialization started; no workstation intent file is
+   required. A repeated invocation cannot overwrite it and replay the submission.
 4. Deploy `database.bicep` through that plane's Radius. Require PostgreSQL
    properties `host`, `port`, `database`, `username`, `tlsRequired=true`,
    `serverId`, and **`setupSecretName`**. The Recipe must materialize the named
    Secret in the application namespace, with its `password` data field.
 5. Read that Secret in memory, construct the escaped verified-TLS setup DSN, and
-   submit a dedicated `database-init` Secret through kubectl stdin. No password
-   or DSN enters a command argument, parameter file, inventory, or log.
+   add it to the existing `database-init` Secret through kubectl stdin. The setup
+   password and DSN do not enter command arguments, parameter files, inventories,
+   or logs.
 6. Create a tokenless Job using the API image and
    `python -m plane_demo.setup.bootstrap`, `BOOTSTRAP_KIND`, `ROLE_PASSWORDS_JSON`, and
    management `PAIR_SLOTS_JSON` or control `PAIR_ID`. It has zero retries and a
    deadline. Follow [contracts.md](contracts.md) for the actual SQL contract.
-7. Only after Job success, create the marker with server/database/setup-Secret
-   identifiers; delete the Job and both setup/init Secrets. If cleanup is
-   interrupted, the marker permits cleanup without rerunning initialization.
+7. The bootstrap transaction commits schema metadata with its DDL. After Job
+   success, delete the Job and setup/init Secrets. A later invocation can
+   verify the committed database and finish cleanup without replaying DDL.
+   Observation Jobs use unique names and remove their temporary Job/Secret.
+   Neither a ConfigMap nor an operator file is initialization authority.
 
 No setup password is retained in the credential file or a runtime Secret.
-Failure after SQL succeeds but before the marker is persisted remains an
-explicit operator-cleanup case, not automatically adopted state.
-There is no `PROMOTE_GATE`, automatic adoption, or intent-reset option. Remove
-a gate's database through Radius and verify its provider resources are gone
-before deploying the actual application. A failed initialized-plane attempt
-requires operator cleanup of its verified owned resources and corresponding
-state; deleting only its intent file is not a safe retry procedure.
+An incomplete or unversioned database is not adopted. A matching committed
+database is observed, not initialized again. The provisioner still marks
+interrupted operations explicitly and never resumes them automatically.
+Operator cleanup must follow actual Radius/Kubernetes ownership; deleting a
+workstation file cannot authorize a retry.
 
 ## Redis NIC metadata outside Recipe tracking
 

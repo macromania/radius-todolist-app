@@ -8,8 +8,9 @@ import logging
 import re
 from pathlib import Path
 from typing import Protocol
+from uuid import uuid4
 
-from plane_demo.management.providers.commands import Commands, create_json
+from plane_demo.management.providers.commands import Commands
 from plane_demo.management.providers.credentials import Credentials, database_dsn
 from plane_demo.management.providers.local_config import same_radius_id
 from plane_demo.management.provisioning import (
@@ -27,6 +28,7 @@ class PlaneRuntime(Protocol):
     def config(self) -> ProvisioningConfig: ...
 
     state: Path
+    radius_scope: str
     credentials: Credentials
     commands: Commands
 
@@ -36,7 +38,9 @@ class PlaneRuntime(Protocol):
     def deploy(self, slot: str, template: str, application: str, values: dict) -> None: ...
     def resource(self, slot: str, kind: str, name: str, application: str) -> dict: ...
     def kubectl(self, slot: str, *args: str) -> str: ...
-    def secret(self, slot: str, namespace: str, name: str, values: dict) -> None: ...
+    def secret(
+        self, slot: str, namespace: str, name: str, values: dict, *, create: bool = False
+    ) -> None: ...
     def database_resource_exists(self, slot: str) -> bool: ...
     def get_access(self, slot: str) -> Cluster: ...
     def expected_cluster_id(self, slot: str) -> str: ...
@@ -80,7 +84,6 @@ def inspect_pair(provider: PlaneRuntime, pair_id: str, radius_scope: str) -> Pai
 def initialize_database(provider: PlaneRuntime, slot: str) -> None:
     provider.config.allocation(slot)
     role, namespace = provider.names(slot)
-    intent = provider.state / f"{slot}-database-intent.json"
     roles = (
         {
             "mgmt_api",
@@ -90,43 +93,44 @@ def initialize_database(provider: PlaneRuntime, slot: str) -> None:
         if role == "management"
         else {"cp_api", "cp_reconciler", "dp_reconciler"}
     )
-    marker = provider.kube_get(slot, namespace, "configmap", "database-initialized")
-    if marker:
-        plane = provider.credentials.plane(slot)
-        if {key: marker["data"][key] for key in ("serverId", "database")} != {
-            "serverId": plane["database"]["serverId"],
-            "database": plane["database"]["database"],
-        }:
-            raise ProvisioningError("database_marker_mismatch")
-        provider.cleanup_initialization(slot, namespace, marker["data"].get("setupSecretName"))
+    variables = {"BOOTSTRAP_KIND": role}
+    if role == "management":
+        variables["PAIR_SLOTS_JSON"] = json.dumps(provider.config.pair_slots)
+    else:
+        variables["PAIR_ID"] = slot.removesuffix("-control")
+    if provider.database_resource_exists(slot):
+        properties = read_database(provider, slot)
+        provider.credentials.set_database(slot, properties)
+        variables.update(
+            BOOTSTRAP_MODE="observe",
+            BOOTSTRAP_DSN=provider.credentials.dsn(
+                slot, "mgmt_provisioner" if role == "management" else "cp_api"
+            ),
+        )
+        run_database_job(
+            provider, slot, f"database-observe-{uuid4().hex[:12]}", variables, observe=True
+        )
+        provider.cleanup_initialization(slot, namespace, properties.get("setupSecretName"))
         return
     if (
-        intent.exists()
-        or intent.is_symlink()
-        or provider.kube_get(slot, namespace, "secret", "database-init")
+        provider.kube_get(slot, namespace, "secret", "database-init")
         or provider.kube_get(slot, namespace, "job", "database-init")
         or provider.kube_get(slot, namespace, "secret", "postgres-setup")
-        or provider.credentials.has_database(slot)
-        or provider.database_resource_exists(slot)
+        or any(
+            provider.kube_get(slot, namespace, "secret", name)
+            for name in (
+                f"{role}-api-runtime",
+                "provisioner-runtime" if role == "management" else "control-reconciler-runtime",
+            )
+        )
     ):
         raise ProvisioningError("database_initialization_incomplete")
     plane = provider.credentials.ensure(slot, roles)
     provider.commands.protect(plane)
-    try:
-        create_json(
-            intent,
-            {
-                "version": 1,
-                "slot": slot,
-                "application": role,
-                "resourceType": "Demo.Platform/postgreSqlDatabases",
-                "resourceName": "postgres",
-            },
-        )
-    except FileExistsError:
-        raise ProvisioningError("database_initialization_incomplete") from None
+    variables["ROLE_PASSWORDS_JSON"] = json.dumps(plane["passwords"])
+    provider.secret(slot, namespace, "database-init", variables, create=True)
     provider.deploy(slot, "database", role, {"databaseName": role})
-    properties = provider.resource(slot, "postgresql", "postgres", role)
+    properties = read_database(provider, slot)
     setup_name = properties.get("setupSecretName")
     if not isinstance(setup_name, str) or not re.fullmatch(r"[a-z0-9-]+-setup", setup_name):
         raise ProvisioningError("postgres_setup_contract_missing")
@@ -140,57 +144,69 @@ def initialize_database(provider: PlaneRuntime, slot: str) -> None:
     )
     provider.commands.protect(dsn)
     provider.credentials.set_database(slot, properties)
-    variables = {
-        "BOOTSTRAP_DSN": dsn,
-        "BOOTSTRAP_KIND": role,
-        "ROLE_PASSWORDS_JSON": json.dumps(plane["passwords"]),
-    }
-    if role == "management":
-        variables["PAIR_SLOTS_JSON"] = json.dumps(provider.config.pair_slots)
-    else:
-        variables["PAIR_ID"] = slot.removesuffix("-control")
-    provider.secret(slot, namespace, "database-init", variables)
+    variables["BOOTSTRAP_DSN"] = dsn
+    run_database_job(provider, slot, "database-init", variables)
+    provider.cleanup_initialization(slot, namespace, setup_name)
+
+
+def read_database(provider: PlaneRuntime, slot: str) -> dict:
+    role, _ = provider.names(slot)
+    properties = provider.resource(slot, "postgresql", "postgres", role)
+    owners = f"{provider.radius_scope}/providers/Applications.Core"
+    if (
+        properties.get("provisioningState") != "Succeeded"
+        or not same_radius_id(properties.get("application"), f"{owners}/applications/{role}")
+        or not same_radius_id(properties.get("environment"), f"{owners}/environments/{slot}")
+        or properties.get("database") != role
+        or properties.get("username") != "plane_setup"
+    ):
+        raise ProvisioningError("database_owner_mismatch")
+    return properties
+
+
+def run_database_job(
+    provider: PlaneRuntime, slot: str, name: str, variables: dict, *, observe: bool = False
+) -> None:
+    _, namespace = provider.names(slot)
+    provider.secret(slot, namespace, name, variables, create=observe)
     job = provider.job(
         namespace,
-        "database-init",
+        name,
         provider.config.images["api"],
         ["python", "-m", "plane_demo.setup.bootstrap"],
         "database-init",
     )
-    job["spec"]["template"]["spec"]["containers"][0]["envFrom"] = [
-        {"secretRef": {"name": "database-init"}}
-    ]
-    provider.apply(slot, job, create=True)
+    job["spec"]["template"]["spec"]["containers"][0]["envFrom"] = [{"secretRef": {"name": name}}]
+    created = False
     try:
-        provider.kubectl(
-            slot,
-            "-n",
-            namespace,
-            "wait",
-            "--for=condition=complete",
-            "job/database-init",
-            "--timeout=600s",
-        )
-    except ProvisioningError:
-        logs = provider.kubectl(slot, "-n", namespace, "logs", "job/database-init", "--tail=100")
-        logger.error("database_initialization_failed %s", provider.commands.redact(logs))
-        raise
-    provider.apply(
-        slot,
-        {
-            "apiVersion": "v1",
-            "kind": "ConfigMap",
-            "metadata": {"name": "database-initialized", "namespace": namespace},
-            "immutable": True,
-            "data": {
-                "serverId": properties["serverId"],
-                "database": properties["database"],
-                "setupSecretName": setup_name,
-            },
-        },
-        create=True,
-    )
-    provider.cleanup_initialization(slot, namespace, setup_name)
+        provider.apply(slot, job, create=True)
+        created = True
+        try:
+            provider.kubectl(
+                slot,
+                "-n",
+                namespace,
+                "wait",
+                "--for=condition=complete",
+                f"job/{name}",
+                "--timeout=600s",
+            )
+        except ProvisioningError:
+            logs = provider.kubectl(slot, "-n", namespace, "logs", f"job/{name}", "--tail=100")
+            logger.error("database_initialization_failed %s", provider.commands.redact(logs))
+            raise
+    finally:
+        if observe:
+            provider.kubectl(
+                slot,
+                "-n",
+                namespace,
+                "delete",
+                *([f"job/{name}"] if created else []),
+                f"secret/{name}",
+                "--wait=true",
+                "--ignore-not-found",
+            )
 
 
 def runtime_secrets(provider: PlaneRuntime, slot: str) -> None:

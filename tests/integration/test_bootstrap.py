@@ -7,9 +7,42 @@ import pytest
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
-from plane_demo.setup.bootstrap import OWNERS, SCHEMA_VERSION, initialize
+from plane_demo.setup.bootstrap import OWNERS, SCHEMA_VERSION, initialize, observe
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.mark.parametrize(
+    ("kind", "role"),
+    [
+        ("management", "mgmt_provisioner"),
+        ("control", "cp_api"),
+    ],
+)
+def test_database_observation_uses_existing_runtime_login(database_server, kind, role):
+    with psycopg.connect(
+        database_server.management_admin if kind == "management" else database_server.control_admin
+    ) as connection:
+        slots = (
+            [
+                {"pair_id": pair, "reporting_role": reporting_role}
+                for pair, reporting_role in connection.execute(
+                    "SELECT pair_id,reporting_role FROM management.pairs ORDER BY pair_id"
+                ).fetchall()
+            ]
+            if kind == "management"
+            else []
+        )
+        before = connection.execute("SELECT * FROM demo_metadata.schema_version").fetchone()
+    observe(
+        database_server.dsn(role),
+        kind,
+        slots,
+        Path("sql"),
+        "" if kind == "management" else "shared",
+    )
+    with psycopg.connect(database_server.dsn(role)) as connection:
+        assert connection.execute("SELECT * FROM demo_metadata.schema_version").fetchone() == before
 
 
 def test_bootstrap_runs_with_nonsuperuser_setup(database_server):

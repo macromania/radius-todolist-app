@@ -133,6 +133,7 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F098 | Local bootstrap | High correctness | `scripts/operations/local/encryption.sh` | Static Pod conversion | Dropping container ports broke kind's named `probe-port` startup/readiness probes | Preserve ports with probe definitions; actual helper install, reuse, node restart, ciphertext/decryption, and probe removal pass on kind 1.35 |
 | F099 | Local bootstrap | High correctness | `scripts/operations/local/bootstrap.py` | Scoped command environment | Encryption helper could not find Docker Desktop's context inside the operator's isolated HOME | Forward the already-resolved Docker socket explicitly; caller and empty-HOME helper regressions and both fix reviews pass |
 | F100 | Live pair discovery | Medium correctness | `src/plane_demo/management/providers/workloads.py` | Shared-pair reuse | Radius `resource show --application` does not establish resource ownership | Check returned cluster and gateway application/environment IDs; worker-level regressions through both provider parsers and both fix reviews pass |
+| F101 | Database observation | Medium correctness | `src/plane_demo/management/providers/workloads.py` | Fresh database guard | Checking only the API runtime Secret missed a surviving provisioner or control-reconciler Secret | Check both runtime Secrets before generating credentials or submitting Radius work; management/control orphan-resource regressions pass |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -1807,3 +1808,29 @@ the exact management-pair column set, real status-only operation completion,
 tenant routes, initialization, reconciliation, and RLS. The test container was
 removed and its absence checked. These results do not claim a new Azure or
 full local deployment; harness and provider state-removal integration continues.
+
+### Provider-driven database observation
+
+Both providers now consult live Radius database ownership and committed SQL
+metadata rather than trusting `database-initialized` ConfigMaps or local
+database-intent files. An existing database gets a tokenless observation Job
+using its existing runtime DB login. The setup entrypoint selects a read-only
+transaction and checks schema/configuration/catalog metadata without accepting
+a role-password bundle, changing passwords, or executing DDL.
+
+Fresh initialization creates its actual Kubernetes init Secret before Radius
+submission. An interrupted submission therefore leaves a resource-owned
+record even if the operator workspace disappears. Surviving setup/init/runtime
+resources prevent an accidental new database submission. The database
+transaction is the completion authority, so a lost acknowledgement can be
+observed and temporary artifacts removed without replay.
+
+The security review found no vulnerabilities. Rubber-duck review found F101;
+the guard now covers both runtime identities. The full unit run passed 758
+tests before that guard expansion, and the final targeted run passed 265 tests.
+Forty-seven real PostgreSQL integration tests passed, including observation by
+the exact `mgmt_provisioner` and `cp_api` roles without metadata changes.
+The disposable PostgreSQL container was removed and its absence verified.
+
+This does not complete credential-store integration: provider credentials and
+other provider working files remain file-backed pending the next steps.
