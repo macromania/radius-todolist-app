@@ -20,6 +20,7 @@ from plane_demo.management import provisioner
 from plane_demo.management.providers import local
 from plane_demo.management.providers.commands import Commands
 from plane_demo.management.providers.credentials import Credentials, database_dsn
+from plane_demo.management.providers.identity import DemoConfig
 from plane_demo.management.providers.local import LocalProvider
 from plane_demo.management.providers.local_config import ACCESS_NAMESPACE, SCOPE, SLOTS, LocalConfig
 from plane_demo.management.provisioning import (
@@ -102,7 +103,8 @@ def config(raw_local):
 
 
 def db_properties(slot="management", host="172.18.0.2"):
-    role, namespace = LocalProvider.names(slot)
+    role = "management" if slot == "management" else slot.rsplit("-", 1)[1]
+    namespace = f"radplanes-local-{slot}-{role}"
     return {
         "provisioningState": "Succeeded",
         "application": f"{SCOPE}/providers/Applications.Core/applications/{role}",
@@ -115,6 +117,71 @@ def db_properties(slot="management", host="172.18.0.2"):
         "serverId": f"kubernetes://{namespace}/statefulsets/postgres",
         "setupSecretName": "postgres-setup",
     }
+
+
+def test_selected_local_identity_drives_names_access_and_temporary_commands(
+    raw_local, tmp_path, monkeypatch
+):
+    identity = DemoConfig("local", "example", "learn")
+    raw_local["projectName"] = identity.project
+    for slot, allocation in raw_local["allocations"].items():
+        allocation.update(clusterName=identity.slot_name(slot), context=identity.slot_name(slot))
+    raw_local["managementCluster"]["clusterId"] = f"kind://{identity.slot_name('management')}"
+    selected = LocalConfig.from_dict(raw_local, identity=identity)
+    root, workspace = tmp_path / "checkout", tmp_path / "work"
+    root.mkdir()
+    credentials = Credentials(tmp_path / "credentials.json", environment="local")
+    credentials.ensure(
+        "management",
+        {
+            "mgmt_api",
+            "mgmt_provisioner",
+            *(item["reporting_role"] for item in selected.pair_slots),
+        },
+    )
+    properties = db_properties()
+    properties["serverId"] = (
+        f"kubernetes://{identity.namespace('management')}/statefulsets/postgres"
+    )
+    credentials.set_database("management", properties)
+    provider = LocalProvider(selected, root, credentials, workspace=workspace)
+    commands = provider.commands
+    compiler = tmp_path / "bicep"
+    compiler.write_text("#!/bin/sh\nexit 0\n")
+    compiler.chmod(0o700)
+    commands._bicep = compiler
+    provider.paths("management")[1].write_text("{}")
+    monkeypatch.setattr(
+        commands, "run", MagicMock(return_value='{"properties":{"provisioningState":"Succeeded"}}')
+    )
+    provider.resource("management", "cluster", "shared-control", "cluster-shared-control")
+    command = commands.run.call_args.args[0]
+    assert command[command.index("--group") + 1] == identity.stem
+    assert command[command.index("--workspace") + 1] == identity.slot_name("management")
+    assert not (root / ".state").exists()
+    emitted = []
+    monkeypatch.setattr(provider, "apply", lambda slot, value, **kw: emitted.append(value))
+    monkeypatch.setattr(provider, "kube_get", lambda *args: None)
+    provider.prerequisites("shared-control")
+    assert emitted[0]["metadata"] == {
+        "name": identity.namespace("shared-control"),
+        "labels": {
+            "plane-demo/project": "example",
+            "plane-demo/deployment": "learn",
+            "plane-demo/environment": "local",
+        },
+    }
+    permissions = provider.management_permissions(identity.namespace("management"), [])
+    access = next(
+        value
+        for value in permissions
+        if value["kind"] == "Role" and value["metadata"]["namespace"] == selected.access_namespace
+    )
+    assert access["rules"][0]["resourceNames"] == [
+        f"{identity.slot_name(slot)}-access" for slot in SLOTS[1:]
+    ]
+    restored = LocalConfig.from_dict(selected.to_dict())
+    assert restored.identity == identity
 
 
 def credential_file(path, config, *, database=True):

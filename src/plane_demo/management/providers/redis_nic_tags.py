@@ -71,6 +71,8 @@ class Target:
     environment_id: str
     application_id: str
     tags: dict[str, str]
+    project_name: str = "radplanes"
+    resource_prefix: str = "radplanes"
 
     @classmethod
     def parse(cls, value: dict) -> Target:
@@ -86,11 +88,25 @@ class Target:
                 bool(re.fullmatch(r"[a-z][a-z0-9-]{0,47}", target.slot)), "redis_nic_input_invalid"
             )
             require(
-                target.resource_group == f"rg-radplanes-{target.slot}-app",
+                bool(re.fullmatch(r"[a-z][a-z0-9-]{0,15}", target.project_name))
+                and bool(re.fullmatch(r"[a-z][a-z0-9-]{0,24}", target.resource_prefix)),
                 "redis_nic_input_invalid",
             )
-            require(target.location == "centralus", "redis_nic_input_invalid")
-            prefix = "/planes/radius/local/resourceGroups/radplanes/providers/"
+            require(
+                (
+                    target.project_name == "radplanes" and target.location == "centralus"
+                    if target.resource_prefix == "radplanes"
+                    else target.resource_prefix.startswith(target.project_name + "-")
+                    and target.resource_prefix.endswith("-azure")
+                    and bool(re.fullmatch(r"[a-z][a-z0-9]{1,31}", target.location))
+                ),
+                "redis_nic_input_invalid",
+            )
+            require(
+                target.resource_group == f"rg-{target.resource_prefix}-{target.slot}-app",
+                "redis_nic_input_invalid",
+            )
+            prefix = f"/planes/radius/local/resourceGroups/{target.resource_prefix}/providers/"
             for identifier, kind in (
                 (target.resource_id, "Applications.Datastores/redisCaches"),
                 (target.environment_id, "Applications.Core/environments"),
@@ -108,7 +124,8 @@ class Target:
                     "redis_nic_input_invalid",
                 )
             subnet_prefix = (
-                f"/subscriptions/{target.subscription_id}/resourceGroups/rg-radplanes-platform"
+                f"/subscriptions/{target.subscription_id}"
+                f"/resourceGroups/rg-{target.resource_prefix}-platform"
                 "/providers/Microsoft.Network/virtualNetworks/"
             )
             require(
@@ -124,7 +141,10 @@ class Target:
             )
             tags = tag_values(target.tags)
             require(
-                all(tags.get(key.casefold()) == item for key, item in BASE_TAGS.items()),
+                all(
+                    tags.get(key.casefold()) == item
+                    for key, item in {**BASE_TAGS, "project": target.project_name}.items()
+                ),
                 "redis_nic_input_invalid",
             )
             require(
@@ -239,7 +259,8 @@ def check_resource(resource: dict, identifier: str, kind: str, target: Target) -
     require(same_id(resource.get("id"), identifier) and same_id(resource.get("type"), kind))
     require(resource.get("name") == identifier.rsplit("/", 1)[1])
     # Managed Redis returns the display name; network resources return the region code.
-    require(resource.get("location") in (target.location, "Central US"))
+    location = resource.get("location")
+    require(isinstance(location, str) and location.replace(" ", "").casefold() == target.location)
     properties = resource.get("properties")
     require(isinstance(properties, dict) and properties.get("provisioningState") == "Succeeded")
     return properties

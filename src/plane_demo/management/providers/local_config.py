@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import UUID
 
+from plane_demo.management.providers.identity import PUBLIC_KEYS, DemoConfig
 from plane_demo.management.provisioning import DIGEST, ProvisioningError, freeze, plain
 
 SLOTS = (
@@ -56,19 +57,31 @@ class LocalConfig:
     images: Mapping
     image_ids: Mapping
     management_cluster: Mapping
+    identity: DemoConfig | None = None
 
     @classmethod
     def load(cls, path: Path) -> LocalConfig:
         return cls.from_dict(json.loads(path.read_text()))
 
     @classmethod
-    def from_dict(cls, data: dict) -> LocalConfig:
+    def from_dict(cls, data: dict, *, identity: DemoConfig | None = None) -> LocalConfig:
+        if "bootstrapIdentity" in data:
+            if not isinstance(data["bootstrapIdentity"], dict) or (
+                set(data["bootstrapIdentity"]) - PUBLIC_KEYS
+            ):
+                raise ValueError("bootstrap identity accepts public settings only")
+            saved_identity = DemoConfig.from_values(data["bootstrapIdentity"])
+            if identity is not None and saved_identity.public_values() != identity.public_values():
+                raise ValueError("bootstrap identity mismatch")
+            identity = identity or saved_identity
         if (
             data.get("version") != 1
             or data.get("provider") != "local"
-            or data.get("projectName") != "radplanes"
+            or data.get("projectName") != (identity.project if identity else "radplanes")
+            or (identity is not None and identity.environment != "local")
         ):
-            raise ValueError("local configuration requires version 1, local, radplanes")
+            raise ValueError("local configuration does not match the selected project")
+        prefix = identity.stem if identity else "radplanes-local"
         allocations = data["allocations"]
         if not isinstance(allocations, dict) or set(allocations) != set(SLOTS):
             raise ValueError("local configuration requires exactly the five reserved slots")
@@ -76,8 +89,8 @@ class LocalConfig:
             allocation = allocations[slot]
             expected = {
                 "slot": slot,
-                "clusterName": f"radplanes-local-{slot}",
-                "context": f"radplanes-local-{slot}",
+                "clusterName": f"{prefix}-{slot}",
+                "context": f"{prefix}-{slot}",
                 "gatewayPort": 35490 + index,
                 "apiPort": 35495 + index,
             }
@@ -112,7 +125,7 @@ class LocalConfig:
         if len(revisions) != 1:
             raise ValueError("both local images must use the same source commit")
         management = data["managementCluster"]
-        if management["clusterId"] != "kind://radplanes-local-management":
+        if management["clusterId"] != f"kind://{prefix}-management":
             raise ValueError("local management identity mismatch")
         UUID(management["uid"])
         private_ipv4(management["nodeAddress"])
@@ -125,7 +138,37 @@ class LocalConfig:
             freeze(images),
             freeze(ids),
             freeze(management),
+            identity,
         )
+
+    @property
+    def bootstrap_settings(self) -> dict[str, str]:
+        if self.identity is None:
+            raise ProvisioningError("bootstrap_identity_required")
+        return self.identity.public_values()
+
+    @property
+    def project_name(self) -> str:
+        return self.identity.project if self.identity else "radplanes"
+
+    @property
+    def resource_prefix(self) -> str:
+        return self.identity.stem if self.identity else "radplanes-local"
+
+    @property
+    def radius_group(self) -> str:
+        return self.resource_prefix
+
+    @property
+    def access_namespace(self) -> str:
+        return f"{self.resource_prefix}-access"
+
+    def namespace(self, slot: str) -> str:
+        self.allocation(slot)
+        if self.identity:
+            return self.identity.namespace(slot)
+        role = "management" if slot == "management" else slot.rsplit("-", 1)[1]
+        return f"radplanes-local-{slot}-{role}"
 
     def allocation(self, slot: str) -> Mapping:
         if slot not in SLOTS:
@@ -163,7 +206,7 @@ class LocalConfig:
         return {
             "version": 1,
             "provider": "local",
-            "projectName": "radplanes",
+            "projectName": self.project_name,
             "allocations": plain(self.allocations),
             "recipes": plain(self.recipes),
             "images": {
@@ -171,4 +214,5 @@ class LocalConfig:
                 for role in ("api", "provisioner")
             },
             "managementCluster": plain(self.management_cluster),
+            **({"bootstrapIdentity": self.bootstrap_settings} if self.identity else {}),
         }

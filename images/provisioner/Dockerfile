@@ -4,7 +4,7 @@ USER root
 ARG TARGETARCH
 ENV UV_SYSTEM_CERTS=true UV_CONCURRENT_DOWNLOADS=2 UV_HTTP_RETRIES=5
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl git unzip openssl libicu72 && \
+    ca-certificates curl git unzip openssl libicu72 jq && \
     rm -rf /var/lib/apt/lists/*
 COPY images/provisioner/requirements.txt /tmp/provisioner-requirements.txt
 COPY images/provisioner/azure-cli.txt /tmp/azure-cli-requirements.txt
@@ -41,6 +41,7 @@ COPY scripts/operations/__init__.py scripts/operations/config.py scripts/operati
     scripts/operations/project.py scripts/operations/install-radius.py scripts/operations/deploy-plane.py \
     scripts/operations/register-radius.py scripts/operations/issue-certificate.py scripts/operations/acme-hook.py \
     scripts/operations/run-certificate-job.py /app/scripts/operations/
+COPY scripts/operations/install-radius.sh /app/scripts/operations/
 COPY src/plane_demo/management/provisioner.py src/plane_demo/management/provisioning.py /app/src/plane_demo/management/
 COPY src/plane_demo/management/providers /app/src/plane_demo/management/providers
 RUN case "$TARGETARCH" in \

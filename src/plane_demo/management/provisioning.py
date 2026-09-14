@@ -13,6 +13,7 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 from uuid import UUID
 
+from plane_demo.management.providers.identity import PUBLIC_KEYS, DemoConfig
 from plane_demo.shared.db import PendingOperation
 
 SLUG = re.compile(r"[a-z][a-z0-9-]{0,47}")
@@ -122,17 +123,41 @@ class OperatorConfig:
     coordinator_identity: Mapping
     management_cluster: Mapping
     certificate_command: tuple[str, ...] = ()
+    identity: DemoConfig | None = None
 
     @classmethod
     def load(cls, path: Path) -> OperatorConfig:
         return cls.from_dict(json.loads(path.read_text()))
 
     @classmethod
-    def from_dict(cls, data: dict) -> OperatorConfig:
+    def from_dict(cls, data: dict, *, identity: DemoConfig | None = None) -> OperatorConfig:
         if data.get("version") != 1:
             raise ValueError("provisioning config version must be 1")
+        if "bootstrapIdentity" in data:
+            if not isinstance(data["bootstrapIdentity"], dict) or (
+                set(data["bootstrapIdentity"]) - PUBLIC_KEYS
+            ):
+                raise ValueError("bootstrap identity accepts public settings only")
+            saved_identity = DemoConfig.from_values(data["bootstrapIdentity"])
+            if identity is not None and saved_identity.public_values() != identity.public_values():
+                raise ValueError("bootstrap identity mismatch")
+            identity = identity or saved_identity
         foundation = data["foundation"]
-        if foundation["projectName"] != "radplanes" or foundation["location"] != "centralus":
+        if identity is not None:
+            if identity.environment != "azure" or any(
+                foundation.get(key) != value
+                for key, value in {
+                    "projectName": identity.project,
+                    "deploymentName": identity.deployment,
+                    "environment": "azure",
+                    "subscriptionId": identity.subscription,
+                    "location": identity.location,
+                    "resourcePrefix": identity.stem,
+                    "radiusResourceGroup": identity.stem,
+                }.items()
+            ):
+                raise ValueError("foundation does not match the selected deployment")
+        elif foundation["projectName"] != "radplanes" or foundation["location"] != "centralus":
             raise ValueError("this deployment requires radplanes in centralus")
         for field in ("subscriptionId", "tenantId"):
             UUID(foundation[field])
@@ -142,6 +167,10 @@ class OperatorConfig:
             or foundation["registryLoginServer"] != f"{registry}.azurecr.io"
         ):
             raise ValueError("invalid registry")
+        if identity is not None and (
+            registry != identity.registry_name or foundation.get("vaultName") != identity.vault_name
+        ):
+            raise ValueError("foundation stores do not match the selected deployment")
         allocations = data["allocations"]
         if not isinstance(allocations, dict) or "management" not in allocations:
             raise ValueError("allocations must be a slot-keyed dictionary")
@@ -154,8 +183,21 @@ class OperatorConfig:
             ):
                 raise ValueError("invalid allocation slot")
             for field in ("clusterName", "clusterResourceGroup", "appResourceGroup"):
-                if not SLUG.fullmatch(allocation[field]):
+                pattern = r"[a-z][a-z0-9-]{0,89}" if identity else SLUG.pattern
+                if not re.fullmatch(pattern, allocation[field]):
                     raise ValueError("invalid allocated resource name")
+            if identity is not None:
+                name = identity.slot_name(slot)
+                expected_names = {
+                    "clusterName": f"aks-{name}",
+                    "clusterResourceGroup": f"rg-{name}-cluster",
+                    "appResourceGroup": f"rg-{name}-app",
+                    "namespace": identity.namespace(slot),
+                    "clusterResourceGroupId": prefix + f"rg-{name}-cluster",
+                    "appResourceGroupId": prefix + f"rg-{name}-app",
+                }
+                if any(allocation.get(key) != value for key, value in expected_names.items()):
+                    raise ValueError("allocation does not match the selected deployment")
             for field in (
                 "nodeSubnetId",
                 "gatewaySubnetId",
@@ -166,15 +208,17 @@ class OperatorConfig:
             ):
                 if not allocation[field].startswith(prefix):
                     raise ValueError("allocation is outside the configured subscription")
-            for identity in allocation["identities"].values():
-                UUID(identity["clientId"])
-                if not identity["id"].startswith(prefix):
+            for managed_identity in allocation["identities"].values():
+                UUID(managed_identity["clientId"])
+                if not managed_identity["id"].startswith(prefix):
                     raise ValueError("identity is outside the configured subscription")
+            certificate_slot = f"{identity.stem}-{slot}" if identity else slot
             if (
-                allocation.get("certificateName") != f"gateway-{slot}"
-                or allocation.get("acmeStateSecretName") != f"acme-{slot}"
+                allocation.get("certificateName") != f"gateway-{certificate_slot}"
+                or allocation.get("acmeStateSecretName") != f"acme-{certificate_slot}"
                 or allocation.get("certificateIssuerSubject")
-                != "system:serviceaccount:radplanes-system:certificate-issuer"
+                != f"system:serviceaccount:{identity.stem if identity else 'radplanes'}-system:"
+                "certificate-issuer"
                 or "certificateIssuer" not in allocation["identities"]
             ):
                 raise ValueError("certificate allocation does not match its prebound identity")
@@ -221,6 +265,7 @@ class OperatorConfig:
             freeze(data["coordinatorIdentity"]),
             freeze(data["managementCluster"]),
             tuple(command),
+            identity,
         )
 
     def to_dict(self) -> dict:
@@ -233,7 +278,37 @@ class OperatorConfig:
             "coordinatorIdentity": plain(self.coordinator_identity),
             "managementCluster": plain(self.management_cluster),
             "certificateCommand": list(self.certificate_command),
+            **({"bootstrapIdentity": self.bootstrap_settings} if self.identity else {}),
         }
+
+    @property
+    def bootstrap_settings(self) -> dict[str, str]:
+        if self.identity is None:
+            raise ProvisioningError("bootstrap_identity_required")
+        return self.identity.public_values()
+
+    @property
+    def project_name(self) -> str:
+        return self.foundation["projectName"]
+
+    @property
+    def resource_prefix(self) -> str:
+        return self.identity.stem if self.identity else "radplanes"
+
+    @property
+    def radius_group(self) -> str:
+        return self.resource_prefix
+
+    def namespace(self, slot: str) -> str:
+        self.allocation(slot)
+        if self.identity:
+            return self.identity.namespace(slot)
+        role = "management" if slot == "management" else slot.rsplit("-", 1)[1]
+        return f"radplanes-{slot}-{role}"
+
+    def workspace(self, slot: str) -> str:
+        self.allocation(slot)
+        return f"{self.resource_prefix}-{slot}"
 
     def allocation(self, slot: str) -> Mapping:
         if not SLUG.fullmatch(slot) or slot not in self.allocations:
@@ -269,6 +344,9 @@ class PairResult:
 
 
 class ProvisioningConfig(Protocol):
+    @property
+    def project_name(self) -> str: ...
+
     @property
     def images(self) -> Mapping: ...
 

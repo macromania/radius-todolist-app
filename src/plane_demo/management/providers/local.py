@@ -21,8 +21,6 @@ from plane_demo.management.providers.commands import (
 )
 from plane_demo.management.providers.credentials import Credentials
 from plane_demo.management.providers.local_config import (
-    ACCESS_NAMESPACE,
-    GROUP,
     SCOPE,
     SLOTS,
     LocalConfig,
@@ -125,26 +123,36 @@ class LocalProvider:
         root: Path,
         credentials: Credentials,
         commands: Commands | None = None,
+        *,
+        workspace: Path | None = None,
     ):
         if credentials.environment != "local":
             raise ProvisioningError("credentials_environment_mismatch")
         self.root = root.resolve()
-        self.state = self.root / ".state/local"
+        self.state = workspace if workspace is not None else self.root / ".state/local"
         if self.state.is_symlink():
             raise ProvisioningError("invalid_local_state")
         self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.state.chmod(0o700)
         self.config, self.credentials = config, credentials
+        self.radius_scope = f"/planes/radius/local/resourceGroups/{config.radius_group}"
         if credentials.has_database("management"):
             database = credentials.plane("management")["database"]
             if (
                 database.get("host") != config.management_cluster["nodeAddress"]
                 or database.get("database") != "management"
                 or database.get("serverId")
-                != "kubernetes://radplanes-local-management-management/statefulsets/postgres"
+                != f"kubernetes://{config.namespace('management')}/statefulsets/postgres"
             ):
                 raise ProvisioningError("local_management_database_mismatch")
-        self.commands = commands or Commands(self.root, state_root=self.state, local=True)
+        self.commands = commands or Commands(
+            self.root,
+            state_root=self.state,
+            local=True,
+            contexts={config.allocation(slot)["context"] for slot in SLOTS}
+            if config.identity
+            else None,
+        )
         self.commands.protect(credentials._data)
         self.radius_config = self.state / "radius.yaml"
         self.config_path = self.state / "provisioning.json"
@@ -166,12 +174,11 @@ class LocalProvider:
     def inspect_pair(self, pair_id: str) -> PairResult:
         return workloads.inspect_pair(self, pair_id, self.radius_scope)
 
-    @staticmethod
-    def names(slot: str) -> tuple[str, str]:
+    def names(self, slot: str) -> tuple[str, str]:
         if slot not in SLOTS:
             raise ProvisioningError("allocation_unavailable")
         role = "management" if slot == "management" else slot.rsplit("-", 1)[1]
-        return role, f"radplanes-local-{slot}-{role}"
+        return role, self.config.namespace(slot)
 
     def rad(self, slot: str, *args: str, workspace: bool = True, timeout: int = 900) -> str:
         context, kubeconfig = self.paths(slot)
@@ -301,9 +308,10 @@ class LocalProvider:
             items = config.setdefault("workspaces", {}).setdefault("items", {})
             items[context] = {
                 "connection": {"context": context, "kind": "kubernetes"},
-                "scope": SCOPE,
+                "scope": self.radius_scope,
                 "environment": (
-                    f"{SCOPE}/providers/Applications.Core/environments/{environment or slot}"
+                    f"{self.radius_scope}/providers/Applications.Core"
+                    f"/environments/{environment or slot}"
                 ),
             }
             config["workspaces"]["default"] = self.paths("management")[0]
@@ -315,10 +323,10 @@ class LocalProvider:
         self.verify_management_identity()
         self.seed_workspace("management")
         for arguments, expected in (
-            (("group", "show", GROUP), SCOPE),
+            (("group", "show", self.config.radius_group), self.radius_scope),
             (
-                ("environment", "show", "management", "--group", GROUP),
-                f"{SCOPE}/providers/Applications.Core/environments/management",
+                ("environment", "show", "management", "--group", self.config.radius_group),
+                f"{self.radius_scope}/providers/Applications.Core/environments/management",
             ),
         ):
             actual = json.loads(self.rad("management", *arguments, "--output", "json"))["id"]
@@ -387,7 +395,7 @@ class LocalProvider:
             "deploy",
             str(self.root / "infra/radius" / directory / f"{template}.bicep"),
             "--group",
-            GROUP,
+            self.config.radius_group,
             "--environment",
             environment or slot,
             "--application",
@@ -405,7 +413,7 @@ class LocalProvider:
                 TYPES[kind],
                 name,
                 "--group",
-                GROUP,
+                self.config.radius_group,
                 "--application",
                 application,
                 "--output",
@@ -431,7 +439,16 @@ class LocalProvider:
 
     def resource_exists(self, slot: str, kind: str, name: str) -> bool:
         values = json.loads(
-            self.rad(slot, "resource", "list", TYPES[kind], "--group", GROUP, "--output", "json")
+            self.rad(
+                slot,
+                "resource",
+                "list",
+                TYPES[kind],
+                "--group",
+                self.config.radius_group,
+                "--output",
+                "json",
+            )
         )
         if isinstance(values, dict):
             values = values["value"]
@@ -478,7 +495,9 @@ class LocalProvider:
                     "kind": "kubernetes",
                     "resourceId": "self",
                     "namespace": (
-                        f"radplanes-local-p-{slot}" if cluster else f"radplanes-local-{slot}"
+                        f"{self.config.resource_prefix}-p-{slot}"
+                        if cluster
+                        else f"{self.config.resource_prefix}-{slot}"
                     ),
                 },
                 "recipes": recipes,
@@ -509,7 +528,7 @@ class LocalProvider:
 
     def register(self, slot: str) -> None:
         self.seed_workspace(slot)
-        self.rad(slot, "group", "create", GROUP)
+        self.rad(slot, "group", "create", self.config.radius_group)
         for alias in ("gateways", "postgresql", *(("clusters",) if slot == "management" else ())):
             self.rad(
                 slot,
@@ -525,12 +544,12 @@ class LocalProvider:
         if slot == "management":
             raise ProvisioningError("management_is_bootstrap_owned")
         intent = self.state / f"{slot}-cluster-intent.json"
-        secret_name = f"radplanes-local-{slot}-access"
+        secret_name = f"{self.config.resource_prefix}-{slot}-access"
         if (
             intent.exists()
             or intent.is_symlink()
             or self.resource_exists("management", "cluster", slot)
-            or self.kube_get("management", ACCESS_NAMESPACE, "secret", secret_name)
+            or self.kube_get("management", self.config.access_namespace, "secret", secret_name)
         ):
             raise ProvisioningError("local_cluster_creation_incomplete")
         create_json(
@@ -546,7 +565,7 @@ class LocalProvider:
             environment=environment,
         )
         properties = self.resource("management", "cluster", slot, f"cluster-{slot}")
-        expected_ref = f"kubernetes://{ACCESS_NAMESPACE}/{secret_name}#kubeconfig"
+        expected_ref = f"kubernetes://{self.config.access_namespace}/{secret_name}#kubeconfig"
         if (
             properties["clusterId"] != self.expected_cluster_id(slot)
             or properties["clusterName"] != self.config.allocation(slot)["clusterName"]
@@ -559,13 +578,13 @@ class LocalProvider:
         if slot == "management":
             raise ProvisioningError("management_is_bootstrap_owned")
         context, path = self.paths(slot)
-        name = f"radplanes-local-{slot}-access"
-        secret = self.kube_get("management", ACCESS_NAMESPACE, "secret", name)
-        resource_id = f"{SCOPE}/providers/Demo.Platform/clusters/{slot}"
+        name = f"{self.config.resource_prefix}-{slot}-access"
+        secret = self.kube_get("management", self.config.access_namespace, "secret", name)
+        resource_id = f"{self.radius_scope}/providers/Demo.Platform/clusters/{slot}"
         if (
             not secret
             or secret["metadata"]["name"] != name
-            or secret["metadata"]["namespace"] != ACCESS_NAMESPACE
+            or secret["metadata"]["namespace"] != self.config.access_namespace
             or secret["metadata"].get("labels", {}).get("radplanes.local/slot") != slot
             or not same_radius_id(
                 secret["metadata"].get("annotations", {}).get("radplanes.local/radius-resource"),
@@ -906,8 +925,7 @@ class LocalProvider:
             create=create,
         )
 
-    @staticmethod
-    def management_permissions(namespace: str, module_names: list[str]) -> list[dict]:
+    def management_permissions(self, namespace: str, module_names: list[str]) -> list[dict]:
         resources = workloads.role_binding(
             "radius-system",
             "plane-provisioner",
@@ -930,7 +948,7 @@ class LocalProvider:
             ],
         )
         resources += workloads.role_binding(
-            ACCESS_NAMESPACE,
+            self.config.access_namespace,
             "plane-provisioner",
             namespace,
             "provisioner",
@@ -939,7 +957,9 @@ class LocalProvider:
                     "apiGroups": [""],
                     "resources": ["secrets"],
                     "verbs": ["get"],
-                    "resourceNames": [f"radplanes-local-{slot}-access" for slot in SLOTS[1:]],
+                    "resourceNames": [
+                        f"{self.config.resource_prefix}-{slot}-access" for slot in SLOTS[1:]
+                    ],
                 }
             ],
         )
@@ -948,7 +968,7 @@ class LocalProvider:
             {
                 "apiVersion": "rbac.authorization.k8s.io/v1",
                 "kind": "ClusterRole",
-                "metadata": {"name": name, "labels": {"project": "radplanes"}},
+                "metadata": {"name": name, "labels": {"project": self.config.project_name}},
                 "rules": [
                     {
                         "apiGroups": ["api.ucp.dev"],
@@ -965,7 +985,9 @@ class LocalProvider:
                     {
                         "apiGroups": [""],
                         "resources": ["nodes"],
-                        "resourceNames": ["radplanes-local-management-control-plane"],
+                        "resourceNames": [
+                            self.config.allocation("management")["clusterName"] + "-control-plane"
+                        ],
                         "verbs": ["get"],
                     },
                 ],
@@ -973,7 +995,7 @@ class LocalProvider:
             {
                 "apiVersion": "rbac.authorization.k8s.io/v1",
                 "kind": "ClusterRoleBinding",
-                "metadata": {"name": name, "labels": {"project": "radplanes"}},
+                "metadata": {"name": name, "labels": {"project": self.config.project_name}},
                 "roleRef": {
                     "apiGroup": "rbac.authorization.k8s.io",
                     "kind": "ClusterRole",
@@ -992,7 +1014,20 @@ class LocalProvider:
             {
                 "apiVersion": "v1",
                 "kind": "Namespace",
-                "metadata": {"name": namespace, "labels": {"plane-demo/project": "radplanes"}},
+                "metadata": {
+                    "name": namespace,
+                    "labels": {
+                        "plane-demo/project": self.config.project_name,
+                        **(
+                            {
+                                "plane-demo/deployment": self.config.identity.deployment,
+                                "plane-demo/environment": "local",
+                            }
+                            if self.config.identity
+                            else {}
+                        ),
+                    },
+                },
             },
         )
         accounts = [
@@ -1093,9 +1128,10 @@ class LocalProvider:
             "--ignore-not-found",
         )
 
-    @staticmethod
-    def job(namespace: str, name: str, image: str, command: list[str], account: str) -> dict:
-        return workloads.job(namespace, name, image, command, account)
+    def job(self, namespace: str, name: str, image: str, command: list[str], account: str) -> dict:
+        return workloads.job(
+            namespace, name, image, command, account, project_name=self.config.project_name
+        )
 
     def runtime_secrets(self, slot: str) -> None:
         workloads.runtime_secrets(self, slot)

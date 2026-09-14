@@ -37,10 +37,23 @@ def issue_in_cluster(args) -> str | None:
 
     if not re.fullmatch(r"[a-z0-9][a-z0-9.-]*\.cloudapp\.azure\.com", args.domain):
         raise ValueError("Only a provisioned Azure DNS name is accepted")
+    prefix = getattr(args, "resource_prefix", None)
+    project = getattr(args, "project_name", "radplanes")
     if (
-        args.certificate_name != f"gateway-{args.slot}"
-        or args.account_secret != f"acme-{args.slot}"
+        not re.fullmatch(r"[a-z][a-z0-9-]{0,15}", project)
+        or (prefix is None and project != "radplanes")
+        or (
+            prefix is not None
+            and (
+                not re.fullmatch(r"[a-z][a-z0-9-]{0,24}", prefix)
+                or not prefix.startswith(project + "-")
+                or not prefix.endswith("-azure")
+            )
+        )
     ):
+        raise ValueError("Certificate deployment identity mismatch")
+    name = f"{prefix}-{args.slot}" if prefix is not None else args.slot
+    if args.certificate_name != f"gateway-{name}" or args.account_secret != f"acme-{name}":
         raise ValueError("Certificate names must match the plane allocation")
     vault_url = f"https://{args.vault_name}.vault.azure.net"
     credential = WorkloadIdentityCredential()
@@ -143,7 +156,7 @@ def issue_in_cluster(args) -> str | None:
                 certificate_bytes=pfx.read_bytes(),
                 enabled=True,
                 tags={
-                    "project": "radplanes",
+                    "project": project,
                     "SecurityControl": "Ignore",
                     "acmeEnvironment": "production",
                     "hostname": args.domain,
@@ -166,6 +179,8 @@ def main() -> int:
     parser.add_argument("--vault-name", required=True)
     parser.add_argument("--certificate-name", required=True)
     parser.add_argument("--account-secret", required=True)
+    parser.add_argument("--project-name", default="radplanes")
+    parser.add_argument("--resource-prefix")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--staging", action="store_true")
     args = parser.parse_args()

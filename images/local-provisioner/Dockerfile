@@ -36,6 +36,7 @@ COPY scripts/operations/__init__.py scripts/operations/config.py scripts/operati
     scripts/operations/project.py scripts/operations/install-radius.py scripts/operations/deploy-plane.py \
     scripts/operations/register-radius.py scripts/operations/issue-certificate.py scripts/operations/acme-hook.py \
     scripts/operations/run-certificate-job.py /app/scripts/operations/
+COPY scripts/operations/install-radius.sh /app/scripts/operations/
 COPY scripts/operations/local /app/scripts/operations/local
 COPY scripts/recipes/local/cluster/*.sh /app/scripts/recipes/local/cluster/
 ENV HOME=/home/plane

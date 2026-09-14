@@ -295,8 +295,8 @@ def install_management_radius() -> None:
     run(["kubelogin", "convert-kubeconfig", "--kubeconfig", str(kubeconfig), "-l", "azurecli"])
     run(
         [
-            sys.executable,
-            "scripts/operations/install-radius.py",
+            "bash",
+            "scripts/operations/install-radius.sh",
             "--context",
             context,
             "--kubeconfig",
@@ -307,6 +307,8 @@ def install_management_radius() -> None:
             allocation["identities"]["radius"]["clientId"],
             "--tenant-id",
             outputs["foundation"]["tenantId"],
+            "--workspace-root",
+            str(state),
         ]
     )
 

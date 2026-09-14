@@ -126,12 +126,38 @@ Supply management, shared-control/shared-data, and isolated-1-control/data.
 Additional operator-allocated complete pairs are supported; no tenant limit is
 implemented. Never derive resource groups, subnets, or identities from a public
 request. Pair placement must match the immutable database assignment.
-Each allocation must include `certificateName=gateway-SLOT`,
-`acmeStateSecretName=acme-SLOT`, its `identities.certificateIssuer`, and
-`certificateIssuerSubject=system:serviceaccount:radplanes-system:certificate-issuer`.
+For a selected `.env` identity, `STEM` is `PROJECT-DEPLOYMENT-azure`.
+Each allocation includes `certificateName=gateway-STEM-SLOT`,
+`acmeStateSecretName=acme-STEM-SLOT`, its `identities.certificateIssuer`, and
+`certificateIssuerSubject=system:serviceaccount:STEM-system:certificate-issuer`.
 These names must match the operator's object-scoped vault role assignments and
 federated identity. A different subject or certificate/account name fails
 configuration validation before deployment.
+Legacy configuration without a selected identity retains its original names
+during the command migration.
+
+The shared typed identity lives in
+`plane_demo.management.providers.identity`; `scripts/operations/config.py`
+retains `.env` I/O and re-exports its public types. Selected identity is distinct
+from discovered configuration. Administrative DTOs may include public
+`bootstrapIdentity` settings, but must not include optional demo-key values.
+Providers derive Radius groups, contexts, namespaces, and project labels from
+that identity and accept an explicit temporary workspace. The worker's remaining
+file-backed startup/configuration path is still being replaced.
+
+Azure Radius installation uses the native CLI helper:
+
+```text
+bash scripts/operations/install-radius.sh
+  --context CONTEXT --kubeconfig WORKSPACE/SLOT.kubeconfig
+  --config WORKSPACE/radius.yaml --workspace-root WORKSPACE
+  --client-id RADIUS_CLIENT_ID --tenant-id TENANT_ID
+```
+
+It preserves the selected Azure CLI cache while using a disposable private HOME.
+Every cluster command names its kubeconfig/context, and every Radius command
+names its configuration. It verifies client/tenant identity projection for all
+four Radius service accounts before returning success.
 
 Network values must match the bootstrap allocation, not merely parse as strings.
 Gateway CIDRs are canonical IPv4 `/24` networks in `10.64.16.0/20`. For gateway
@@ -427,12 +453,12 @@ to use `/app/scripts/operations/run-certificate-job.py`. Existing image evidence
 to the original layout, not the rebuilt image. The driver appends:
 
 ```text
---slot SLOT --context radplanes-SLOT --namespace APPLICATION_NAMESPACE
---kubeconfig PROJECT_STATE/SLOT.kubeconfig --domain ACTUAL_PROVIDER_HOST
---config PROJECT_STATE/provisioning.json
+--slot SLOT --context STEM-SLOT --namespace APPLICATION_NAMESPACE
+--kubeconfig WORKSPACE/SLOT.kubeconfig --domain ACTUAL_PROVIDER_HOST
+--config WORKSPACE/provisioning.json
 ```
 
-The Job runs in `radplanes-system` as `certificate-issuer`, matching the
+For a selected identity, the Job runs in `STEM-system` as `certificate-issuer`, matching the
 operator-prebound federated subject. The wrapper creates that namespace and
 service account, annotates the account with the allocation's issuer client ID
 and tenant, and labels the Job pod `azure.workload.identity/use=true`.
@@ -445,8 +471,8 @@ Its command is:
 ```text
 python /app/scripts/operations/issue-certificate.py
   --slot SLOT --domain ACTUAL_PROVIDER_HOST --namespace APPLICATION_NAMESPACE
-  --vault-name ALLOCATED_VAULT --certificate-name gateway-SLOT
-  --account-secret acme-SLOT
+  --vault-name ALLOCATED_VAULT --certificate-name gateway-STEM-SLOT
+  --account-secret acme-STEM-SLOT --project-name PROJECT --resource-prefix STEM
 ```
 
 `--namespace` names the application's challenge ConfigMap namespace, **not**

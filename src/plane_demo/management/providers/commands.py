@@ -27,10 +27,12 @@ class Commands:
         *,
         state_root: Path | None = None,
         local: bool = False,
+        contexts: set[str] | None = None,
     ):
         self.root = root.resolve()
         self.state_root = state_root or self.root / ".state/azure"
         self.guard = guard
+        self.contexts = frozenset(contexts) if contexts is not None else None
         self.environment = dict(os.environ)
         self._original_home = Path.home().resolve()
         self._bicep = (self._original_home / ".rad/bin/bicep").resolve()
@@ -45,7 +47,12 @@ class Commands:
 
     def radius_environment(self, kubeconfig: Path, context: str) -> dict[str, str]:
         self.guard()
-        if not re.fullmatch(r"radplanes-[a-z0-9-]+", context):
+        allowed = (
+            context in self.contexts
+            if self.contexts is not None
+            else re.fullmatch(r"radplanes-[a-z0-9-]+", context) is not None
+        )
+        if not allowed or not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", context):
             raise ProvisioningError("invalid_radius_context")
         state = self.state_root.resolve()
         kubeconfig = kubeconfig.resolve()

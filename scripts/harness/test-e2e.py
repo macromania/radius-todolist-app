@@ -157,6 +157,7 @@ COORDINATOR_SCRIPTS = [
     "demo.py",
     "project.py",
     "install-radius.py",
+    "install-radius.sh",
     "deploy-plane.py",
     "register-radius.py",
     "issue-certificate.py",

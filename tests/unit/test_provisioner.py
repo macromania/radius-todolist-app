@@ -19,6 +19,7 @@ from plane_demo.management import provisioner
 from plane_demo.management.providers.azure import AzureProvider
 from plane_demo.management.providers.commands import Commands
 from plane_demo.management.providers.credentials import Credentials, database_dsn
+from plane_demo.management.providers.identity import DemoConfig
 from plane_demo.management.provisioning import (
     OperatorConfig,
     PairResult,
@@ -125,6 +126,165 @@ def credentials(path, config):
     )
     result.set_database("management", database_properties())
     return result
+
+
+@pytest.fixture
+def selected_config(raw_config):
+    identity = DemoConfig(
+        "azure",
+        "sample",
+        "demo",
+        SUBSCRIPTION,
+        "northeurope",
+        demo_keys={"management": "synthetic-selected-api-key-" + "x" * 32},
+    )
+    foundation = raw_config["foundation"]
+    old_registry = foundation["registryLoginServer"]
+    foundation.update(
+        {
+            "projectName": identity.project,
+            "deploymentName": identity.deployment,
+            "environment": "azure",
+            "resourcePrefix": identity.stem,
+            "radiusResourceGroup": identity.stem,
+            "location": identity.location,
+            "registryName": identity.registry_name,
+            "registryLoginServer": f"{identity.registry_name}.azurecr.io",
+            "vaultName": identity.vault_name,
+        }
+    )
+    for slot, allocation in raw_config["allocations"].items():
+        name = identity.slot_name(slot)
+        allocation.update(
+            {
+                "clusterName": f"aks-{name}",
+                "clusterResourceGroup": f"rg-{name}-cluster",
+                "appResourceGroup": f"rg-{name}-app",
+                "clusterResourceGroupId": PREFIX + f"rg-{name}-cluster",
+                "appResourceGroupId": PREFIX + f"rg-{name}-app",
+                "namespace": identity.namespace(slot),
+                "certificateName": f"gateway-{name}",
+                "acmeStateSecretName": f"acme-{name}",
+                "certificateIssuerSubject": (
+                    f"system:serviceaccount:{identity.stem}-system:certificate-issuer"
+                ),
+            }
+        )
+    for recipe in raw_config["recipes"].values():
+        recipe["reference"] = recipe["reference"].replace(
+            old_registry, foundation["registryLoginServer"]
+        )
+    raw_config["images"] = {
+        role: reference.replace(old_registry, foundation["registryLoginServer"])
+        for role, reference in raw_config["images"].items()
+    }
+    return OperatorConfig.from_dict(raw_config, identity=identity)
+
+
+def test_selected_identity_drives_provider_commands_and_temporary_workspace(
+    selected_config, tmp_path, monkeypatch
+):
+    root, workspace = tmp_path / "checkout", tmp_path / "work"
+    root.mkdir()
+    provider = AzureProvider(
+        selected_config,
+        root,
+        credentials(tmp_path / "credentials.json", selected_config),
+        workspace=workspace,
+    )
+    commands = provider.commands
+    compiler = tmp_path / "bicep"
+    compiler.write_text("#!/bin/sh\nexit 0\n")
+    compiler.chmod(0o700)
+    commands._bicep = compiler
+    provider.paths("shared-control")[1].write_text("{}")
+    monkeypatch.setattr(
+        commands, "run", MagicMock(return_value='{"properties":{"provisioningState":"Succeeded"}}')
+    )
+    provider.resource("shared-control", "gateway", "gateway", "control")
+    command = commands.run.call_args.args[0]
+    assert command[command.index("--group") + 1] == "sample-demo-azure"
+    assert command[command.index("--workspace") + 1] == "sample-demo-azure-shared-control"
+    assert provider.expected_cluster_id("shared-control").endswith(
+        "/managedClusters/aks-sample-demo-azure-shared-control"
+    )
+    assert (workspace / "provisioning.json").is_file()
+    assert not (root / ".state").exists()
+    emitted = []
+    monkeypatch.setattr(provider, "apply", lambda slot, value, **kw: emitted.append(value))
+    monkeypatch.setattr(provider, "kube_get", lambda *args: None)
+    provider.prerequisites("shared-control")
+    assert emitted[0]["metadata"] == {
+        "name": "sample-demo-azure-shared-control-control",
+        "labels": {
+            "plane-demo/project": "sample",
+            "plane-demo/deployment": "demo",
+            "plane-demo/environment": "azure",
+        },
+    }
+    provider.credentials.ensure("shared-control", {"cp_api", "cp_reconciler", "dp_reconciler"})
+    control_database = database_properties()
+    control_database["database"] = "control"
+    provider.credentials.set_database("shared-control", control_database)
+    secrets = {}
+    monkeypatch.setattr(
+        provider, "secret", lambda _, __, name, values: secrets.update({name: values})
+    )
+    provider.runtime_secrets("shared-data")
+    assert secrets["data-api-runtime"]["PROJECT_ID"] == "sample"
+    assert secrets["data-reconciler-runtime"]["PROJECT_ID"] == "sample"
+
+
+def test_selected_identity_round_trip_excludes_provided_credentials(selected_config):
+    values = selected_config.to_dict()
+    key = selected_config.identity.demo_keys["management"]
+    assert key not in json.dumps(values)
+    assert "DEMO_KEY_MANAGEMENT" not in values["bootstrapIdentity"]
+    restored = OperatorConfig.from_dict(values, identity=selected_config.identity)
+    assert restored.identity is selected_config.identity
+    assert restored.namespace("management") == "sample-demo-azure-management-management"
+    values["bootstrapIdentity"]["DEMO_KEY_MANAGEMENT"] = key
+    with pytest.raises(ValueError, match="public settings only"):
+        OperatorConfig.from_dict(values)
+
+
+def test_radius_commands_only_accept_selected_contexts_in_temporary_home(tmp_path):
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    kubeconfig = workspace / "management.kubeconfig"
+    kubeconfig.write_text("synthetic-kubeconfig")
+    compiler = tmp_path / "bicep"
+    compiler.write_text("#!/bin/sh\nexit 0\n")
+    compiler.chmod(0o700)
+    context = "sample-demo-azure-management"
+    commands = Commands(tmp_path, state_root=workspace, contexts={context})
+    commands._bicep = compiler
+    env = commands.radius_environment(kubeconfig, context)
+    assert Path(env["HOME"]).is_relative_to(workspace)
+    assert Path(env["KUBECONFIG"]) == kubeconfig
+    for foreign in ("radplanes-management", "foreign", "../../outside"):
+        with pytest.raises(ProvisioningError, match="invalid_radius_context"):
+            commands.radius_environment(kubeconfig, foreign)
+    assert not (tmp_path / ".state").exists()
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "projectName",
+        "deploymentName",
+        "environment",
+        "resourcePrefix",
+        "radiusResourceGroup",
+        "registryName",
+        "vaultName",
+    ],
+)
+def test_selected_identity_rejects_foreign_foundation(selected_config, field):
+    values = selected_config.to_dict()
+    values["foundation"][field] = "foreign"
+    with pytest.raises(ValueError):
+        OperatorConfig.from_dict(values, identity=selected_config.identity)
 
 
 def database_properties():

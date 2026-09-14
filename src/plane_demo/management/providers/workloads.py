@@ -261,7 +261,11 @@ def runtime_secrets(provider: PlaneRuntime, slot: str) -> None:
     else:
         pair = slot.removesuffix("-data")
         plane = provider.credentials.ensure(slot, set())
-        common = {"PAIR_ID": pair, "PROJECT_ID": "radplanes", "KUBE_NAMESPACE": namespace}
+        common = {
+            "PAIR_ID": pair,
+            "PROJECT_ID": provider.config.project_name,
+            "KUBE_NAMESPACE": namespace,
+        }
         provider.secret(
             slot, namespace, "data-api-runtime", {**common, "DEMO_KEY": plane["demoKey"]}
         )
@@ -293,7 +297,15 @@ def role_binding(namespace, name, subject_namespace, subject_name, rules) -> lis
     ]
 
 
-def job(namespace: str, name: str, image: str, command: list[str], account: str) -> dict:
+def job(
+    namespace: str,
+    name: str,
+    image: str,
+    command: list[str],
+    account: str,
+    *,
+    project_name: str = "radplanes",
+) -> dict:
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -302,7 +314,7 @@ def job(namespace: str, name: str, image: str, command: list[str], account: str)
             "backoffLimit": 0,
             "activeDeadlineSeconds": 900,
             "template": {
-                "metadata": {"labels": {"plane-demo/project": "radplanes"}},
+                "metadata": {"labels": {"plane-demo/project": project_name}},
                 "spec": {
                     "restartPolicy": "Never",
                     "serviceAccountName": account,

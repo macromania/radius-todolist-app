@@ -167,6 +167,31 @@ def test_canonical_and_verified_display_region_names_allow_tagging(azure, locati
     assert len(azure.patches) == 1
 
 
+@pytest.mark.parametrize(("display", "allowed"), [("North Europe", True), ("Central US", False)])
+def test_selected_project_scope_and_region_are_checked_on_the_real_tagging_path(
+    target_data, display, allowed
+):
+    prefix = "sample-demo-azure"
+    for key in ("resource_group", "subnet_id", "resource_id", "environment_id", "application_id"):
+        target_data[key] = target_data[key].replace("radplanes", prefix)
+    target_data.update(project_name="sample", resource_prefix=prefix, location="northeurope")
+    target_data["tags"]["project"] = "sample"
+    azure = Azure(metadata.Target.parse(target_data))
+    for resource in (azure.cache, azure.pe, azure.nic):
+        resource["location"] = "northeurope"
+    azure.cache["location"] = display
+    azure.nic["tags"]["Project"] = "sample"
+    if not allowed:
+        with pytest.raises(ProvisioningError, match="redis_nic_ownership_mismatch"):
+            azure.run()
+        assert not azure.patches
+        return
+    assert azure.run()["nicId"] == azure.nic_id
+    assert len(azure.patches) == 1
+    assert azure.nic["tags"]["project"] == "sample"
+    assert all(prefix in request.url.path for request in azure.requests)
+
+
 @pytest.mark.parametrize("location", ["westus2", "West US 2", None, {}, 42])
 def test_other_or_malformed_regions_fail_before_tagging(azure, location):
     azure.cache["location"] = location

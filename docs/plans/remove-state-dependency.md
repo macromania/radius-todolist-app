@@ -47,6 +47,7 @@ general-purpose workflow/retry engine.
 - [x] (2026-09-14) Transaction-owned schema initialization implemented, reviewed, and verified on real disposable PostgreSQL 17.8; trigger/index enforcement drift fixes verified. Committed/pushed as `dd1526b`.
 - [x] (2026-09-14) Complete script relocation under `scripts/operations`, `scripts/harness`, and `scripts/recipes` with root Make entrypoints; committed/pushed in `e7146be`.
 - [x] (2026-09-14) Implement the literal `.env` initializer and typed configuration loader; Bash initialization and native endpoint/API helpers are Make-wired. Deployment consumption remains below.
+- [x] (2026-09-14) Share the selected identity with provider configuration, namespaces, Radius/access scopes, data project labels, and Azure certificate/Redis helpers. Add explicit temporary workspace support and a native Radius installer. Correct default context, CLI cache, caller argument, region, and image-source omissions found during verification.
 - [x] (2026-09-14) Implement and review service-owned credential-store primitives; committed/pushed in `84e8971`. Provider integration remains below.
 - [ ] Implement temporary workspaces and live metadata discovery.
 - [ ] Move Azure credentials to Key Vault and local credentials to Kubernetes.

@@ -1,6 +1,12 @@
 import importlib.util
+import json
+import subprocess
+import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+import pytest
 
 SPEC = importlib.util.spec_from_file_location(
     "certificate_job", Path(__file__).parents[2] / "scripts/operations/run-certificate-job.py"
@@ -60,6 +66,81 @@ class CertificateJobTests(unittest.TestCase):
                 "radplanes-shared-control-control",
                 "test.centralus.cloudapp.azure.com",
             )
+
+
+def test_selected_certificate_entrypoint_uses_exact_context_namespace_and_reference(tmp_path):
+    settings = CertificateJobTests().settings()
+    prefix, slot = "sample-demo-azure", "shared-control"
+    settings["foundation"].update(projectName="sample", resourcePrefix=prefix)
+    certificate = f"gateway-{prefix}-{slot}"
+    settings["allocations"][slot].update(
+        certificateName=certificate, acmeStateSecretName=f"acme-{prefix}-{slot}"
+    )
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps(settings))
+    namespace = f"{prefix}-{slot}-control"
+    uri = f"https://project-vault.vault.azure.net/secrets/{certificate}"
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        if "jobs" in command:
+            body = {"items": []}
+        elif "pods" in command:
+            body = {
+                "items": [
+                    {
+                        "status": {
+                            "containerStatuses": [
+                                {
+                                    "name": "issuer",
+                                    "state": {
+                                        "terminated": {
+                                            "exitCode": 0,
+                                            "message": json.dumps({"certificateSecretUri": uri}),
+                                        }
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        elif "get" in command and "job" in command:
+            body = {"status": {"succeeded": 1}}
+        else:
+            body = {}
+        return subprocess.CompletedProcess(command, 0, json.dumps(body), "")
+
+    argv = [
+        "run-certificate-job",
+        "--slot",
+        slot,
+        "--context",
+        f"{prefix}-{slot}",
+        "--namespace",
+        namespace,
+        "--kubeconfig",
+        str(tmp_path / "kubeconfig"),
+        "--domain",
+        "test.centralus.cloudapp.azure.com",
+        "--config",
+        str(config),
+    ]
+    with patch.object(sys, "argv", argv), patch.object(issuer.subprocess, "run", side_effect=run):
+        assert issuer.main() == 0
+    assert calls
+    assert all(command[command.index("--context") + 1] == f"{prefix}-{slot}" for command in calls)
+    assert all(
+        command[command.index("-n") + 1] == f"{prefix}-system"
+        for command in calls
+        if "-n" in command
+    )
+    argv[argv.index("--context") + 1] = "radplanes-shared-control"
+    with patch.object(sys, "argv", argv), patch.object(issuer.subprocess, "run") as rejected:
+        with pytest.raises(ValueError, match="Context does not match"):
+            issuer.main()
+        rejected.assert_not_called()
 
 
 if __name__ == "__main__":

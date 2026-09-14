@@ -49,14 +49,23 @@ class AzureProvider:
         root: Path,
         credentials: Credentials,
         commands: Commands | None = None,
+        *,
+        workspace: Path | None = None,
     ):
         self.config = config
         self.root = root.resolve()
-        self.state = self.root / ".state" / "azure"
+        self.state = workspace if workspace is not None else self.root / ".state" / "azure"
         self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.state.chmod(0o700)
         self.credentials = credentials
-        self.commands = commands or Commands(self.root)
+        self.commands = commands or Commands(
+            self.root,
+            state_root=self.state,
+            contexts={config.workspace(slot) for slot in config.allocations}
+            if config.identity
+            else None,
+        )
+        self.radius_scope = f"/planes/radius/local/resourceGroups/{config.radius_group}"
         self.radius_config = self.state / "radius.yaml"
         self.config_path = self.state / "provisioning.json"
         write_json(self.config_path, config.to_dict())
@@ -76,7 +85,7 @@ class AzureProvider:
 
     def paths(self, slot: str) -> tuple[str, Path]:
         self.config.allocation(slot)
-        return f"radplanes-{slot}", self.state / f"{slot}.kubeconfig"
+        return self.config.workspace(slot), self.state / f"{slot}.kubeconfig"
 
     def az(self, *args: str):
         self.login_workload()
@@ -298,7 +307,7 @@ class AzureProvider:
         token = service_account / "token"
         if not ca.is_file() or not token.is_file():
             raise ProvisioningError("management_service_account_missing")
-        _, kubeconfig = self.paths("management")
+        context, kubeconfig = self.paths("management")
         if ":" in host:
             host = f"[{host}]"
         write_json(
@@ -306,7 +315,7 @@ class AzureProvider:
             {
                 "apiVersion": "v1",
                 "kind": "Config",
-                "current-context": "radplanes-management",
+                "current-context": context,
                 "clusters": [
                     {
                         "name": "management",
@@ -319,7 +328,7 @@ class AzureProvider:
                 "users": [{"name": "provisioner", "user": {"tokenFile": str(token)}}],
                 "contexts": [
                     {
-                        "name": "radplanes-management",
+                        "name": context,
                         "context": {
                             "cluster": "management",
                             "user": "provisioner",
@@ -331,8 +340,11 @@ class AzureProvider:
         )
         scope, environment = self.seed_management_workspace()
         for arguments, expected in (
-            (("group", "show", "radplanes"), scope),
-            (("environment", "show", "management", "--group", "radplanes"), environment),
+            (("group", "show", self.config.radius_group), scope),
+            (
+                ("environment", "show", "management", "--group", self.config.radius_group),
+                environment,
+            ),
         ):
             output = self.rad("management", *arguments, "--output", "json")
             try:
@@ -345,7 +357,8 @@ class AzureProvider:
                 raise ProvisioningError("management_radius_mismatch")
 
     def seed_management_workspace(self) -> tuple[str, str]:
-        scope = "/planes/radius/local/resourceGroups/radplanes"
+        scope = self.radius_scope
+        context, _ = self.paths("management")
         environment = f"{scope}/providers/Applications.Core/environments/management"
         if self.radius_config.is_symlink():
             raise ProvisioningError("invalid_radius_config")
@@ -367,12 +380,12 @@ class AzureProvider:
                 raise ValueError
         except (ValueError, yaml.YAMLError):
             raise ProvisioningError("invalid_radius_config") from None
-        items["radplanes-management"] = {
-            "connection": {"context": "radplanes-management", "kind": "kubernetes"},
+        items[context] = {
+            "connection": {"context": context, "kind": "kubernetes"},
             "scope": scope,
             "environment": environment,
         }
-        workspaces["default"] = "radplanes-management"
+        workspaces["default"] = context
         write_json(self.radius_config, config)
         return scope, environment
 
@@ -428,7 +441,7 @@ class AzureProvider:
         name = f"provision-{slot}"
         parameters = {
             "environmentName": name,
-            "namespace": f"radplanes-p-{slot}",
+            "namespace": f"{self.config.resource_prefix}-p-{slot}",
             "azureSubscriptionId": foundation["subscriptionId"],
             "azureResourceGroup": allocation["clusterResourceGroup"],
             "registryHost": foundation["registryLoginServer"],
@@ -466,7 +479,7 @@ class AzureProvider:
             "deploy",
             str(self.root / "infra/radius/environments/azure.bicep"),
             "--group",
-            "radplanes",
+            self.config.radius_group,
             "--parameters",
             f"@{parameter_file}",
         )
@@ -487,7 +500,7 @@ class AzureProvider:
             "--force",
             workspace=False,
         )
-        self.rad(slot, "group", "create", "radplanes")
+        self.rad(slot, "group", "create", self.config.radius_group)
         aliases = ["gateways", "postgresql"]
         if slot == "management":
             aliases.append("clusters")
@@ -513,7 +526,7 @@ class AzureProvider:
         )
         parameters = {
             "environmentName": slot,
-            "namespace": f"radplanes-{slot}",
+            "namespace": f"{self.config.resource_prefix}-{slot}",
             "azureSubscriptionId": self.config.foundation["subscriptionId"],
             "azureResourceGroup": allocation["appResourceGroup"],
             "registryHost": self.config.foundation["registryLoginServer"],
@@ -527,7 +540,7 @@ class AzureProvider:
             "deploy",
             str(self.root / "infra/radius/environments/azure.bicep"),
             "--group",
-            "radplanes",
+            self.config.radius_group,
             "--parameters",
             f"@{parameter_file}",
         )
@@ -540,7 +553,7 @@ class AzureProvider:
             "--context",
             context,
             "--group",
-            "radplanes",
+            self.config.radius_group,
             "--environment",
             slot,
             "--force",
@@ -578,7 +591,7 @@ class AzureProvider:
             "deploy",
             str(self.root / "infra/radius" / directory / f"{template}.bicep"),
             "--group",
-            "radplanes",
+            self.config.radius_group,
             "--environment",
             environment or slot,
             "--application",
@@ -603,7 +616,7 @@ class AzureProvider:
             TYPES[kind][0],
             name,
             "--group",
-            "radplanes",
+            self.config.radius_group,
             "--application",
             application,
             "--output",
@@ -649,8 +662,8 @@ class AzureProvider:
         allocation = self.config.allocation(cluster.slot)
         self.commands.run(
             [
-                sys.executable,
-                str(self.root / "scripts/operations/install-radius.py"),
+                "bash",
+                str(self.root / "scripts/operations/install-radius.sh"),
                 "--context",
                 cluster.context,
                 "--kubeconfig",
@@ -661,14 +674,15 @@ class AzureProvider:
                 allocation["identities"]["radius"]["clientId"],
                 "--tenant-id",
                 self.config.foundation["tenantId"],
+                "--workspace-root",
+                str(self.state),
             ]
         )
         self.register(cluster.slot)
 
-    @staticmethod
-    def names(slot: str) -> tuple[str, str]:
+    def names(self, slot: str) -> tuple[str, str]:
         role = "management" if slot == "management" else slot.rsplit("-", 1)[1]
-        return role, f"radplanes-{slot}-{role}"
+        return role, self.config.namespace(slot)
 
     def secret(
         self, slot: str, namespace: str, name: str, values: dict, *, create: bool = False
@@ -695,7 +709,17 @@ class AzureProvider:
                 "kind": "Namespace",
                 "metadata": {
                     "name": namespace,
-                    "labels": {"plane-demo/project": "radplanes"},
+                    "labels": {
+                        "plane-demo/project": self.config.project_name,
+                        **(
+                            {
+                                "plane-demo/deployment": self.config.identity.deployment,
+                                "plane-demo/environment": "azure",
+                            }
+                            if self.config.identity
+                            else {}
+                        ),
+                    },
                 },
             },
         )
@@ -770,7 +794,7 @@ class AzureProvider:
                     "allowVolumeExpansion": True,
                     "parameters": {
                         "skuName": "StandardSSD_LRS",
-                        "tags": "SecurityControl=Ignore,project=radplanes,"
+                        "tags": f"SecurityControl=Ignore,project={self.config.project_name},"
                         "managedBy=radius-todolist-app",
                     },
                 },
@@ -791,8 +815,7 @@ class AzureProvider:
     def role_binding(namespace, name, subject_namespace, subject_name, rules):
         return workloads.role_binding(namespace, name, subject_namespace, subject_name, rules)
 
-    @staticmethod
-    def management_permissions(namespace: str) -> list:
+    def management_permissions(self, namespace: str) -> list:
         namespaced = AzureProvider.role_binding(
             "radius-system",
             "plane-provisioner",
@@ -814,7 +837,7 @@ class AzureProvider:
                 "kind": "ClusterRole",
                 "metadata": {
                     "name": "radplanes-provisioner-radius-api",
-                    "labels": {"project": "radplanes"},
+                    "labels": {"project": self.config.project_name},
                 },
                 "rules": [
                     {
@@ -830,7 +853,7 @@ class AzureProvider:
                 "kind": "ClusterRoleBinding",
                 "metadata": {
                     "name": "radplanes-provisioner-radius-api",
-                    "labels": {"project": "radplanes"},
+                    "labels": {"project": self.config.project_name},
                 },
                 "roleRef": {
                     "apiGroup": "rbac.authorization.k8s.io",
@@ -853,7 +876,7 @@ class AzureProvider:
             "list",
             TYPES["postgresql"][0],
             "--group",
-            "radplanes",
+            self.config.radius_group,
             "--output",
             "json",
         )
@@ -886,9 +909,10 @@ class AzureProvider:
             "--ignore-not-found",
         )
 
-    @staticmethod
-    def job(namespace: str, name: str, image: str, command: list[str], account: str) -> dict:
-        return workloads.job(namespace, name, image, command, account)
+    def job(self, namespace: str, name: str, image: str, command: list[str], account: str) -> dict:
+        return workloads.job(
+            namespace, name, image, command, account, project_name=self.config.project_name
+        )
 
     def runtime_secrets(self, slot: str) -> None:
         workloads.runtime_secrets(self, slot)
@@ -898,7 +922,9 @@ class AzureProvider:
         endpoint(f"https://{domain}")
         _, application_namespace = self.names(slot)
         context, kubeconfig = self.paths(slot)
-        if self.kube_get(slot, "radplanes-system", "job", f"certificate-{slot}"):
+        if self.kube_get(
+            slot, f"{self.config.resource_prefix}-system", "job", f"certificate-{slot}"
+        ):
             raise ProvisioningError("certificate_job_incomplete")
         default = (
             CONTAINER_CERTIFICATE_COMMAND
@@ -949,7 +975,7 @@ class AzureProvider:
     ) -> dict:
         allocation = self.config.allocation(slot)
         foundation = self.config.foundation
-        scope = "/planes/radius/local/resourceGroups/radplanes/providers/"
+        scope = f"{self.radius_scope}/providers/"
         target_data = {
             "slot": slot,
             "subscription_id": foundation["subscriptionId"],
@@ -961,7 +987,19 @@ class AzureProvider:
             "resource_id": scope + f"Applications.Datastores/redisCaches/{resource_name}",
             "environment_id": scope + f"Applications.Core/environments/{environment or slot}",
             "application_id": scope + f"Applications.Core/applications/{application}",
-            "tags": {**plain(foundation["tags"]), **BASE_TAGS},
+            "tags": {
+                **plain(foundation["tags"]),
+                **BASE_TAGS,
+                "project": self.config.project_name,
+            },
+            **(
+                {
+                    "project_name": self.config.project_name,
+                    "resource_prefix": self.config.resource_prefix,
+                }
+                if self.config.identity
+                else {}
+            ),
         }
         target = Target.parse(target_data)
         properties = self.resource(slot, "redis", resource_name, application, timeout=30)

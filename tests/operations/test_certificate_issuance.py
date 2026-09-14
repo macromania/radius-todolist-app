@@ -25,7 +25,10 @@ class CertificateIssuanceTests(unittest.TestCase):
     def test_failed_first_issuance_preserves_registered_account(self):
         self.exercise(staging=False, failure=True)
 
-    def exercise(self, staging, failure):
+    def test_selected_deployment_uses_its_qualified_vault_objects(self):
+        self.exercise(staging=True, failure=False, selected=True)
+
+    def exercise(self, staging, failure, selected=False):
         certificates, secrets, credential = MagicMock(), MagicMock(), MagicMock()
         certificates.get_certificate.side_effect = NotFound
         secrets.get_secret.side_effect = NotFound
@@ -47,6 +50,7 @@ class CertificateIssuanceTests(unittest.TestCase):
 
         def run(command, **kwargs):
             self.assertEqual(command[0], "certbot")
+            self.assertEqual(command[command.index("--cert-name") + 1], args.certificate_name)
             directory = Path(command[command.index("--config-dir") + 1])
             account = directory / "accounts/acme.example/account/regr.json"
             account.parent.mkdir(parents=True)
@@ -64,6 +68,12 @@ class CertificateIssuanceTests(unittest.TestCase):
             staging=staging,
             force=False,
         )
+        if selected:
+            args.project_name = "sample"
+            args.resource_prefix = "sample-demo-azure"
+            args.certificate_name = "gateway-sample-demo-azure-management"
+            args.account_secret = "acme-sample-demo-azure-management"
+            args.namespace = "sample-demo-azure-management-management"
         with (
             patch.dict(sys.modules, modules),
             patch.object(issuance.subprocess, "run", side_effect=run),
@@ -76,7 +86,7 @@ class CertificateIssuanceTests(unittest.TestCase):
         certificates.import_certificate.assert_not_called()
         secrets.set_secret.assert_called_once()
         name, value = secrets.set_secret.call_args.args
-        self.assertEqual(name, "acme-management")
+        self.assertEqual(name, args.account_secret)
         self.assertIn("accounts/acme.example/account/regr.json", json.loads(value))
         credential.close.assert_called_once()
 

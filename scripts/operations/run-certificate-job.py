@@ -13,17 +13,40 @@ import time
 from pathlib import Path
 
 
-def job_resources(settings: dict, slot: str, namespace: str, domain: str) -> list[dict]:
+def project_scope(settings: dict) -> tuple[str, str]:
+    foundation = settings["foundation"]
+    project = foundation.get("projectName", "radplanes")
+    prefix = foundation.get("resourcePrefix", "radplanes")
+    if (
+        not re.fullmatch(r"[a-z][a-z0-9-]{0,15}", project)
+        or not re.fullmatch(r"[a-z][a-z0-9-]{0,24}", prefix)
+        or (
+            prefix != "radplanes"
+            and (not prefix.startswith(project + "-") or not prefix.endswith("-azure"))
+        )
+        or (prefix == "radplanes" and project != "radplanes")
+    ):
+        raise ValueError("Certificate deployment identity mismatch")
+    return project, prefix
+
+
+def allocation_for(settings: dict, slot: str) -> dict:
     allocations = settings["allocations"]
-    allocation = (
-        allocations[slot]
-        if isinstance(allocations, dict)
-        else next(item for item in allocations if item["slot"] == slot)
-    )
+    if isinstance(allocations, dict):
+        return allocations[slot]
+    for allocation in allocations:
+        if allocation["slot"] == slot:
+            return allocation
+    raise ValueError("Certificate allocation is missing")
+
+
+def job_resources(settings: dict, slot: str, namespace: str, domain: str) -> list[dict]:
+    allocation = allocation_for(settings, slot)
     identity = allocation["identities"]["certificateIssuer"]
     foundation = settings["foundation"]
-    common = {"project": "radplanes", "plane-demo/slot": slot}
-    issuer_namespace = "radplanes-system"
+    project, prefix = project_scope(settings)
+    common = {"project": project, "plane-demo/slot": slot}
+    issuer_namespace = f"{prefix}-system"
     service_account = "certificate-issuer"
     certificate_name = allocation.get("certificateName", f"gateway-{slot}")
     account_secret = allocation.get("acmeStateSecretName", f"acme-{slot}")
@@ -73,6 +96,9 @@ def job_resources(settings: dict, slot: str, namespace: str, domain: str) -> lis
                                 certificate_name,
                                 "--account-secret",
                                 account_secret,
+                                "--project-name",
+                                project,
+                                *(["--resource-prefix", prefix] if prefix != "radplanes" else []),
                             ],
                             "securityContext": {
                                 "allowPrivilegeEscalation": False,
@@ -149,13 +175,16 @@ def main() -> int:
     args = parser.parse_args()
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,47}", args.slot):
         raise ValueError("Invalid allocation slot")
-    if args.context != f"radplanes-{args.slot}":
+    settings = json.loads(Path(args.config).read_text())
+    project, prefix = project_scope(settings)
+    issuer_namespace = f"{prefix}-system"
+    if args.context != f"{prefix}-{args.slot}":
         raise ValueError("Context does not match the target allocation")
-    if not args.namespace.startswith(f"radplanes-{args.slot}-"):
+    role = "management" if args.slot == "management" else args.slot.rsplit("-", 1)[1]
+    if args.namespace != f"{prefix}-{args.slot}-{role}":
         raise ValueError("Application namespace does not match the allocation")
     if not re.fullmatch(r"[a-z0-9][a-z0-9.-]*\.cloudapp\.azure\.com", args.domain):
         raise ValueError("Certificate domain must be an Azure gateway hostname")
-    settings = json.loads(Path(args.config).read_text())
     kubeconfig = Path(args.kubeconfig).resolve()
     environment = {**os.environ, "KUBECONFIG": str(kubeconfig)}
     base = ["kubectl", "--kubeconfig", str(kubeconfig), "--context", args.context]
@@ -183,7 +212,7 @@ def main() -> int:
     existing = execute(
         [
             "-n",
-            "radplanes-system",
+            issuer_namespace,
             "get",
             "jobs",
             "-l",
@@ -195,20 +224,20 @@ def main() -> int:
     expected_name = f"certificate-{args.slot}"
     for job in existing["items"]:
         if job["metadata"]["name"] == expected_name:
-            if job["metadata"].get("labels", {}).get("project") != "radplanes":
+            if job["metadata"].get("labels", {}).get("project") != project:
                 raise ValueError("Certificate Job ownership mismatch")
-            execute(["-n", "radplanes-system", "delete", "job", expected_name, "--wait=true"])
+            execute(["-n", issuer_namespace, "delete", "job", expected_name, "--wait=true"])
     execute(["apply", "-f", "-"], resources[-1])
     deadline = time.monotonic() + 960
     while time.monotonic() < deadline:
-        job = execute(["-n", "radplanes-system", "get", "job", expected_name, "-o", "json"])
+        job = execute(["-n", issuer_namespace, "get", "job", expected_name, "-o", "json"])
         if job.get("status", {}).get("failed"):
             raise RuntimeError("Certificate Job failed; inspect the scoped issuer pod logs")
         if job.get("status", {}).get("succeeded") == 1:
             pods = execute(
                 [
                     "-n",
-                    "radplanes-system",
+                    issuer_namespace,
                     "get",
                     "pods",
                     "-l",
@@ -225,16 +254,19 @@ def main() -> int:
                         if args.staging:
                             if result != {"stagingValidation": "passed"}:
                                 raise ValueError("Staging Job returned an unexpected result")
-                            execute(["-n", "radplanes-system", "delete", "job", expected_name])
+                            execute(["-n", issuer_namespace, "delete", "job", expected_name])
                             print(json.dumps(result))
                             return 0
+                        certificate_name = allocation_for(settings, args.slot).get(
+                            "certificateName", f"gateway-{args.slot}"
+                        )
                         expected = (
                             f"https://{settings['foundation']['vaultName']}.vault.azure.net"
-                            f"/secrets/gateway-{args.slot}"
+                            f"/secrets/{certificate_name}"
                         )
                         if result.get("certificateSecretUri") != expected:
                             raise ValueError("Certificate Job returned another plane's reference")
-                        execute(["-n", "radplanes-system", "delete", "job", expected_name])
+                        execute(["-n", issuer_namespace, "delete", "job", expected_name])
                         print(json.dumps(result))
                         return 0
             raise RuntimeError("Completed issuer Job has no valid certificate reference")

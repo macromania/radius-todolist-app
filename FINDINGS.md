@@ -134,6 +134,12 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F099 | Local bootstrap | High correctness | `scripts/operations/local/bootstrap.py` | Scoped command environment | Encryption helper could not find Docker Desktop's context inside the operator's isolated HOME | Forward the already-resolved Docker socket explicitly; caller and empty-HOME helper regressions and both fix reviews pass |
 | F100 | Live pair discovery | Medium correctness | `src/plane_demo/management/providers/workloads.py` | Shared-pair reuse | Radius `resource show --application` does not establish resource ownership | Check returned cluster and gateway application/environment IDs; worker-level regressions through both provider parsers and both fix reviews pass |
 | F101 | Database observation | Medium correctness | `src/plane_demo/management/providers/workloads.py` | Fresh database guard | Checking only the API runtime Secret missed a surviving provisioner or control-reconciler Secret | Check both runtime Secrets before generating credentials or submitting Radius work; management/control orphan-resource regressions pass |
+| F102 | Selected identity | High correctness | `src/plane_demo/management/providers/azure.py`, `local.py` | Default command construction | Selected project contexts were rejected because provider-created command runners retained the old context prefix guard | Derive explicit context allowlists from selected configuration; tests now exercise the real default runner |
+| F103 | Native Radius install | Medium correctness | `scripts/operations/install-radius.sh` | Temporary HOME | Changing HOME lost the operator's default Azure CLI authentication cache | Preserve the resolved Azure configuration directory first; absent and explicit cache cases pass |
+| F104 | Native Radius install | Medium correctness | `scripts/operations/project.py` | Management installer invocation | The retained management install caller omitted the native helper's required workspace argument | Forward the explicit workspace and call Bash directly; actual caller construction is covered |
+| F105 | Selected identity | Medium correctness | `src/plane_demo/management/providers/redis_nic_tags.py` | Provider region observation | The old `Central US` exception rejected a valid new display region and accepted the wrong region for a selected deployment | Compare normalized actual region to the selected code; real tagging-path tests cover both cases |
+| F106 | Image source provenance | Medium correctness | Provisioner Dockerfiles and `scripts/harness/test-e2e.py` | Source allowlists | The native installer was missing from one image COPY list and the corresponding acceptance source list | Align both images and source provenance; exact source-layout checks pass |
+| F107 | Selected identity | Medium correctness | `src/plane_demo/management/providers/workloads.py` | Runtime project binding | New namespaces alone left the data runtime's project identifier fixed to the previous project | Bind the selected project into runtime Secrets and administrative metadata; provider-path regression passes |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -1834,3 +1840,30 @@ The disposable PostgreSQL container was removed and its absence verified.
 
 This does not complete credential-store integration: provider credentials and
 other provider working files remain file-backed pending the next steps.
+
+### Selected identity and native Radius installation
+
+The typed configuration shared by operator and provider code now lives in the
+runtime package. `.env` I/O remains under `scripts/operations/`. Selected
+identities drive provider namespaces, Radius groups/contexts, local access
+scopes, runtime project labels, and Azure certificate/Redis metadata paths.
+Public identity snapshots exclude and reject demo-key values. Explicit private
+temporary workspaces are supported; the old startup path is still transitional.
+
+Azure Radius installation now runs Bash with `rad`, `kubectl`, and `jq`, rather
+than Python orchestration. The helper checks explicit access paths and context,
+uses a disposable private HOME, preserves the operator's Azure CLI cache, and
+verifies all four Radius identities. The caller passes its workspace explicitly.
+Both provisioner images and acceptance source lists include the new helper;
+this is source-layout verification, not a claim that rebuilt images were inspected.
+
+Rubber-duck review found F102-F105; integration checks found F106, and runtime
+binding inspection found F107. The fixes passed both follow-up reviews, which
+reported no remaining findings. The final run passed 855 unit and targeted
+operator tests, including real default command-runner paths, native subprocess
+entrypoints, display-region ownership checks, and both image source allowlists.
+Ruff, ShellCheck, and whitespace checks passed.
+
+No new Azure/local deployment or image build was performed for this step.
+Native stage integration, service-owned credential wiring, and fresh scenario
+proof remain unfinished.
