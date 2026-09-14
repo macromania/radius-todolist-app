@@ -5,7 +5,6 @@ ENV ?= azure
 ARGS ?=
 GROUP ?= all
 CONFIG ?= .state/azure/provisioning.json
-ACCEPTANCE_CONFIG ?= .state/azure/acceptance.json
 SLOT ?= management
 BICEP ?= $(HOME)/.rad/bin/bicep
 RUN := uv run --no-sync
@@ -129,7 +128,7 @@ check-terraform: check-work ## Validate local Recipes with mocks; creates no clu
 	$(SECTION)
 	@$(RUN) python scripts/operations/local/validate.py
 
-confirm-local: check-work
+confirm-local:
 	@test "$(CONFIRM_LOCAL)" = yes || { echo "Set CONFIRM_LOCAL=yes for local Docker/Kubernetes mutations." >&2; exit 1; }
 
 ##@ local Local: preparation and images
@@ -176,13 +175,13 @@ local-deploy-management: confirm-local ## Deploy management through Radius; crea
 	$(SECTION)
 	@$(RUN) python scripts/operations/local/deploy-demo.py --execute
 
-local-export: check-work ## Export topology/API access once; exit 3 means not ready
+local-export: ## Report live local topology/API access; no saved export is required
 	$(SECTION)
 	@$(RUN) python scripts/harness/local/export-state.py --once
 
 local-test: confirm-local ## Run live admissions, isolation checks, and parent outages
 	$(SECTION)
-	@$(RUN) python scripts/harness/test-e2e.py --config .state/local/acceptance.json --mode all --execute
+	@$(RUN) python scripts/harness/test-e2e.py --environment local --mode all --execute
 
 ##@ local Local: cleanup
 ##! Preview ownership first. Deletion requires CONFIRM_LOCAL=yes.
@@ -199,7 +198,7 @@ local-verify: check-work ## Verify offline; set LOCAL_CLEANUP_RECORD=<record pat
 	@test -n "$(LOCAL_CLEANUP_RECORD)" || { echo "Set LOCAL_CLEANUP_RECORD to the exact cleanup record." >&2; exit 1; }
 	@$(RUN) python scripts/operations/local/cleanup.py --verify "$(LOCAL_CLEANUP_RECORD)"
 
-require-azure: check-work
+require-azure:
 	@test "$(ENV)" = azure || { echo "This target is Azure-only; use the explicit local-* targets." >&2; exit 1; }
 
 confirm-azure: require-azure
@@ -248,18 +247,18 @@ deploy-management: confirm-azure ## Submit management Job; verify completion sep
 	@$(RUN) python scripts/operations/run-management-job.py --config "$(CONFIG)" --execute
 
 ##@ azure Azure: acceptance
-##! Live tests require CONFIRM_AZURE=yes and the guide's prepared harness state.
-export-state: require-azure ## Export protected harness state; exit 3 means not ready
+##! Live tests require CONFIRM_AZURE=yes and a matching deployed .env selection.
+export-state: require-azure ## Report live Azure topology/API access; no saved export is required
 	$(SECTION)
-	@$(RUN) python scripts/harness/export-state.py --config "$(CONFIG)" --once
+	@$(RUN) python scripts/harness/export-state.py --environment azure --once
 
 test-e2e: confirm-azure ## Run the opt-in live Azure onboarding scenario
 	$(SECTION)
-	@$(RUN) python scripts/harness/test-e2e.py --config "$(ACCEPTANCE_CONFIG)" --mode scenario --execute
+	@$(RUN) python scripts/harness/test-e2e.py --environment azure --mode scenario --execute
 
 test-outages: confirm-azure ## Run opt-in live parent-link outages and restoration
 	$(SECTION)
-	@$(RUN) python scripts/harness/test-e2e.py --config "$(ACCEPTANCE_CONFIG)" --mode outages --execute
+	@$(RUN) python scripts/harness/test-e2e.py --environment azure --mode outages --execute
 
 ##@ azure Azure: cleanup
 ##! Preview ownership first. Deletion requires ENV=azure CONFIRM_AZURE=yes.

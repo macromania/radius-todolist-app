@@ -1867,3 +1867,27 @@ Ruff, ShellCheck, and whitespace checks passed.
 No new Azure/local deployment or image build was performed for this step.
 Native stage integration, service-owned credential wiring, and fresh scenario
 proof remain unfinished.
+
+### Live harness and resource-owned recovery integration
+
+Public harness entrypoints now read the checkout `.env` and discover access,
+endpoints, parent bindings and source identities through APIs. Export commands
+produce optional stdout reports, not required acceptance files. Azure/local
+Make aliases pass an environment expectation that is checked against the same
+loaded configuration before live actions.
+
+All scenario modes use the live adapter. Fault intent and restoration records
+belong to owned ConfigMaps and are bound to actual fault artifacts. A fresh
+restore command can discover its journal without a workstation report.
+Interrupted pre-mutation journal creation can be cancelled only after
+independent artifact/ownership checks. An applied fault cannot be hidden in a
+forged baseline, and a replaced Pod is not adopted as the recorded sandbox.
+
+Initial and follow-up reviews found and corrected the unsealed journal, applied
+artifact and safe Pod-replacement cases. Both final fix reviews passed. The
+final scoped run passed 450 tests and 230 subtests, including harness algorithms,
+layout/provenance, Make routing and terminal-output checks. Ruff and whitespace
+checks passed. These were synthetic/offline tests, not live outage acceptance.
+
+Deployment/operator conversion, image trust fixes, cleanup integration and
+fresh Azure/local end-to-end proof remain separate unfinished work.

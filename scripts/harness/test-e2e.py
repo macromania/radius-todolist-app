@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 import json
 import re
+import ssl
 import sys
 import time
 from contextlib import contextmanager
@@ -22,9 +23,11 @@ ROOT = Path(__file__).resolve().parents[2]
 _spec = importlib.util.spec_from_file_location(
     "plane_demo_fault_helper", ROOT / "scripts/harness/fault-parent-link.py"
 )
-faults = importlib.util.module_from_spec(_spec)
-sys.modules[_spec.name] = faults
-_spec.loader.exec_module(faults)
+faults = sys.modules.get(_spec.name)
+if faults is None or Path(faults.__file__) != Path(_spec.origin):
+    faults = importlib.util.module_from_spec(_spec)
+    sys.modules[_spec.name] = faults
+    _spec.loader.exec_module(faults)
 AcceptanceError = faults.AcceptanceError
 require = faults.require
 TENANT = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?\Z")
@@ -249,11 +252,6 @@ if role in ("management-api","control-api"):
                 raise RuntimeError("local_postgresql_transport_contract")
             identity["tls"]=False
         result={"postgresql":identity}
-        if role=="management-api":
-            result["pairs"]=connection.execute(
-                "SELECT pair_id,control_cluster_id,data_cluster_id,control_url,data_url "
-                "FROM management.pairs ORDER BY pair_id"
-            ).fetchall()
 else:
     from plane_demo.shared.settings import Settings,redis_client
     store=redis_client(Settings.from_env("data_api"))
@@ -285,7 +283,9 @@ print(json.dumps(result))
 
 class Client:
     def __init__(self, url: str, key: str, *, transport=None):
+        require(isinstance(key, str) and re.fullmatch(r"[!-~]{32,512}", key), "invalid_demo_key")
         self.url, self.key = url.rstrip("/"), key
+        self.before_mutation = None
         self.client = httpx.Client(
             base_url=self.url,
             timeout=10,
@@ -294,7 +294,35 @@ class Client:
             transport=transport,
         )
 
+    def ready(self):
+        try:
+            with self.client.stream("GET", "/healthz") as response:
+                if response.status_code in {429, 502, 503, 504}:
+                    return False
+                require(response.status_code == 200, "gateway_health_contract_failed")
+                content = bytearray()
+                for chunk in response.iter_bytes():
+                    content.extend(chunk)
+                    require(len(content) <= 4096, "gateway_health_response_too_large")
+                try:
+                    value = json.loads(content)
+                except ValueError:
+                    raise AcceptanceError("gateway_health_contract_failed") from None
+                require(value == {"status": "ok"}, "gateway_health_contract_failed")
+                return True
+        except httpx.HTTPError as error:
+            cause = error
+            while cause:
+                if isinstance(cause, ssl.SSLError):
+                    raise AcceptanceError("gateway_tls_verification_failed") from None
+                cause = cause.__cause__
+            if isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout)):
+                return False
+            raise AcceptanceError("api_transport_failed") from None
+
     def request(self, method: str, path: str, *, body=None, statuses=(200,), key=None):
+        if self.before_mutation is not None and method not in {"GET", "HEAD", "OPTIONS"}:
+            self.before_mutation()
         headers = {"X-Demo-Key": self.key if key is None else key}
         if key == "":
             headers = {}
@@ -327,19 +355,26 @@ class APIs:
         self.configuration = configuration
         self.factory = factory
         self.clients = {}
+        self.guard = None
 
     def client(self, target: str) -> Client:
         if target in self.clients:
             return self.clients[target]
-        values = self.configuration.current()
-        endpoints = faults.read_json(self.configuration.file(values.get("endpoints_file")))
-        if target == "management":
-            endpoint = endpoints.get("management")
+        if self.configuration.live:
+            url, key = self.configuration.endpoint(target)
         else:
-            role, pair = target.split(":", 1)
-            endpoint = endpoints.get("pairs", {}).get(pair, {}).get(role)
-        require(isinstance(endpoint, dict), "endpoint_not_exported")
-        url = endpoint.get("url", "")
+            values = self.configuration.current()
+            endpoints = faults.read_json(self.configuration.file(values.get("endpoints_file")))
+            if target == "management":
+                endpoint = endpoints.get("management")
+            else:
+                role, pair = target.split(":", 1)
+                endpoint = endpoints.get("pairs", {}).get(pair, {}).get(role)
+            require(isinstance(endpoint, dict), "endpoint_not_exported")
+            url = endpoint.get("url", "")
+            key_file = self.configuration.file(endpoint.get("key_file"), secret=True)
+            require(key_file.stat().st_size <= 512, "api_key_file_too_large")
+            key = key_file.read_text().strip()
         parsed = urlsplit(url)
         require(
             bool(parsed.hostname)
@@ -366,15 +401,13 @@ class APIs:
                 and parsed.port == ports.get(target),
                 "local_endpoint_not_reserved_loopback",
             )
-        key_file = self.configuration.file(endpoint.get("key_file"), secret=True)
-        require(key_file.stat().st_size <= 512, "api_key_file_too_large")
-        key = key_file.read_text().strip()
-        require(len(key) >= 32 and "\n" not in key, "invalid_demo_key")
+        require(isinstance(key, str) and re.fullmatch(r"[!-~]{32,512}", key), "invalid_demo_key")
         require(
             all(existing.key != key for existing in self.clients.values()),
             "plane_keys_are_not_distinct",
         )
         client = self.factory(url, key)
+        client.before_mutation = lambda: self.guard() if self.guard is not None else None
         self.clients[target] = client
         return client
 
@@ -545,9 +578,16 @@ class Runner:
         sleep=time.sleep,
     ):
         self.configuration, self.mode = configuration, mode
+        self.journal = None
         self.continue_first_from = continue_first_from
         self.apis = apis if apis is not None else APIs(configuration)
-        self.kube_factory = kube_factory
+        if configuration.live and isinstance(self.apis, APIs):
+            self.apis.guard = self.check_journal
+        self.kube_factory = (
+            configuration.kube
+            if configuration.live and kube_factory is faults.Kubectl
+            else kube_factory
+        )
         self.fault_factory = fault_factory or faults.fault_class(configuration)
         self.clock, self.sleep = clock, sleep
         self.run_id = uuid4().hex
@@ -591,22 +631,39 @@ class Runner:
         self.tenants = {}
         self.expectations = {}
         self.updates_finished_at = None
+        self.images = {}
 
     def load_first_admission(self):
         relative = self.continue_first_from
         require(self.mode in {"scenario", "all"}, "continuation_requires_scenario")
-        require(
-            self.configuration.environment == "azure"
-            and self.configuration.root == ROOT / ".state/azure"
-            and isinstance(relative, str)
-            and re.fullmatch(r"\.state/azure/evidence/acceptance-[a-f0-9]{32}\.json", relative),
-            "continuation_path_refused",
-        )
-        path = faults.state_path(Path(relative))
-        require(path == ROOT / relative, "continuation_symlink_refused")
-        path = self.configuration.file(str(path.relative_to(self.configuration.root)), secret=True)
-        with path.open("rb") as stream:
-            raw = stream.read(2_000_001)
+        prior_journal = None
+        if self.configuration.live:
+            require(isinstance(relative, str), "continuation_journal_required")
+            name = relative.split("@")[0]
+            prior_journal = faults.ConfigMapJournal(
+                self.configuration.kube(self.configuration.target("management")),
+                name,
+                "acceptance",
+            )
+            raw = faults.canonical_json(prior_journal.load(relative)).encode()
+            prior_journal.check()
+            expected_id = name.removeprefix("plane-demo-acceptance-")
+        else:
+            require(
+                self.configuration.environment == "azure"
+                and self.configuration.root == ROOT / ".state/azure"
+                and isinstance(relative, str)
+                and re.fullmatch(r"\.state/azure/evidence/acceptance-[a-f0-9]{32}\.json", relative),
+                "continuation_path_refused",
+            )
+            path = faults.state_path(Path(relative))
+            require(path == ROOT / relative, "continuation_symlink_refused")
+            path = self.configuration.file(
+                str(path.relative_to(self.configuration.root)), secret=True
+            )
+            with path.open("rb") as stream:
+                raw = stream.read(2_000_001)
+            expected_id = path.stem.removeprefix("acceptance-")
         require(len(raw) <= 2_000_000, "continuation_evidence_too_large")
 
         def unique_fields(pairs):
@@ -620,10 +677,11 @@ class Runner:
             and type(prior.get("version")) is int
             and prior["version"] == 1
             and prior.get("project") == self.configuration.project
-            and prior.get("environment") == "azure"
+            and prior.get("environment") == self.configuration.environment
             and prior.get("mode") == self.mode
-            and prior.get("outcome") == "failed"
-            and prior.get("run_id") == path.stem.removeprefix("acceptance-")
+            and prior.get("outcome")
+            in ({"failed", "running"} if self.configuration.live else {"failed"})
+            and prior.get("run_id") == expected_id
             and prior["run_id"] != self.run_id
             and "continued_first_from" not in prior,
             "continuation_identity_mismatch",
@@ -639,7 +697,10 @@ class Runner:
         )
         started, finished = (
             report_time(prior.get("started_at")),
-            report_time(prior.get("finished_at")),
+            report_time(
+                prior.get("finished_at")
+                or (prior_journal.updated_at if prior_journal is not None else None)
+            ),
         )
         require(
             report_time(source["committed_at"])
@@ -657,11 +718,20 @@ class Runner:
         )
         events = prior.get("events")
         prefix = ["acceptance_started", "workload_image", "workload_image", "tenant_accepted"]
+        expanded = prefix + ["management_ready", "data_applied"] + ["workload_image"] * 2
+        expanded += ["data_api_permissions", "workload_image", "workload_image"]
         require(
             isinstance(events, list)
             and all(isinstance(event, dict) for event in events)
             and [event.get("type") for event in events]
-            in (prefix, prefix + ["management_ready", "data_applied"] + ["workload_image"] * 4)
+            in (
+                [prefix, expanded]
+                if self.configuration.live
+                else [
+                    prefix,
+                    prefix + ["management_ready", "data_applied"] + ["workload_image"] * 4,
+                ]
+            )
             and [(event.get("slot"), event.get("component")) for event in events[1:3]]
             == [("management", "management-api"), ("management", "provisioner")],
             "continuation_progress_refused",
@@ -683,7 +753,7 @@ class Runner:
             and str(UUID(admission["operation_id"])) == admission["operation_id"],
             "continuation_admission_invalid",
         )
-        if len(events) == 10:
+        if len(events) > 4:
             ready, applied = events[4:6]
             require(
                 ready.get("tenant") == admission["tenant"]
@@ -692,7 +762,11 @@ class Runner:
                 and applied.get("tenant") == admission["tenant"]
                 and type(applied.get("version")) is int
                 and applied["version"] == 1
-                and [(event.get("slot"), event.get("component")) for event in events[6:]]
+                and [
+                    (event.get("slot"), event.get("component"))
+                    for event in events[6:]
+                    if event["type"] == "workload_image"
+                ]
                 == [
                     ("shared-control", "control-api"),
                     ("shared-control", "control-reconciler"),
@@ -706,19 +780,51 @@ class Runner:
                 ),
                 "continuation_read_only_progress_invalid",
             )
+            if self.configuration.live:
+                permissions = events[8]
+                require(
+                    permissions.get("slot") == "shared-data"
+                    and permissions.get("service_account") == "data-api-runtime"
+                    and permissions.get("permissions") == data_api_permissions(self.names)
+                    and permissions.get("parent_secret_get_status") == 403
+                    and permissions.get("secret_list_status") == 403,
+                    "continuation_data_api_permissions_invalid",
+                )
+        if prior_journal is not None:
+            prior_journal.claim_continuation(self.run_id)
         self.record["continued_first_from"] = {
             "path": relative,
             "sha256": hashlib.sha256(raw).hexdigest(),
             "run_id": prior["run_id"],
             "source": source,
             "started_at": prior["started_at"],
-            "finished_at": prior["finished_at"],
+            "finished_at": finished.isoformat(),
             "admission": admission,
         }
 
     def save(self, event: str, **details):
         self.record["events"].append({"type": event, "at": faults.utc_now(), **details})
-        faults.protected_write(self.path, self.record)
+        self.persist()
+
+    def persist(self):
+        if self.configuration.live:
+            if self.journal is None:
+                self.journal = faults.ConfigMapJournal(
+                    self.configuration.kube(self.configuration.target("management")),
+                    "plane-demo-acceptance-" + self.run_id,
+                    "acceptance",
+                )
+                self.journal.start(self.record)
+                self.record["journal"] = self.journal.reference
+            else:
+                self.journal.save(self.record)
+        else:
+            faults.protected_write(self.path, self.record)
+
+    def check_journal(self):
+        if self.configuration.live:
+            require(self.journal is not None, "acceptance_journal_not_committed")
+            self.journal.check()
 
     def kube(self, slot: str):
         kube = self.kube_factory(self.configuration.target(slot))
@@ -728,7 +834,10 @@ class Runner:
     def client(self, target: str, *, timeout=30):
         def exported():
             try:
-                return self.apis.client(target)
+                client = self.apis.client(target)
+                if self.configuration.live and not client.ready():
+                    return None
+                return client
             except AcceptanceError as error:
                 if str(error) not in {"endpoint_not_exported", "state_file_missing"}:
                     raise
@@ -941,14 +1050,37 @@ class Runner:
         pod = pod or kube.pod(component)
         container = kube.target.component(component)["container"]
         role = "provisioner" if component == "provisioner" else "api"
-        expected_image = self.configuration.current().get("images", {}).get(role)
-        if self.configuration.environment == "azure":
+        if self.configuration.live:
+            self.configuration.current()
+            specs = [
+                item
+                for item in pod.get("spec", {}).get("containers", [])
+                if item["name"] == container
+            ]
+            require(len(specs) == 1, "configured_container_missing")
+            candidate = specs[0].get("image", "")
+            if self.configuration.environment == "azure":
+                registry = self.configuration.config.registry_name + ".azurecr.io/"
+                require(
+                    isinstance(candidate, str)
+                    and candidate.startswith(registry)
+                    and re.fullmatch(r"[a-z0-9./_-]+@sha256:[a-f0-9]{64}", candidate),
+                    "configured_image_digest_missing",
+                )
+                self.images.setdefault(role, candidate)
+                expected_image = self.images[role]
+            else:
+                revision = self.record["source"]["commit"]
+                expected_image = f"localhost/radplanes-plane-{role}:{revision}"
+        else:
+            expected_image = self.configuration.current().get("images", {}).get(role)
+        if not self.configuration.live and self.configuration.environment == "azure":
             require(
                 isinstance(expected_image, str)
                 and re.fullmatch(r"[a-z0-9./_-]+@sha256:[a-f0-9]{64}", expected_image),
                 "configured_image_digest_missing",
             )
-        else:
+        elif not self.configuration.live:
             review = self.configuration.current().get("local_images", {})
             source = self.record.get("source", {})
             require(
@@ -982,7 +1114,14 @@ class Runner:
             and re.search(r"sha256:[a-f0-9]{64}$", statuses[0]["imageID"]),
             "running_image_digest_missing",
         )
-        if self.configuration.environment == "local":
+        if self.configuration.live and self.configuration.environment == "local":
+            require(
+                pod["spec"].get("nodeName") == kube.target.local["node"]["name"],
+                "local_workload_node_mismatch",
+            )
+            self.verify_live_local_image(kube, expected_image, statuses[0]["imageID"])
+            expected = local_source_hashes(component)
+        elif self.configuration.environment == "local":
             image = review[role]
             mapping = kube.target.local.get("image_ids", {}).get(component, {})
             require(
@@ -1037,6 +1176,60 @@ class Runner:
             source_hashes=expected,
         )
 
+    def verify_live_local_image(self, kube, reference, running):
+        config = self.configuration
+        docker = ["docker", "--host", kube.target.local["docker_host"]]
+        values = json.loads(config.command([*docker, "image", "inspect", reference]))
+        require(isinstance(values, list) and len(values) == 1, "local_image_ambiguous")
+        image = values[0]
+        expected = image.get("Id", "")
+        require(
+            re.fullmatch(r"sha256:[a-f0-9]{64}", expected)
+            and image.get("Os") == "linux"
+            and image.get("Architecture") in {"amd64", "arm64"}
+            and image.get("Config", {}).get("User") == "10001:10001"
+            and image.get("Config", {}).get("Labels", {}).get("org.opencontainers.image.revision")
+            == self.record["source"]["commit"],
+            "local_image_source_identity_mismatch",
+        )
+        node = kube.target.local["node"]["id"]
+
+        def content(digest):
+            require(
+                isinstance(digest, str) and re.fullmatch(r"sha256:[a-f0-9]{64}", digest),
+                "local_containerd_content_id_invalid",
+            )
+            raw = config.command(
+                [*docker, "exec", node, "ctr", "--namespace", "k8s.io", "content", "get", digest],
+                binary=True,
+            )
+            require(
+                isinstance(raw, bytes) and "sha256:" + hashlib.sha256(raw).hexdigest() == digest,
+                "local_containerd_content_hash_mismatch",
+            )
+            value = json.loads(raw)
+            require(isinstance(value, dict), "local_containerd_content_not_object")
+            return value
+
+        faults.verify_image_mapping(
+            running,
+            expected,
+            image["Architecture"],
+            content=content,
+            inspect=lambda value: json.loads(
+                config.command(
+                    [
+                        *docker,
+                        "exec",
+                        node,
+                        "crictl",
+                        "inspecti",
+                        value.removeprefix("docker-pullable://").removeprefix("containerd://"),
+                    ]
+                )
+            ),
+        )
+
     def workload_evidence(self, pair: str):
         instances = {}
         for suffix, components in (
@@ -1083,11 +1276,16 @@ class Runner:
         self.verify_workload(kube, "provisioner")
 
     def pair_inventory(self):
-        kube = self.kube("management")
-        return {
-            item["pair_id"]: item
-            for item in kube.exec_json("management-api", IDENTITY_PROBE, "management-api")["pairs"]
-        }
+        result = {}
+        for pair in sorted({value["pair_id"] for value in self.tenants.values()}):
+            require(pair in {"shared", "isolated-1"}, "unexpected_pair_assignment")
+            result[pair] = {"pair_id": pair}
+            for role in ("control", "data"):
+                target = self.kube(pair + "-" + role).target
+                require(bool(target.cluster_id), "live_cluster_identity_missing")
+                result[pair][role + "_cluster_id"] = target.cluster_id
+                result[pair][role + "_url"] = self.client(role + ":" + pair).url
+        return result
 
     def scenario(self):
         first, second, isolated = self.names
@@ -1105,6 +1303,7 @@ class Runner:
         initial_inventory = self.pair_inventory()["shared"]
         shared_instances = self.workload_evidence("shared")
 
+        self.check_journal()
         with paused_reconciler(
             self.kube("shared-data"), clock=self.clock, sleep=self.sleep
         ) as pause:
@@ -1165,6 +1364,12 @@ class Runner:
     def check_shared_pair(self):
         first, second = [self.tenants[tenant] for tenant in self.names[:2]]
         require(first["pair_id"] == second["pair_id"] == "shared", "shared_pair_assignment_changed")
+        if self.configuration.live:
+            for role in ("control", "data"):
+                url = self.client(role + ":shared").url
+                discovered, _key = self.configuration.endpoint(role + ":shared")
+                require(url == discovered, "shared_urls_changed")
+            return
         require(
             all(
                 isinstance(first.get(key), str) and first[key] and first[key] == second.get(key)
@@ -1182,11 +1387,12 @@ class Runner:
         ]
         require(all(cluster_ids) and len(set(cluster_ids)) == 4, "cluster_ids_not_dedicated")
         if self.configuration.environment == "local":
+            stem = self.configuration.config.stem if self.configuration.live else "radplanes-local"
             require(
                 isolated_pair == "isolated-1"
                 and cluster_ids
                 == [
-                    f"kind://radplanes-local-{pair}-{role}"
+                    f"kind://{stem}-{pair}-{role}"
                     for pair in ("shared", "isolated-1")
                     for role in ("control", "data")
                 ],
@@ -1433,11 +1639,13 @@ class Runner:
         control = self.client("control:shared")
         before = timeline(self.client("management"), tenant, "management")
         evidence = self.configuration.root / "evidence" / f"{self.run_id}-management-link.json"
-        with self.fault_factory(
+        self.check_journal()
+        fault = self.fault_factory(
             self.configuration, "shared-control", "control-reconciler", evidence
-        ) as fault:
-            fault.record["acceptance_run_id"] = self.run_id
-            fault.record["source"] = self.record.get("source")
+        )
+        fault.record["acceptance_run_id"] = self.run_id
+        fault.record["source"] = self.record.get("source")
+        with fault:
             requested = "management-link-outage-" + self.run_id[:8]
             result = control.request(
                 "PUT",
@@ -1469,7 +1677,9 @@ class Runner:
             "report_recovery_duplicated_events",
         )
         self.save(
-            "management_link_recovered", evidence=str(evidence), reporting_recovered_seconds=elapsed
+            "management_link_recovered",
+            evidence=fault.journal.reference if self.configuration.live else str(evidence),
+            reporting_recovered_seconds=elapsed,
         )
 
     def control_outage(self):
@@ -1478,11 +1688,11 @@ class Runner:
         baseline = self.applied(tenant)
         control = self.client("control:shared")
         evidence = self.configuration.root / "evidence" / f"{self.run_id}-control-link.json"
-        with self.fault_factory(
-            self.configuration, "shared-data", "data-reconciler", evidence
-        ) as fault:
-            fault.record["acceptance_run_id"] = self.run_id
-            fault.record["source"] = self.record.get("source")
+        self.check_journal()
+        fault = self.fault_factory(self.configuration, "shared-data", "data-reconciler", evidence)
+        fault.record["acceptance_run_id"] = self.run_id
+        fault.record["source"] = self.record.get("source")
+        with fault:
             for offset in (1, 2):
                 requested = f"control-link-outage-{self.run_id[:8]}-{offset}"
                 updated = control.request(
@@ -1519,7 +1729,10 @@ class Runner:
             ),
             "unexpected_intermediate_version_replay",
         )
-        self.save("control_link_recovered_latest_only", evidence=str(evidence))
+        self.save(
+            "control_link_recovered_latest_only",
+            evidence=fault.journal.reference if self.configuration.live else str(evidence),
+        )
 
     def run(self):
         try:
@@ -1538,6 +1751,9 @@ class Runner:
                         "scripts/harness/fault-parent-link.py",
                         "scripts/harness/export-state.py",
                         "scripts/harness/local",
+                        "scripts/lib",
+                        "scripts/operations/api.sh",
+                        "scripts/operations/endpoints.sh",
                         "images/api",
                         "images/provisioner",
                         "pyproject.toml",
@@ -1559,6 +1775,12 @@ class Runner:
                 "acceptance_source_worktree_dirty",
             )
             self.record["source"] = faults.source_metadata()
+            if self.configuration.live:
+                require(
+                    self.configuration.config.revision in (None, self.record["source"]["commit"]),
+                    "selected_source_revision_mismatch",
+                )
+                self.record["report_storage"] = "configmap+stdout"
             if self.continue_first_from is not None:
                 self.load_first_admission()
             self.record["outcome"] = "running"
@@ -1587,30 +1809,68 @@ class Runner:
             raise
         finally:
             self.record["finished_at"] = faults.utc_now()
-            faults.protected_write(self.path, self.record)
-            self.apis.close()
+            try:
+                if not self.configuration.live or self.journal is not None:
+                    self.persist()
+            except AcceptanceError as error:
+                self.record["outcome"] = "failed"
+                self.record["error"] = str(error)
+                raise
+            finally:
+                self.apis.close()
 
 
-def main(argv=None) -> int:
+def main(argv=None, *, configuration_factory=faults.LiveConfiguration) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--config", type=Path, default=ROOT / ".env", help="Checkout .env only")
     parser.add_argument(
-        "--mode", choices=("scenario", "outages", "all", "verify-existing"), default="all"
+        "--environment",
+        choices=("azure", "local"),
+        help="Require this environment in the loaded .env",
     )
     parser.add_argument(
-        "--continue-first-from", help="Protected failed first-admission evidence only"
+        "--mode",
+        choices=("scenario", "outages", "all", "verify-existing"),
+        default="all",
+        help="Run admissions, outage checks, both, or verification of existing synthetic tenants.",
+    )
+    parser.add_argument(
+        "--continue-first-from",
+        help="Resume only the first admission from its owned acceptance ConfigMap NAME@UID@RUN_ID",
     )
     parser.add_argument("--execute", action="store_true", required=True)
     args = parser.parse_args(argv)
     runner = None
+    configuration = None
     try:
-        configuration = faults.Configuration(args.config)
+        configuration = configuration_factory(args.config)
+        require(
+            args.environment is None or configuration.environment == args.environment,
+            "harness_environment_mismatch",
+        )
         runner = Runner(configuration, args.mode, continue_first_from=args.continue_first_from)
         with faults.interruption_is_failure():
             runner.run()
-        print(json.dumps({"outcome": "passed", "mode": args.mode, "evidence": str(runner.path)}))
+        print(
+            json.dumps(
+                runner.record
+                if configuration.live
+                else {"outcome": "passed", "mode": args.mode, "evidence": str(runner.path)}
+            )
+        )
         return 0
-    except Exception:
+    except Exception as error:
+        if configuration is not None and configuration.live:
+            record = (
+                runner.record
+                if runner
+                else {
+                    "outcome": "failed",
+                    "error": str(error) if isinstance(error, AcceptanceError) else "invalid_config",
+                }
+            )
+            print(json.dumps(record))
+            return 1
         print(
             json.dumps(
                 {
@@ -1618,11 +1878,16 @@ def main(argv=None) -> int:
                     "evidence": str(runner.path) if runner else None,
                     "error": runner.record.get("error", "acceptance_failed")
                     if runner
+                    else str(error)
+                    if isinstance(error, AcceptanceError)
                     else "invalid_config",
                 }
             )
         )
         return 1
+    finally:
+        if configuration is not None and configuration.live:
+            configuration.close()
 
 
 if __name__ == "__main__":

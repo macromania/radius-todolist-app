@@ -56,6 +56,7 @@ general-purpose workflow/retry engine.
 - [ ] Remove remaining cluster/bootstrap filesystem operation markers.
 - [ ] Simplify local bootstrap and remove checkout-file mount dependencies.
 - [ ] Wire manual commands, API response contracts, scenarios, and cleanup.
+- [x] (2026-09-14) Wire public harness entrypoints and Make aliases to `.env`/live discovery and resource-owned fault recovery. Resolve pre-seal interruption, forged-baseline and replaced-Pod cancellation findings; both fix reviews and the final 450-test/230-subtest scoped run pass. Live outage proof and deployment/cleanup integration remain pending.
 - [ ] Prove Azure first and local second, including fresh-checkout and empty-worker recovery.
 - [ ] Retire the old runtime paths, update documentation, and commit the verified implementation.
 - [ ] After implementation and verification, consolidate `docs/`, remove obsolete/duplicate documents and this ExecPlan, and update all surviving links.

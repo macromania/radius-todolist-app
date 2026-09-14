@@ -3,15 +3,12 @@
 
 from __future__ import annotations
 
-import argparse
 import base64
 import hashlib
 import hmac
 import importlib.util
 import json
 import os
-import shutil
-import signal
 import stat
 import subprocess
 import sys
@@ -498,53 +495,24 @@ class Exporter(shared.Exporter):
         return value
 
     def verify_image_mapping(self, slot, running, expected):
-        inspected = json.loads(
-            self.run_command(
-                network.docker(
-                    "exec",
-                    self.identities[slot]["node"]["id"],
-                    "crictl",
-                    "inspecti",
-                    running.removeprefix("docker-pullable://").removeprefix("containerd://"),
+        return acceptance.faults.verify_image_mapping(
+            running,
+            expected,
+            self.review["architecture"],
+            check=require,
+            content=lambda digest: self.containerd_content(slot, digest),
+            inspect=lambda image: json.loads(
+                self.run_command(
+                    network.docker(
+                        "exec",
+                        self.identities[slot]["node"]["id"],
+                        "crictl",
+                        "inspecti",
+                        image.removeprefix("docker-pullable://").removeprefix("containerd://"),
+                    )
                 )
-            )
+            ),
         )
-        reported = inspected.get("status", {}).get("id")
-        require(
-            isinstance(reported, str) and acceptance.re.fullmatch(r"sha256:[a-f0-9]{64}", reported),
-            "local_running_image_mapping_mismatch",
-        )
-        if reported != expected:
-            manifest = self.containerd_content(slot, reported)
-            if manifest.get("mediaType") in {
-                "application/vnd.oci.image.index.v1+json",
-                "application/vnd.docker.distribution.manifest.list.v2+json",
-            }:
-                require(
-                    manifest.get("schemaVersion") == 2
-                    and isinstance(manifest.get("manifests"), list),
-                    "local_running_image_mapping_mismatch",
-                )
-                native = [
-                    item
-                    for item in manifest["manifests"]
-                    if item.get("platform", {}).get("os") == "linux"
-                    and item.get("platform", {}).get("architecture") == self.review["architecture"]
-                ]
-                require(len(native) == 1, "local_native_image_manifest_ambiguous")
-                manifest = self.containerd_content(slot, native[0].get("digest"))
-            require(
-                manifest.get("schemaVersion") == 2
-                and manifest.get("mediaType")
-                in {
-                    "application/vnd.oci.image.manifest.v1+json",
-                    "application/vnd.docker.distribution.manifest.v2+json",
-                }
-                and manifest.get("config", {}).get("digest") == expected,
-                "local_running_image_mapping_mismatch",
-            )
-            self.containerd_content(slot, expected)
-        return {"running_image_id": running, "image_id": expected}
 
     def collect_plane(self, slot):
         access = self.access(slot)
@@ -741,41 +709,7 @@ class Exporter(shared.Exporter):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=STATE / "provisioning.json")
-    modes = parser.add_mutually_exclusive_group(required=True)
-    modes.add_argument("--once", action="store_true")
-    modes.add_argument("--watch", action="store_true")
-    parser.add_argument("--timeout", type=int, default=7200)
-    args = parser.parse_args(argv)
-    exporter = None
-
-    def interrupted(_signal, _frame):
-        raise Error("export_interrupted")
-
-    previous = {
-        number: signal.signal(number, interrupted) for number in (signal.SIGTERM, signal.SIGINT)
-    }
-    try:
-        exporter = Exporter(args.config)
-        return exporter.run(watch=args.watch, timeout=args.timeout)
-    except Exception as error:
-        print(
-            json.dumps(
-                {
-                    "outcome": "failed",
-                    "error": str(error)
-                    if isinstance(error, Error)
-                    else "local_state_export_failed",
-                }
-            )
-        )
-        return 1
-    finally:
-        for number, handler in previous.items():
-            signal.signal(number, handler)
-        if exporter is not None and exporter.work.exists():
-            shutil.rmtree(exporter.work)
+    return shared.main(argv, environment="local")
 
 
 if __name__ == "__main__":

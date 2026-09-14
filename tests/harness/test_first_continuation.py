@@ -89,7 +89,7 @@ class HarnessRunCase(base.StateCase):
         self.clients = {
             target: module.Client(
                 "https://test.centralus.cloudapp.azure.com",
-                target + "-synthetic-key",
+                target + "-synthetic-key-" + "x" * 32,
                 transport=httpx.MockTransport(
                     lambda request, target=target: self.request(target, request)
                 ),
@@ -325,7 +325,7 @@ class HarnessRunCase(base.StateCase):
             redirect_stdout(io.StringIO()) as output,
         ):
             self.pause_context = pause
-            code = module.main(argv)
+            code = module.main(argv, configuration_factory=faults.Configuration)
         self.summary = json.loads(output.getvalue())
         return code
 

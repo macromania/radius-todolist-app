@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import shlex
 import shutil
 import socket
 import stat
@@ -87,6 +88,7 @@ class Operator:
         self.changed_uid = False
         self.changed_key = False
         self.rules = False
+        self.rule_arguments = []
         self.extra_rules = ""
         self.add_fails_after_mutation = False
         self.delete_fails = False
@@ -335,13 +337,18 @@ class Operator:
                     if native == ["iptables", "-w", "2", "-S", "OUTPUT"]:
                         return (
                             "-P OUTPUT ACCEPT\n"
-                            + ("synthetic-rule\n" if self.rules else "")
+                            + (
+                                "-A OUTPUT " + shlex.join(self.rule_arguments) + "\n"
+                                if self.rules
+                                else ""
+                            )
                             + self.extra_rules
                         )
                     if native[:2] == ["bash", "-ceu"] and native[2] == network.RULE_COMMAND:
                         action = native[4]
                         if action == "add":
                             self.rules = True
+                            self.rule_arguments = list(native[5:])
                             if self.add_fails_after_mutation:
                                 raise faults.AcceptanceError("ambiguous_rule_create")
                         elif action == "delete":
@@ -1325,7 +1332,7 @@ class NativeScriptTests(unittest.TestCase):
         self.assertNotIn("iptables-restore", network.RULE_COMMAND)
 
     def test_fault_main_local_restore_uses_routed_class(self):
-        configuration = SimpleNamespace(environment="local")
+        configuration = SimpleNamespace(environment="local", live=False)
         local = Mock()
         with (
             patch.object(faults, "Configuration", return_value=configuration),
@@ -1340,7 +1347,8 @@ class NativeScriptTests(unittest.TestCase):
                     "--restore",
                     ".state/local/evidence/fault.json",
                     "--execute",
-                ]
+                ],
+                configuration_factory=faults.Configuration,
             )
         self.assertEqual(result, 0)
         local.from_evidence.return_value.restore.assert_called_once()

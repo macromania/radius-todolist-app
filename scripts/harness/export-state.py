@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only operator export of API keys, acceptance metadata, and cleanup access."""
+"""Report live API discovery to stdout; no acceptance inventory is required or written."""
 
 from __future__ import annotations
 
@@ -7,15 +7,16 @@ import argparse
 import base64
 import fcntl
 import hmac
+import importlib.util
 import ipaddress
 import json
 import os
 import re
 import shutil
-import signal
 import ssl
 import stat
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -57,7 +58,7 @@ try:
                          options="-c statement_timeout=5000",row_factory=dict_row) as connection:
         connection.execute("SET TRANSACTION READ ONLY")
         pairs=connection.execute(
-            "SELECT pair_id,stage,control_cluster_id,data_cluster_id,control_url,data_url "
+            "SELECT pair_id,stage "
             "FROM management.pairs ORDER BY pair_id").fetchall()
         tenants=connection.execute(
             "SELECT t.tenant_id,t.pair_id,t.isolation,EXISTS("
@@ -1242,42 +1243,101 @@ class Exporter:
             shutil.rmtree(self.work)
 
 
-def main(argv=None):
+def acceptance_module():
+    name = "plane_demo_live_report_acceptance"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, ROOT / "scripts/harness/test-e2e.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
+def live_report(configuration, module):
+    apis = module.APIs(configuration)
+    try:
+        management = apis.client("management")
+        management.request("GET", "/healthz")
+        tenants = {}
+        pairs = set()
+        for name in SHOWCASE.values():
+            status, value, _ = management.request("GET", "/tenants/" + name, statuses=(200, 404))
+            if status == 200:
+                module.require(value.get("tenant_id") == name, "tenant_identity_mismatch")
+                pair = value.get("pair_id")
+                module.require(pair in {"shared", "isolated-1"}, "unexpected_pair_assignment")
+                if value.get("provisioning_status") == "succeeded":
+                    pairs.add(pair)
+                tenants[name] = {
+                    key: value.get(key)
+                    for key in ("tenant_id", "pair_id", "provisioning_status", "onboarding_status")
+                }
+        endpoints = {"management": management.url}
+        for pair in sorted(pairs):
+            for role in ("control", "data"):
+                name = role + ":" + pair
+                endpoints[name] = apis.client(name).url
+        return {
+            "version": 1,
+            "outcome": "observed",
+            "environment": configuration.environment,
+            "project": configuration.project,
+            "observed_at": now(),
+            "endpoints": endpoints,
+            "tenants": tenants,
+        }
+    finally:
+        apis.close()
+
+
+def main(argv=None, *, environment=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=ROOT / ".state/azure/provisioning.json")
+    parser.add_argument("--config", type=Path, default=ROOT / ".env", help="Checkout .env only")
+    parser.add_argument(
+        "--environment",
+        choices=("azure", "local"),
+        help="Require this environment in the loaded .env",
+    )
     modes = parser.add_mutually_exclusive_group(required=True)
     modes.add_argument("--once", action="store_true")
     modes.add_argument("--watch", action="store_true")
     parser.add_argument("--timeout", type=int, default=7200)
     args = parser.parse_args(argv)
-    exporter = None
-
-    def interrupted(_signal, _frame):
-        raise ExportError("export_interrupted")
-
-    previous = {
-        number: signal.signal(number, interrupted) for number in (signal.SIGTERM, signal.SIGINT)
-    }
+    configuration = None
+    module = acceptance_module()
     try:
-        exporter = Exporter(args.config)
-        return exporter.run(watch=args.watch, timeout=args.timeout)
+        module.require(1 <= args.timeout <= 10800, "invalid_export_timeout")
+        configuration = module.faults.LiveConfiguration(args.config)
+        module.require(
+            all(
+                expected is None or configuration.environment == expected
+                for expected in (environment, args.environment)
+            ),
+            "report_environment_mismatch",
+        )
+        deadline = time.monotonic() + args.timeout
+        with module.faults.interruption_is_failure():
+            while True:
+                print(json.dumps(live_report(configuration, module), sort_keys=True))
+                if not args.watch:
+                    return 0
+                module.require(time.monotonic() < deadline, "export_timeout")
+                time.sleep(min(5, deadline - time.monotonic()))
     except Exception as error:
         print(
             json.dumps(
                 {
                     "outcome": "failed",
                     "error": str(error)
-                    if isinstance(error, ExportError)
-                    else "state_export_failed",
+                    if isinstance(error, module.AcceptanceError)
+                    else "live_report_failed",
                 }
             )
         )
         return 1
     finally:
-        for number, handler in previous.items():
-            signal.signal(number, handler)
-        if exporter is not None and exporter.work.exists():
-            shutil.rmtree(exporter.work)
+        if configuration is not None:
+            configuration.close()
 
 
 if __name__ == "__main__":

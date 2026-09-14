@@ -169,7 +169,7 @@ class CleanupExportTests(unittest.TestCase):
                 result = self.platform.execute(args)
                 self.assertEqual(result.returncode, 0)
                 return result.stdout
-            self.assertEqual(args[1], "scripts/operations/install-radius.py")
+            self.assertEqual(args[1], "scripts/operations/install-radius.sh")
             return ""
 
         with (

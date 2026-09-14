@@ -9,6 +9,7 @@ import ipaddress
 import json
 import os
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -101,15 +102,17 @@ def operator_command(argv, *, payload=None, timeout=30):
     return result.stdout
 
 
-def node_identity(run, slot, expected=None):
+def node_identity(run, slot, expected=None, *, stem="radplanes-local", docker_factory=docker):
     require(slot in SLOTS, "local_node_slot_refused")
-    cluster = "radplanes-local-" + slot
+    cluster = stem + "-" + slot
     name = cluster + "-control-plane"
     ids = run(
-        docker("ps", "-aq", "--no-trunc", "--filter", "label=io.x-k8s.kind.cluster=" + cluster)
+        docker_factory(
+            "ps", "-aq", "--no-trunc", "--filter", "label=io.x-k8s.kind.cluster=" + cluster
+        )
     ).split()
     require(len(ids) == 1 and HEX_ID.fullmatch(ids[0]), "local_node_inventory_mismatch")
-    values = json.loads(run(docker("inspect", "--type", "container", ids[0])))
+    values = json.loads(run(docker_factory("inspect", "--type", "container", ids[0])))
     require(isinstance(values, list) and len(values) == 1, "local_node_inspection_ambiguous")
     node = values[0]
     address = node.get("NetworkSettings", {}).get("Networks", {}).get("kind", {}).get("IPAddress")
@@ -136,7 +139,7 @@ def node_identity(run, slot, expected=None):
         },
         "local_node_port_bindings_mismatch",
     )
-    network = json.loads(run(docker("network", "inspect", "kind")))
+    network = json.loads(run(docker_factory("network", "inspect", "kind")))
     require(len(network) == 1, "local_kind_network_ambiguous")
     owners = [
         key
@@ -152,22 +155,32 @@ def node_identity(run, slot, expected=None):
 class LocalParentFault(base.ParentFault):
     environment = "local"
 
-    def __init__(
-        self, configuration, slot, component, evidence, *, operator=operator_command, **kwargs
-    ):
+    def __init__(self, configuration, slot, component, evidence=None, *, operator=None, **kwargs):
+        operator = operator or (configuration.command if configuration.live else operator_command)
+
         def kube_factory(target):
             kube = base.Kubectl(target, runner=operator)
-            kube.environment = environment()
+            kube.environment = configuration.env if configuration.live else environment()
             return kube
 
         kwargs.setdefault("kube_factory", kube_factory)
         super().__init__(configuration, slot, component, evidence, **kwargs)
         require(
-            configuration.root == base.ROOT / ".state/local"
+            (configuration.live or configuration.root == base.ROOT / ".state/local")
             and self.target.slot in SLOTS[1:]
             and self.target.namespace
-            == f"radplanes-local-{slot}-" + ("control" if slot.endswith("-control") else "data")
-            and self.target.context == "radplanes-local-" + slot,
+            == (
+                configuration.config.namespace(slot)
+                if configuration.live
+                else f"radplanes-local-{slot}-"
+                + ("control" if slot.endswith("-control") else "data")
+            )
+            and self.target.context
+            == (
+                configuration.config.slot_name(slot)
+                if configuration.live
+                else "radplanes-local-" + slot
+            ),
             "local_fault_scope_refused",
         )
         require(
@@ -182,33 +195,51 @@ class LocalParentFault(base.ParentFault):
         self.record["environment"] = "local"
         self.record["strategy"] = "pod-network-namespace-iptables"
 
+    def docker(self, *args):
+        if self.configuration.live:
+            return ["docker", "--host", self.target.local["docker_host"], *args]
+        return docker(*args)
+
     def verify_nodes(self):
         require(
-            self.configuration.target(self.target.slot) == self.target,
+            (
+                self.configuration.fault_target(self.target.slot, self.component)
+                if self.configuration.live
+                else self.configuration.target(self.target.slot)
+            )
+            == self.target,
             "local_fault_configuration_changed",
         )
         self.kube.verify_scope()
-        owned = base.read_json(self.configuration.file("management-created.json", secret=True))
         management = self.target.local.get("management_node", {})
-        require(
-            owned.get("name") == "radplanes-local-management"
-            and owned.get("context") == "radplanes-local-management"
-            and owned.get("secretEncryptionVerified") is True
-            and owned.get("nodeId") == management.get("id")
-            and owned.get("nodeAddress") == management.get("address"),
-            "local_management_bootstrap_mismatch",
+        if not self.configuration.live:
+            owned = base.read_json(self.configuration.file("management-created.json", secret=True))
+            require(
+                owned.get("name") == "radplanes-local-management"
+                and owned.get("context") == "radplanes-local-management"
+                and owned.get("secretEncryptionVerified") is True
+                and owned.get("nodeId") == management.get("id")
+                and owned.get("nodeAddress") == management.get("address"),
+                "local_management_bootstrap_mismatch",
+            )
+        stem = self.configuration.config.stem if self.configuration.live else "radplanes-local"
+        node_identity(
+            self.operator, "management", management, stem=stem, docker_factory=self.docker
         )
-        node_identity(self.operator, "management", management)
-        node_identity(self.operator, self.target.slot, self.node)
+        node_identity(
+            self.operator, self.target.slot, self.node, stem=stem, docker_factory=self.docker
+        )
         parent_slot = (
             "management"
             if self.component == "control-reconciler"
             else self.target.slot.removesuffix("-data") + "-control"
         )
         parent_node = self.target.local.get("parent_node", {})
-        node_identity(self.operator, parent_slot, parent_node)
+        node_identity(
+            self.operator, parent_slot, parent_node, stem=stem, docker_factory=self.docker
+        )
         require(
-            self.target.parent
+            {key: self.target.parent.get(key) for key in ("host", "port", "allowed_cidrs")}
             == {
                 "host": parent_node["address"],
                 "port": 31543,
@@ -222,9 +253,9 @@ class LocalParentFault(base.ParentFault):
             isinstance(self.node, dict) and HEX_ID.fullmatch(self.node.get("id", "")),
             "local_node_identity_missing",
         )
-        return self.operator(docker("exec", self.node["id"], *args), timeout=10)
+        return self.operator(self.docker("exec", self.node["id"], *args), timeout=10)
 
-    def sandbox_identity(self, pod):
+    def sandbox_identity(self, pod, *, sole_component=False):
         metadata, spec = pod["metadata"], pod["spec"]
         require(
             metadata.get("namespace") == self.target.namespace
@@ -232,12 +263,38 @@ class LocalParentFault(base.ParentFault):
             and spec.get("serviceAccountName") == self.component
             and not spec.get("hostNetwork", False)
             and not spec.get("hostPID", False)
-            and metadata.get("labels", {}).get("plane-demo/project") == "radplanes"
+            and metadata.get("labels", {}).get("plane-demo/project") == self.target.project
             and metadata.get("labels", {}).get("plane-demo/component") == self.component,
             "local_fault_pod_identity_mismatch",
         )
+        require(
+            all(
+                metadata.get("labels", {}).get(key) == value
+                for key, value in self.target.ownership.items()
+            ),
+            "local_fault_pod_owner_changed",
+        )
         pods = json.loads(self.exec_node("crictl", "pods", "-o", "json"))
         require(isinstance(pods.get("items"), list), "local_cri_sandbox_inventory_invalid")
+        if sole_component:
+            prefix = self.target.component(self.component)["deployment"] + "-"
+            for item in pods["items"]:
+                identity = item.get("metadata", {})
+                require(
+                    all(
+                        isinstance(identity.get(key), str) and identity[key]
+                        for key in ("name", "namespace", "uid")
+                    ),
+                    "local_cri_sandbox_inventory_invalid",
+                )
+                relevant = identity["namespace"] == self.target.namespace and (
+                    identity["name"].startswith(prefix)
+                    or item.get("labels", {}).get("plane-demo/component") == self.component
+                )
+                require(
+                    not relevant or identity["uid"] == metadata["uid"],
+                    "local_cancellation_other_reconciler_sandbox_present",
+                )
         matches = [
             item for item in pods["items"] if item.get("metadata", {}).get("uid") == metadata["uid"]
         ]
@@ -284,14 +341,17 @@ class LocalParentFault(base.ParentFault):
         require(self.sandbox_identity(pod) == self.sandbox, "local_network_namespace_changed")
 
     def network(self, *args):
-        require(isinstance(self.sandbox, dict), "local_fault_sandbox_missing")
+        return self.network_in(self.sandbox, *args)
+
+    def network_in(self, sandbox, *args):
+        require(isinstance(sandbox, dict), "local_fault_sandbox_missing")
         return self.exec_node(
             "bash",
             "-ceu",
             NETWORK_COMMAND,
             "plane-demo-netns",
-            str(self.sandbox["pid"]),
-            self.sandbox["inode"],
+            str(sandbox["pid"]),
+            sandbox["inode"],
             *args,
         )
 
@@ -305,7 +365,9 @@ class LocalParentFault(base.ParentFault):
         self.sandbox = self.sandbox_identity(pod)
         original = self.network("iptables", "-w", "2", "-S", "OUTPUT")
         require(
-            "plane-demo-fault-" + self.run_id not in original, "local_fault_rule_already_present"
+            ("plane-demo-fault-" if self.configuration.live else "plane-demo-fault-" + self.run_id)
+            not in original,
+            "local_fault_rule_already_present",
         )
         self.original = hashlib.sha256(original.encode()).hexdigest()
         self.record.update(
@@ -324,34 +386,105 @@ class LocalParentFault(base.ParentFault):
             "-m",
             "comment",
             "--comment",
-            "plane-demo-fault-" + self.run_id,
+            "plane-demo-fault-"
+            + self.run_id
+            + ("-" + self.journal.uid if self.configuration.live else ""),
             "-j",
             "DROP",
         ]
         self.record["rule"] = self.rule
 
     def mutate_rule(self, action):
+        self.check_journal()
         self.network("bash", "-ceu", RULE_COMMAND, "plane-demo-rule", action, *self.rule)
 
+    def verify_rule_set(self, *, present=None):
+        current = self.network("iptables", "-w", "2", "-S", "OUTPUT")
+        original, matches = [], 0
+        for line in current.splitlines(keepends=True):
+            try:
+                words = shlex.split(line)
+            except ValueError:
+                raise Error("local_output_rule_invalid") from None
+            marker = self.rule[self.rule.index("--comment") + 1]
+            if marker not in words:
+                original.append(line)
+                continue
+            # iptables may print the implicit TCP match module added for --dport.
+            if (
+                "-p" in words
+                and words.index("-p") + 1 < len(words)
+                and words[words.index("-p") + 1] == "tcp"
+            ):
+                for index in range(len(words) - 1):
+                    if words[index : index + 2] == ["-m", "tcp"]:
+                        words = words[:index] + words[index + 2 :]
+                        break
+            require(words == ["-A", "OUTPUT", *self.rule], "local_fault_rule_changed")
+            matches += 1
+        require(
+            matches <= 1 and (present is None or (matches == 1) is present),
+            "local_fault_rule_count_changed",
+        )
+        require(
+            hashlib.sha256("".join(original).encode()).hexdigest() == self.original,
+            "local_original_rules_changed",
+        )
+        return matches == 1
+
     def create_fault(self):
+        self.check_journal()
         self.verify_sandbox()
+        self.verify_rule_set(present=False)
         self.mutate_rule("add")
         self.created = True
+        self.verify_rule_set(present=True)
 
     def assert_blocked(self):
+        self.check_journal()
         self.verify_sandbox()
+        self.verify_rule_set(present=True)
         self.mutate_rule("check")
         super().assert_blocked()
 
     def remove_fault(self):
+        self.check_journal()
         self.verify_sandbox()
-        self.mutate_rule("delete")
+        if self.verify_rule_set():
+            self.mutate_rule("delete")
         restored = self.rules_hash()
         require(restored == self.original, "local_original_rules_changed")
         self.record["restored_rules_sha256"] = restored
 
+    def verify_unattempted(self):
+        self.verify_nodes()
+        pod = self.kube.pod(self.component)
+        current = self.sandbox_identity(pod, sole_component=True)
+        # Observe the current owned namespace without rebinding the stored restoration target.
+        rules = self.network_in(current, "iptables", "-w", "2", "-S", "OUTPUT")
+        require("plane-demo-fault-" not in rules, "unattempted_fault_artifact_present")
+        digest = hashlib.sha256(rules.encode()).hexdigest()
+        replaced = pod["metadata"]["uid"] != self.pod_uid
+        if not replaced:
+            require(current == self.sandbox, "local_network_namespace_changed")
+            require(digest == self.original, "local_original_rules_changed")
+            self.record["restored_rules_sha256"] = self.original
+        confirmed = self.kube.pod(self.component)
+        require(
+            confirmed["metadata"]["uid"] == pod["metadata"]["uid"]
+            and self.sandbox_identity(confirmed, sole_component=True) == current,
+            "local_cancellation_namespace_changed",
+        )
+        self.record["cancellation_proof"] = {
+            "observed_pod_uid": pod["metadata"]["uid"],
+            "reconciler_replaced": replaced,
+            "observed_sandbox_id": current["id"],
+            "output_rules_sha256": digest,
+        }
+
     @classmethod
     def from_evidence(cls, configuration, path, **kwargs):
+        require(not configuration.live, "live_restore_requires_journal_reference")
         path = base.state_path(path)
         require(path.is_relative_to(configuration.root / "evidence"), "restore_evidence_scope")
         require(
@@ -360,33 +493,45 @@ class LocalParentFault(base.ParentFault):
         )
         record = base.read_json(path)
         fault = cls(configuration, record["slot"], record["component"], path, **kwargs)
+        fault.restore_record(record)
+        return fault
+
+    def restore_record(self, record):
         require(
             record.get("version") == 1
-            and record.get("project") == fault.target.project
+            and record.get("project") == self.target.project
             and record.get("environment") == "local"
             and record.get("strategy") == "pod-network-namespace-iptables"
-            and record.get("creation_attempted") is True
-            and record.get("cluster_uid") == fault.target.cluster_uid
-            and record.get("namespace_uid") == fault.target.namespace_uid
-            and record.get("node") == fault.node
+            and type(record.get("creation_attempted")) is bool
+            and record.get("cluster_uid") == self.target.cluster_uid
+            and record.get("namespace_uid") == self.target.namespace_uid
+            and record.get("node") == self.node
             and bool(re.fullmatch(r"[a-f0-9]{12}", record.get("run_id", "")))
             and bool(base.UID.fullmatch(record.get("pod_uid", "")))
             and bool(HEX_ID.fullmatch(record.get("original_rules_sha256", ""))),
             "local_restore_identity_mismatch",
         )
-        fault.run_id = record["run_id"]
-        fault.plan_fault(base.parent_cidrs(fault.target, record["baseline"]["ips"]))
-        require(fault.rule == record.get("rule"), "local_restore_rule_mismatch")
-        fault.record = record
-        fault.pod_uid = record["pod_uid"]
-        fault.sandbox = record["sandbox"]
-        fault.original = record["original_rules_sha256"]
-        fault.creation_attempted = True
-        return fault
+        if self.configuration.live:
+            require(record.get("parent") == self.target.parent, "restore_parent_binding_changed")
+        self.run_id = record["run_id"]
+        self.plan_fault(base.parent_cidrs(self.target, record["baseline"]["ips"]))
+        require(
+            self.rule == record.get("rule")
+            if record["creation_attempted"]
+            else "rule" not in record,
+            "local_restore_rule_mismatch",
+        )
+        self.record = record
+        self.pod_uid = record["pod_uid"]
+        self.sandbox = record["sandbox"]
+        self.original = record["original_rules_sha256"]
+        self.creation_attempted = record["creation_attempted"]
 
 
 def assert_restored_for_cleanup(run, configuration):
     """Read-only fault preflight; return non-secret proof for the caller's cleanup journal."""
+    if configuration.live:
+        return live_cleanup_proof(run, configuration)
     require(
         configuration.environment == "local"
         and configuration.root == base.ROOT / ".state/local"
@@ -553,6 +698,70 @@ def assert_restored_for_cleanup(run, configuration):
         "observed_at": base.utc_now(),
         "journals": journals,
         "targets": live,
+    }
+
+
+def live_cleanup_proof(run, configuration):
+    require(configuration.environment == "local", "cleanup_fault_environment_mismatch")
+
+    def operator(argv, *, payload=None, timeout=30):
+        require(payload is None, "cleanup_fault_payload_refused")
+        return run(argv, timeout=timeout)
+
+    targets, journals = {}, []
+    for slot in SLOTS[1:]:
+        component = slot.rsplit("-", 1)[1] + "-reconciler"
+        fault = LocalParentFault(configuration, slot, component, operator=operator)
+        fault.verify_nodes()
+        pod = fault.kube.pod(component)
+        fault.pod_uid = pod["metadata"]["uid"]
+        fault.sandbox = fault.sandbox_identity(pod, sole_component=True)
+        rules = fault.network("iptables", "-w", "2", "-S", "OUTPUT")
+        require("plane-demo-fault-" not in rules, "cleanup_live_parent_fault_present")
+        digest = hashlib.sha256(rules.encode()).hexdigest()
+        if fault.kube.optional("configmap", fault.journal.name) is not None:
+            record = fault.journal.load()
+            require(
+                record.get("restored") is True
+                and record.get("physical_restored") is True
+                and record.get("parent") == fault.target.parent,
+                "cleanup_fault_restored_identity_or_rules_changed",
+            )
+            if record.get("creation_attempted") is False:
+                require(
+                    "rule" not in record and "policy" not in record and "policy_uid" not in record,
+                    "cleanup_fault_unattempted_artifact_invalid",
+                )
+            else:
+                require(
+                    record.get("original_rules_sha256")
+                    == record.get("restored_rules_sha256")
+                    == digest
+                    and record.get("pod_uid") == fault.pod_uid
+                    and record.get("node") == fault.node
+                    and record.get("sandbox") == fault.sandbox,
+                    "cleanup_fault_restored_identity_or_rules_changed",
+                )
+            journals.append(
+                {"journal": fault.journal.reference, "intent_sha256": fault.journal.intent}
+            )
+            fault.journal.check()
+        fault.verify_sandbox()
+        targets[slot] = {
+            "cluster_uid": fault.target.cluster_uid,
+            "namespace_uid": fault.target.namespace_uid,
+            "pod_uid": fault.pod_uid,
+            "node": fault.node,
+            "sandbox": fault.sandbox,
+            "output_rules_sha256": digest,
+        }
+    return {
+        "version": 1,
+        "environment": "local",
+        "project": configuration.project,
+        "observed_at": base.utc_now(),
+        "journals": journals,
+        "targets": targets,
     }
 
 

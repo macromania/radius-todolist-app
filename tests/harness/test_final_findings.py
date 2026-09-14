@@ -56,7 +56,8 @@ class FinalRecoveryDeadlineTests(base.StateCase):
                     "--component",
                     "control-reconciler",
                     "--execute",
-                ]
+                ],
+                configuration_factory=faults.Configuration,
             )
         self.assertEqual(clock() - fault.recovery_started, 31)
         self.assertEqual(result, 1)

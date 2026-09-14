@@ -16,14 +16,19 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+from scripts.operations.config import ConfigError, load_config  # noqa: E402
+
 PROJECT = "radplanes"
 RECOVERY_SECONDS = 30
 COMPONENT_DSN = {
@@ -77,6 +82,9 @@ def source_metadata() -> dict:
             "scripts/harness/test-e2e.py",
             "scripts/harness/fault-parent-link.py",
             "scripts/harness/local",
+            "scripts/lib",
+            "scripts/operations/api.sh",
+            "scripts/operations/endpoints.sh",
             "src/plane_demo",
             "sql",
             "infra/radius/apps",
@@ -138,6 +146,8 @@ class Target:
     components: dict
     parent: dict
     local: dict = field(default_factory=dict)
+    cluster_id: str = ""
+    ownership: dict = field(default_factory=dict)
 
     def component(self, name: str) -> dict:
         value = self.components.get(name)
@@ -153,6 +163,10 @@ class Target:
 
 
 class Configuration:
+    """Legacy snapshot adapter for offline fault and continuation regression coverage."""
+
+    live = False
+
     def __init__(self, path: Path):
         self.path = state_path(path)
         self.root = self.path.parent
@@ -298,6 +312,489 @@ class Configuration:
             raise AcceptanceError("invalid_project_kubeconfig") from None
 
 
+DISCOVER_SLOT = r"""
+set -euo pipefail
+set +x
+umask 077
+source "$1/scripts/lib/env.sh"
+source "$1/scripts/lib/discovery.sh"
+demo_load_env "$1/.env"
+[[ "$DEMO_ENV" == "$PLANE_DEMO_EXPECT_ENV" ]] || {
+  demo_error 'Environment changed after configuration was loaded'; exit 1;
+}
+DEMO_WORKSPACE=$2
+demo_open_slot "$3"
+url=$(demo_endpoint)
+cluster=$(demo_kube get namespace kube-system --output json)
+namespace=$(demo_kube get namespace "$DEMO_NAMESPACE" --output json)
+node=null
+host=
+if [[ "$DEMO_ENV" == local ]]; then
+  host=$(env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_CONFIG \
+    docker context inspect desktop-linux --format '{{json .Endpoints.docker.Host}}' | jq -er .)
+  node=$(docker --host "$host" inspect --type container "$DEMO_CONTEXT-control-plane")
+fi
+jq -n --arg slot "$DEMO_SLOT" --arg context "$DEMO_CONTEXT" --arg url "$url" \
+  --arg project "$DEMO_PROJECT" --arg deployment "$DEMO_DEPLOYMENT" \
+  --arg environment "$DEMO_ENV" --arg kubeconfig "$DEMO_KUBECONFIG" --arg host "$host" \
+  --argjson cluster "$cluster" --argjson namespace "$namespace" --argjson node "$node" \
+  '{slot:$slot,context:$context,url:$url,project:$project,deployment:$deployment,
+    environment:$environment,kubeconfig:$kubeconfig,cluster:$cluster,
+    namespace:$namespace,node:$node,docker_host:$host}'
+"""
+
+PARENT_BINDING_PROBE = r"""
+import json,os,sys
+from psycopg import ProgrammingError
+from psycopg.conninfo import conninfo_to_dict
+try:
+    name=sys.argv[1]
+    if name not in ("MANAGEMENT_DSN","CONTROL_DSN"): raise ValueError()
+    values=conninfo_to_dict(os.environ[name])
+    if values.get("hostaddr") or values.get("service"): raise ValueError()
+    print(json.dumps({"host":values["host"],"port":int(values.get("port","5432")),
+                      "sslmode":values.get("sslmode")}))
+except (KeyError,ValueError,ProgrammingError):
+    print(json.dumps({"error":"parent_binding_invalid"}))
+    sys.exit(1)
+"""
+
+
+class LiveConfiguration:
+    """One run's native discovery and private, disposable Kubernetes access."""
+
+    live = True
+
+    def __init__(self, path: Path = ROOT / ".env", *, execute=None):
+        self.path = ROOT / path
+        require(self.path == ROOT / ".env", "configuration_must_be_checkout_dotenv")
+        try:
+            self.config = load_config(self.path)
+        except ConfigError:
+            raise AcceptanceError("invalid_dotenv_configuration") from None
+        self.project = self.config.project
+        self.environment = self.config.environment
+        self.execute = execute or subprocess.run
+        self.workspace = tempfile.TemporaryDirectory(prefix=".harness-", dir=ROOT)
+        self.root = Path(self.workspace.name)
+        self.targets = {}
+        self.urls = {}
+        self.keys = {}
+        self.home = self.root / "home"
+        self.home.mkdir(mode=0o700)
+        self.env = {**os.environ, "HOME": str(self.home)}
+        for name in ("DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_HOST", "KUBECONFIG"):
+            self.env.pop(name, None)
+        if self.environment == "azure":
+            self.env["AZURE_CONFIG_DIR"] = os.environ.get(
+                "AZURE_CONFIG_DIR", str(Path.home() / ".azure")
+            )
+
+    def close(self):
+        self.keys.clear()
+        self.workspace.cleanup()
+
+    def current(self):
+        try:
+            require(load_config(self.path) == self.config, "configuration_identity_changed")
+        except ConfigError:
+            raise AcceptanceError("invalid_dotenv_configuration") from None
+        return {
+            "version": 1,
+            "project": self.project,
+            "environment": self.environment,
+            "synthetic_data": True,
+        }
+
+    def command(self, argv, *, payload=None, timeout=30, binary=False, discovery=False):
+        try:
+            result = self.execute(
+                argv,
+                input=payload,
+                capture_output=True,
+                text=not binary,
+                timeout=timeout,
+                check=False,
+                cwd=ROOT,
+                env={
+                    **os.environ,
+                    "TMPDIR": str(self.root),
+                    "PLANE_DEMO_EXPECT_ENV": self.environment,
+                }
+                if discovery
+                else self.env,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            raise AcceptanceError("live_discovery_command_unavailable_or_timeout") from None
+        require(result.returncode == 0, "live_discovery_command_failed")
+        require(len(result.stdout) <= 2_000_000, "live_discovery_response_too_large")
+        return result.stdout
+
+    def target(self, slot):
+        self.current()
+        require(slot in LOCAL_SLOTS, "invalid_slot")
+        if slot in self.targets:
+            return self.targets[slot]
+        work = Path(tempfile.mkdtemp(prefix="access-", dir=self.root))
+        raw = self.command(
+            ["bash", "-c", DISCOVER_SLOT, "harness-discovery", str(ROOT), str(work), slot],
+            timeout=120,
+            discovery=True,
+        )
+        try:
+            value = json.loads(raw)
+            namespace = value["namespace"]["metadata"]
+            cluster = value["cluster"]["metadata"]
+            context = self.config.slot_name(slot)
+            require(
+                value["slot"] == slot
+                and value["project"] == self.project
+                and value["deployment"] == self.config.deployment
+                and value["environment"] == self.environment
+                and value["context"] == context
+                and cluster["name"] == "kube-system"
+                and namespace["name"] == self.config.namespace(slot)
+                and UID.fullmatch(cluster["uid"])
+                and UID.fullmatch(namespace["uid"]),
+                "live_discovery_identity_mismatch",
+            )
+            ownership = {
+                "plane-demo/project": self.project,
+                "plane-demo/deployment": self.config.deployment,
+                "plane-demo/environment": self.environment,
+            }
+            require(
+                all(namespace.get("labels", {}).get(key) == val for key, val in ownership.items()),
+                "live_namespace_ownership_mismatch",
+            )
+            profile = work / slot / "kubeconfig"
+            require(
+                value["kubeconfig"] == str(profile)
+                and profile.is_file()
+                and not profile.is_symlink()
+                and stat.S_IMODE(profile.stat().st_mode) == 0o600,
+                "live_kubeconfig_not_private",
+            )
+            Configuration.verify_transport(profile, context)
+            role = "management" if slot == "management" else slot.rsplit("-", 1)[1]
+            components = (
+                ("management-api", "provisioner")
+                if role == "management"
+                else (role + "-api", role + "-reconciler")
+            )
+            local = {}
+            if self.environment == "local":
+                require(len(value["node"]) == 1, "local_node_inventory_mismatch")
+                node = value["node"][0]
+                address = ipaddress.IPv4Address(
+                    node["NetworkSettings"]["Networks"]["kind"]["IPAddress"]
+                )
+                host = value["docker_host"]
+                require(
+                    isinstance(host, str)
+                    and re.fullmatch(r"unix:///[^\s?#]+", host)
+                    and ".." not in Path(host.removeprefix("unix://")).parts
+                    and re.fullmatch(r"[a-f0-9]{64}", node["Id"])
+                    and node["Name"] == f"/{context}-control-plane"
+                    and node["Config"]["Labels"]["io.x-k8s.kind.cluster"] == context
+                    and node["Config"]["Labels"]["io.x-k8s.kind.role"] == "control-plane"
+                    and node["State"]["Running"] is True
+                    and address.is_private
+                    and not (
+                        address.is_loopback
+                        or address.is_link_local
+                        or address.is_multicast
+                        or address.is_unspecified
+                        or address.is_reserved
+                    ),
+                    "local_node_ownership_mismatch",
+                )
+                local = {
+                    "docker_host": host,
+                    "node": {"id": node["Id"], "name": node["Name"][1:], "address": str(address)},
+                }
+                cluster_id = f"kind://{context}"
+            else:
+                cluster_id = (
+                    f"/subscriptions/{self.config.subscription}/resourceGroups/"
+                    f"rg-{context}-cluster/providers/Microsoft.ContainerService/"
+                    f"managedClusters/aks-{context}"
+                )
+            target = Target(
+                self.project,
+                slot,
+                context,
+                profile,
+                namespace["name"],
+                cluster["uid"],
+                namespace["uid"],
+                {name: {"deployment": name, "container": name} for name in components},
+                {},
+                local,
+                cluster_id,
+                ownership,
+            )
+            self.validate_endpoint(slot, value["url"])
+        except (KeyError, TypeError, ValueError):
+            raise AcceptanceError("invalid_live_discovery_response") from None
+        self.targets[slot], self.urls[slot] = target, value["url"]
+        return target
+
+    def validate_endpoint(self, slot, url):
+        if self.environment == "local":
+            require(
+                url == f"http://127.0.0.1:{35490 + LOCAL_SLOTS.index(slot)}",
+                "local_endpoint_not_reserved_loopback",
+            )
+        else:
+            require(
+                isinstance(url, str)
+                and re.fullmatch(r"https://[a-z0-9][a-z0-9.-]*\.cloudapp\.azure\.com", url),
+                "azure_endpoint_requires_trusted_https",
+            )
+
+    def endpoint(self, name):
+        slot = name if name == "management" else "-".join(reversed(name.split(":", 1)))
+        target = self.target(slot)
+        if slot not in self.keys:
+            key = self.config.demo_keys.get(slot)
+            if key is None:
+                role = "management" if slot == "management" else slot.rsplit("-", 1)[1]
+                secret_name = role + "-api-runtime"
+                fields = (
+                    Kubectl(target, self.command)
+                    .run(
+                        "get",
+                        "secret",
+                        secret_name,
+                        "-o",
+                        'jsonpath={.metadata.name}{"\\n"}{.metadata.namespace}{"\\n"}{.data.DEMO_KEY}',
+                    )
+                    .splitlines()
+                )
+                require(
+                    len(fields) == 3 and fields[0] == secret_name and fields[1] == target.namespace,
+                    "api_credential_scope_mismatch",
+                )
+                try:
+                    encoded = fields[2]
+                    key = base64.b64decode(encoded, validate=True).decode("ascii")
+                except (KeyError, ValueError, UnicodeError):
+                    raise AcceptanceError("invalid_demo_key") from None
+            require(
+                isinstance(key, str) and re.fullmatch(r"[!-~]{32,512}", key), "invalid_demo_key"
+            )
+            self.keys[slot] = key
+        return self.urls[slot], self.keys[slot]
+
+    def kube(self, target):
+        kube = Kubectl(target, self.command)
+        kube.environment = self.env
+        return kube
+
+    def fault_target(self, slot, component):
+        require(component in COMPONENT_DSN, "unsupported_fault_component")
+        suffix = "-control" if component == "control-reconciler" else "-data"
+        require(slot in LOCAL_SLOTS[1:] and slot.endswith(suffix), "fault_component_slot_mismatch")
+        target = self.target(slot)
+        parent_slot = (
+            "management"
+            if component == "control-reconciler"
+            else slot.removesuffix("-data") + "-control"
+        )
+        parent_target = self.target(parent_slot)
+        parent_kube = self.kube(parent_target)
+        parent_kube.verify_scope()
+        prefix = f"/planes/radius/local/resourceGroups/{self.config.stem}/providers"
+        resource_id = prefix + "/Demo.Platform/postgreSqlDatabases/postgres"
+        parent_role = "management" if parent_slot == "management" else "control"
+        try:
+            resource = json.loads(
+                parent_kube.run(
+                    "get",
+                    "--raw",
+                    f"/apis/api.ucp.dev/v1alpha3{resource_id}?api-version=2025-08-01-preview",
+                )
+            )
+            properties = resource["properties"]
+            require(
+                resource["id"].lower() == resource_id.lower()
+                and properties["application"].lower()
+                == (prefix + "/Applications.Core/applications/" + parent_role).lower()
+                and properties["environment"].lower()
+                == (prefix + "/Applications.Core/environments/" + parent_slot).lower()
+                and properties["provisioningState"] == "Succeeded"
+                and properties["database"] == parent_role,
+                "parent_radius_owner_mismatch",
+            )
+            host, port, server_id = properties["host"], properties["port"], properties["serverId"]
+            owner = {
+                "slot": parent_slot,
+                "cluster_uid": parent_target.cluster_uid,
+                "namespace_uid": parent_target.namespace_uid,
+                "resource_id": resource_id,
+                "server_id": server_id,
+            }
+            local = dict(target.local)
+            if self.environment == "local":
+                parent_node = parent_target.local["node"]
+                require(
+                    host == parent_node["address"]
+                    and type(port) is int
+                    and port == 31543
+                    and properties["tlsRequired"] is False
+                    and server_id == f"kubernetes://{parent_target.namespace}/statefulsets/postgres"
+                    and target.local["docker_host"] == parent_target.local["docker_host"],
+                    "local_parent_radius_binding_mismatch",
+                )
+                server = parent_kube.json("get", "statefulset", "postgres")["metadata"]
+                require(
+                    server["name"] == "postgres"
+                    and server["namespace"] == parent_target.namespace
+                    and UID.fullmatch(server["uid"]),
+                    "local_parent_server_identity_mismatch",
+                )
+                owner["server_uid"] = server["uid"]
+                allowed = [host + "/32"]
+                management = self.target("management")
+                require(
+                    management.local["docker_host"] == target.local["docker_host"],
+                    "local_docker_host_changed",
+                )
+                local.update(parent_node=parent_node, management_node=management.local["node"])
+            else:
+                expected_server = (
+                    f"/subscriptions/{self.config.subscription}/resourceGroups/"
+                    f"rg-{self.config.slot_name(parent_slot)}-app/providers/"
+                    "Microsoft.DBforPostgreSQL/flexibleServers/"
+                )
+                require(
+                    isinstance(host, str)
+                    and re.fullmatch(r"[a-z0-9-]+\.postgres\.database\.azure\.com", host)
+                    and type(port) is int
+                    and port == 5432
+                    and properties["tlsRequired"] is True
+                    and isinstance(server_id, str)
+                    and server_id.lower().startswith(expected_server.lower())
+                    and SLUG.fullmatch(server_id[len(expected_server) :]),
+                    "azure_parent_radius_binding_mismatch",
+                )
+                server = self.azure_json(
+                    "postgres",
+                    "flexible-server",
+                    "show",
+                    "--ids",
+                    server_id,
+                    "--query",
+                    "{id:id,host:fullyQualifiedDomainName,network:network,tags:tags,state:state}",
+                )
+                vnet_id = (
+                    f"/subscriptions/{self.config.subscription}/resourceGroups/"
+                    f"rg-{self.config.stem}-platform/providers/Microsoft.Network/"
+                    f"virtualNetworks/vnet-{self.config.stem}"
+                )
+                subnet_id = vnet_id + "/subnets/snet-" + parent_slot + "-postgresql"
+                require(
+                    server["id"].lower() == server_id.lower()
+                    and server["host"] == host
+                    and server["state"] == "Ready"
+                    and server["network"]["publicNetworkAccess"] == "Disabled"
+                    and server["network"]["delegatedSubnetResourceId"].lower() == subnet_id.lower()
+                    and server["tags"]["radapp.io-resource"].lower() == resource_id.lower()
+                    and server["tags"]["radapp.io-environment"].lower()
+                    == properties["environment"].lower()
+                    and server["tags"]["radapp.io-application"].lower()
+                    == properties["application"].lower(),
+                    "azure_parent_server_owner_mismatch",
+                )
+                vnet = self.azure_json(
+                    "network", "vnet", "show", "--ids", vnet_id, "--query", "{id:id,tags:tags}"
+                )
+                require(
+                    vnet["id"].lower() == vnet_id.lower()
+                    and vnet["tags"].get("project") == self.project
+                    and vnet["tags"].get("deployment") == self.config.deployment
+                    and vnet["tags"].get("environment") == "azure",
+                    "azure_parent_network_owner_mismatch",
+                )
+                subnet = self.azure_json(
+                    "network",
+                    "vnet",
+                    "subnet",
+                    "show",
+                    "--ids",
+                    subnet_id,
+                    "--query",
+                    "{id:id,addressPrefix:addressPrefix,addressPrefixes:addressPrefixes,"
+                    "delegations:delegations}",
+                )
+                allowed = subnet.get("addressPrefixes") or [subnet["addressPrefix"]]
+                require(
+                    subnet["id"].lower() == subnet_id.lower()
+                    and len(allowed) == 1
+                    and any(
+                        item.get("serviceName") == "Microsoft.DBforPostgreSQL/flexibleServers"
+                        for item in subnet["delegations"]
+                    ),
+                    "azure_parent_subnet_mismatch",
+                )
+                network = ipaddress.ip_network(allowed[0], strict=True)
+                require(
+                    network.version == 4
+                    and network.prefixlen == 27
+                    and network.network_address.is_private
+                    and not (
+                        network.network_address.is_loopback or network.network_address.is_link_local
+                    ),
+                    "azure_parent_subnet_scope_mismatch",
+                )
+                owner["subnet_id"] = subnet_id
+            child_kube = self.kube(target)
+            child_kube.verify_scope()
+            binding = child_kube.exec_json(
+                component, PARENT_BINDING_PROBE, COMPONENT_DSN[component]
+            )
+            require(
+                binding
+                == {
+                    "host": host,
+                    "port": port,
+                    "sslmode": "disable" if self.environment == "local" else "verify-full",
+                },
+                "runtime_parent_binding_mismatch",
+            )
+            updated = replace(
+                target,
+                parent={"host": host, "port": port, "allowed_cidrs": allowed, "owner": owner},
+                local=local,
+            )
+        except (KeyError, TypeError, ValueError):
+            raise AcceptanceError("parent_discovery_response_invalid") from None
+        if target.parent:
+            require(updated == target, "parent_owner_or_binding_changed")
+        self.targets[slot] = updated
+        return updated
+
+    def azure_json(self, *args):
+        raw = self.command(
+            [
+                "az",
+                *args,
+                "--subscription",
+                self.config.subscription,
+                "--output",
+                "json",
+                "--only-show-errors",
+            ]
+        )
+        try:
+            result = json.loads(raw)
+        except ValueError:
+            raise AcceptanceError("azure_parent_response_invalid") from None
+        require(isinstance(result, dict), "azure_parent_response_invalid")
+        return result
+
+
 def command(argv: list[str], *, payload: str | None = None, timeout: float = 30) -> str:
     try:
         result = subprocess.run(
@@ -386,9 +883,20 @@ class Kubectl:
         namespace = self.json("get", "namespace", self.target.namespace)
         require(cluster["metadata"]["uid"] == self.target.cluster_uid, "cluster_uid_mismatch")
         require(namespace["metadata"]["uid"] == self.target.namespace_uid, "namespace_uid_mismatch")
+        require(
+            all(
+                namespace["metadata"].get("labels", {}).get(key) == value
+                for key, value in getattr(self.target, "ownership", {}).items()
+            ),
+            "namespace_ownership_mismatch",
+        )
 
     def labels(self, component: str) -> dict[str, str]:
-        return {"plane-demo/project": self.target.project, "plane-demo/component": component}
+        return {
+            "plane-demo/project": self.target.project,
+            **getattr(self.target, "ownership", {}),
+            "plane-demo/component": component,
+        }
 
     def deployment(self, component: str) -> dict:
         configured = self.target.component(component)
@@ -457,10 +965,22 @@ class Kubectl:
         except ValueError:
             raise AcceptanceError("invalid_pod_probe_response") from None
 
-    def policies(self, exclude: str | None = None) -> list[dict]:
+    def policies(self, exclude: str | None = None, *, reject_faults=False) -> list[dict]:
         policies = []
         for resource in ("networkpolicies.networking.k8s.io", POLICY_RESOURCE):
             for item in self.json("get", resource).get("items", []):
+                if reject_faults:
+                    metadata = item["metadata"]
+                    labels = metadata.get("labels", {})
+                    annotations = metadata.get("annotations", {})
+                    require(
+                        not metadata["name"].startswith("plane-demo-fault-")
+                        and "plane-demo/fault-run" not in labels
+                        and not labels.get("plane-demo/journal", "").startswith("plane-demo-fault-")
+                        and "plane-demo/journal-uid" not in annotations
+                        and "plane-demo/rule-sha256" not in annotations,
+                        "unattempted_fault_artifact_present",
+                    )
                 if resource == POLICY_RESOURCE and item["metadata"]["name"] == exclude:
                     continue
                 policies.append(
@@ -474,6 +994,353 @@ class Kubectl:
                     }
                 )
         return sorted(policies, key=lambda value: (value["kind"], value["name"]))
+
+
+def canonical_json(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def intent_fingerprint(record, kind):
+    fields = (
+        ("run_id", "project", "environment", "mode", "source")
+        if kind == "acceptance"
+        else (
+            "run_id",
+            "project",
+            "environment",
+            "slot",
+            "component",
+            "cluster_uid",
+            "namespace_uid",
+            "parent",
+            "pod_uid",
+            "node",
+            "sandbox",
+            "rule",
+            "original_rules_sha256",
+            "original_policies",
+            "baseline",
+        )
+    )
+    intent = {key: record.get(key) for key in fields}
+    if kind == "fault":
+        intent["policy_spec"] = record.get("policy", {}).get("spec")
+    return hashlib.sha256(canonical_json(intent).encode()).hexdigest()
+
+
+class ConfigMapJournal:
+    """Namespace-owned, UID-bound records with optimistic concurrency and immutable intent."""
+
+    def __init__(self, kube, name, kind):
+        require(kind in {"fault", "acceptance"}, "journal_kind_invalid")
+        pattern = (
+            r"plane-demo-fault-(?:control|data)-reconciler"
+            if kind == "fault"
+            else r"plane-demo-acceptance-[a-f0-9]{32}"
+        )
+        require(isinstance(name, str) and re.fullmatch(pattern, name), "journal_name_invalid")
+        self.kube, self.name, self.kind = kube, name, kind
+        self.uid = self.version = self.snapshot = self.intent = None
+        self.record = None
+        self.claimed_by = None
+        self.updated_at = None
+        self.sealed = False
+
+    @property
+    def reference(self):
+        require(self.uid is not None and self.record is not None, "journal_not_committed")
+        return f"{self.name}@{self.uid}@{self.record['run_id']}"
+
+    @property
+    def owner(self):
+        target = self.kube.target
+        return [
+            {
+                "apiVersion": "v1",
+                "kind": "Namespace",
+                "name": target.namespace,
+                "uid": target.namespace_uid,
+                "controller": False,
+                "blockOwnerDeletion": False,
+            }
+        ]
+
+    @property
+    def labels(self):
+        return {
+            **self.kube.target.ownership,
+            "plane-demo/project": self.kube.target.project,
+            "plane-demo/journal-kind": self.kind,
+        }
+
+    def _decode(self, value, *, unsealed=False):
+        try:
+            metadata, data = value["metadata"], value["data"]
+            annotations = metadata["annotations"]
+            require(
+                value["apiVersion"] == "v1"
+                and value["kind"] == "ConfigMap"
+                and metadata["name"] == self.name
+                and metadata["namespace"] == self.kube.target.namespace
+                and metadata["labels"] == self.labels
+                and metadata["ownerReferences"] == self.owner
+                and annotations["plane-demo/cluster-uid"] == self.kube.target.cluster_uid
+                and annotations["plane-demo/namespace-uid"] == self.kube.target.namespace_uid
+                and UID.fullmatch(metadata["uid"])
+                and isinstance(metadata["resourceVersion"], str)
+                and 0 < len(metadata["resourceVersion"]) <= 128
+                and not metadata.get("deletionTimestamp")
+                and set(data) == {"record.json"}
+                and not value.get("binaryData"),
+                "journal_ownership_mismatch",
+            )
+            require(
+                annotations.get("plane-demo/journal-uid") == metadata["uid"]
+                or (unsealed and "plane-demo/journal-uid" not in annotations),
+                "journal_uid_changed_or_unsealed",
+            )
+            updated = datetime.fromisoformat(annotations["plane-demo/updated-at"])
+            require(updated.tzinfo is not None, "journal_timestamp_invalid")
+            raw = data["record.json"]
+            require(
+                isinstance(raw, str) and len(raw.encode()) <= 750_000, "journal_record_too_large"
+            )
+            record = json.loads(raw)
+            require(
+                isinstance(record, dict)
+                and canonical_json(record) == raw
+                and record.get("version") == 1
+                and record.get("project") == self.kube.target.project
+                and record.get("environment")
+                == self.kube.target.ownership["plane-demo/environment"]
+                and isinstance(record.get("run_id"), str)
+                and re.fullmatch(
+                    r"[a-f0-9]{12}" if self.kind == "fault" else r"[a-f0-9]{32}", record["run_id"]
+                )
+                and hashlib.sha256(raw.encode()).hexdigest()
+                == annotations["plane-demo/record-sha256"]
+                and intent_fingerprint(record, self.kind)
+                == annotations["plane-demo/intent-sha256"],
+                "journal_record_fingerprint_mismatch",
+            )
+            if self.kind == "fault":
+                require(
+                    record.get("slot") == self.kube.target.slot
+                    and record.get("cluster_uid") == self.kube.target.cluster_uid
+                    and record.get("namespace_uid") == self.kube.target.namespace_uid
+                    and self.name == "plane-demo-fault-" + record.get("component", ""),
+                    "journal_fault_target_mismatch",
+                )
+            require(self.uid is None or metadata["uid"] == self.uid, "journal_uid_changed")
+            return record
+        except (KeyError, TypeError, ValueError):
+            raise AcceptanceError("journal_record_invalid") from None
+
+    def _remember(self, value, *, unsealed=False):
+        self.record = self._decode(value, unsealed=unsealed)
+        metadata = value["metadata"]
+        self.uid, self.version = metadata["uid"], metadata["resourceVersion"]
+        self.snapshot = canonical_json(value)
+        self.intent = metadata["annotations"]["plane-demo/intent-sha256"]
+        self.claimed_by = metadata["annotations"].get("plane-demo/continued-by")
+        self.updated_at = metadata["annotations"]["plane-demo/updated-at"]
+        self.sealed = metadata["annotations"].get("plane-demo/journal-uid") == self.uid
+
+    def load(self, reference=None, *, allow_unsealed_pre_mutation=False):
+        self.kube.verify_scope()
+        value = self.kube.optional("configmap", self.name)
+        require(value is not None, "journal_not_found")
+        self._remember(value, unsealed=allow_unsealed_pre_mutation)
+        if not self.sealed:
+            self.require_unsealed_pre_mutation()
+        if reference is not None:
+            pieces = str(reference).split("@")
+            require(
+                1 <= len(pieces) <= 3
+                and pieces[0] == self.name
+                and (len(pieces) < 2 or pieces[1] == self.uid)
+                and (len(pieces) < 3 or pieces[2] == self.record["run_id"]),
+                "journal_reference_changed",
+            )
+        return self.record
+
+    def require_unsealed_pre_mutation(self):
+        require(
+            self.kind == "fault"
+            and not self.sealed
+            and self.record.get("outcome") == "preparing"
+            and self.record.get("creation_attempted") is False
+            and self.record.get("restored") is False
+            and not self.record.get("physical_restored")
+            and not any(
+                key in self.record
+                for key in (
+                    "policy",
+                    "rule",
+                    "policy_uid",
+                    "blocked_at",
+                    "restored_at",
+                    "restoration_started_at",
+                    "physical_restored_at",
+                )
+            ),
+            "unsealed_journal_not_pre_mutation",
+        )
+
+    def check(self, *, allow_unsealed_pre_mutation=False):
+        require(self.snapshot is not None, "journal_not_committed")
+        self.kube.verify_scope()
+        current = self.kube.optional("configmap", self.name)
+        require(current is not None, "journal_disappeared")
+        self._decode(current, unsealed=allow_unsealed_pre_mutation)
+        if not self.sealed:
+            require(allow_unsealed_pre_mutation, "journal_not_committed")
+            self.require_unsealed_pre_mutation()
+        require(canonical_json(current) == self.snapshot, "journal_changed")
+        require(self.claimed_by is None, "journal_already_continued")
+
+    def _object(self, record):
+        raw = canonical_json(record)
+        require(len(raw.encode()) <= 750_000, "journal_record_too_large")
+        target = self.kube.target
+        annotations = {
+            "plane-demo/cluster-uid": target.cluster_uid,
+            "plane-demo/namespace-uid": target.namespace_uid,
+            "plane-demo/record-sha256": hashlib.sha256(raw.encode()).hexdigest(),
+            "plane-demo/intent-sha256": intent_fingerprint(record, self.kind),
+            "plane-demo/updated-at": utc_now(),
+        }
+        metadata = {
+            "name": self.name,
+            "namespace": target.namespace,
+            "labels": self.labels,
+            "ownerReferences": self.owner,
+            "annotations": annotations,
+        }
+        if self.uid is not None:
+            metadata.update(uid=self.uid, resourceVersion=self.version)
+            annotations["plane-demo/journal-uid"] = self.uid
+        if self.claimed_by:
+            annotations["plane-demo/continued-by"] = self.claimed_by
+        return {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": metadata,
+            "data": {"record.json": raw},
+        }
+
+    def _submit(self, record, verb, *, unsealed=False):
+        intended = self._object(record)
+        try:
+            actual = json.loads(
+                self.kube.run(verb, "-f", "-", "-o", "json", payload=canonical_json(intended))
+            )
+        except ValueError:
+            raise AcceptanceError("journal_write_response_invalid") from None
+        self._decode(actual, unsealed=unsealed)
+        require(
+            actual["data"] == intended["data"]
+            and actual["metadata"]["annotations"] == intended["metadata"]["annotations"],
+            "journal_write_content_mismatch",
+        )
+        self._remember(actual, unsealed=unsealed)
+
+    def start(self, record, *, reuse_restored=False):
+        self.kube.verify_scope()
+        existing = self.kube.optional("configmap", self.name)
+        if existing is not None:
+            self._remember(existing)
+            require(
+                self.kind == "fault"
+                and reuse_restored
+                and self.record.get("restored") is True
+                and self.record.get("physical_restored") is True,
+                "journal_exists_restore_required",
+            )
+            self.check()
+            self._submit(record, "replace")
+        else:
+            # No fault mutation is permitted until this UID seal has been acknowledged.
+            self._submit(record, "create", unsealed=True)
+            self._submit(record, "replace")
+
+    def save(self, record):
+        self.check()
+        require(intent_fingerprint(record, self.kind) == self.intent, "journal_intent_changed")
+        self._submit(record, "replace")
+
+    def cancel_unsealed(self, record):
+        self.require_unsealed_pre_mutation()
+        self.check(allow_unsealed_pre_mutation=True)
+        require(
+            record.get("outcome") == "cancelled_before_mutation"
+            and record.get("creation_attempted") is False
+            and record.get("restored") is True
+            and record.get("physical_restored") is True
+            and intent_fingerprint(record, self.kind) == self.intent,
+            "unsealed_journal_cancellation_invalid",
+        )
+        self._submit(record, "replace")
+
+    def commit_fault(self, record):
+        self.check()
+        require(
+            self.kind == "fault"
+            and self.record.get("creation_attempted") is False
+            and not self.record.get("restored")
+            and record.get("creation_attempted") is True
+            and intent_fingerprint({**record, "policy": {}, "rule": None}, self.kind)
+            == self.intent,
+            "journal_fault_prepare_changed",
+        )
+        self._submit(record, "replace")
+
+    def claim_continuation(self, run_id):
+        require(
+            self.kind == "acceptance" and re.fullmatch(r"[a-f0-9]{32}", run_id),
+            "journal_claim_invalid",
+        )
+        self.check()
+        self.claimed_by = run_id
+        self._submit(self.record, "replace")
+
+
+def verify_image_mapping(running, expected, architecture, *, inspect, content, check=require):
+    reported = inspect(running).get("status", {}).get("id")
+    check(
+        isinstance(reported, str) and re.fullmatch(r"sha256:[a-f0-9]{64}", reported),
+        "local_running_image_mapping_mismatch",
+    )
+    if reported != expected:
+        manifest = content(reported)
+        if manifest.get("mediaType") in {
+            "application/vnd.oci.image.index.v1+json",
+            "application/vnd.docker.distribution.manifest.list.v2+json",
+        }:
+            check(
+                manifest.get("schemaVersion") == 2 and isinstance(manifest.get("manifests"), list),
+                "local_running_image_mapping_mismatch",
+            )
+            native = [
+                item
+                for item in manifest["manifests"]
+                if item.get("platform", {}).get("os") == "linux"
+                and item.get("platform", {}).get("architecture") == architecture
+            ]
+            check(len(native) == 1, "local_native_image_manifest_ambiguous")
+            manifest = content(native[0].get("digest"))
+        check(
+            manifest.get("schemaVersion") == 2
+            and manifest.get("mediaType")
+            in {
+                "application/vnd.oci.image.manifest.v1+json",
+                "application/vnd.docker.distribution.manifest.v2+json",
+            }
+            and manifest.get("config", {}).get("digest") == expected,
+            "local_running_image_mapping_mismatch",
+        )
+        content(expected)
+    return {"running_image_id": running, "image_id": expected}
 
 
 PROBE_CODE = r"""
@@ -668,11 +1535,16 @@ def deny_policy(target: Target, component: str, cidrs: list[str], run_id: str) -
         "metadata": {
             "name": f"plane-demo-fault-{run_id}",
             "namespace": target.namespace,
-            "labels": {"plane-demo/project": target.project, "plane-demo/fault-run": run_id},
+            "labels": {
+                **target.ownership,
+                "plane-demo/project": target.project,
+                "plane-demo/fault-run": run_id,
+            },
         },
         "spec": {
             "endpointSelector": {
                 "matchLabels": {
+                    **target.ownership,
                     "plane-demo/project": target.project,
                     "plane-demo/component": component,
                 }
@@ -698,7 +1570,7 @@ class ParentFault:
         configuration: Configuration,
         slot: str,
         component: str,
-        evidence: Path,
+        evidence: Path | None = None,
         *,
         kube_factory=Kubectl,
         probe_factory=Probe,
@@ -707,10 +1579,24 @@ class ParentFault:
     ):
         require(configuration.environment == self.environment, "fault_environment_mismatch")
         require(component in COMPONENT_DSN, "unsupported_fault_component")
-        self.target = configuration.target(slot)
+        self.configuration = configuration
+        self.target = (
+            configuration.fault_target(slot, component)
+            if configuration.live
+            else configuration.target(slot)
+        )
         self.component = component
         self.evidence_path = evidence
-        self.kube = kube_factory(self.target)
+        self.kube = (
+            configuration.kube(self.target)
+            if configuration.live and kube_factory is Kubectl
+            else kube_factory(self.target)
+        )
+        self.journal = (
+            ConfigMapJournal(self.kube, "plane-demo-fault-" + component, "fault")
+            if configuration.live
+            else None
+        )
         self.probe_factory = probe_factory
         self.clock, self.sleep = clock, sleep
         self.run_id = uuid4().hex[:12]
@@ -718,6 +1604,7 @@ class ParentFault:
             "version": 1,
             "run_id": self.run_id,
             "project": self.target.project,
+            "environment": self.environment,
             "slot": slot,
             "component": component,
             "started_at": utc_now(),
@@ -726,6 +1613,7 @@ class ParentFault:
             "probes": [],
             "cluster_uid": self.target.cluster_uid,
             "namespace_uid": self.target.namespace_uid,
+            "parent": self.target.parent,
         }
         self.probe = None
         self.created = False
@@ -738,9 +1626,19 @@ class ParentFault:
         self.recovery_deadline = None
 
     def _save(self):
-        protected_write(self.evidence_path, self.record)
+        if self.journal is None:
+            protected_write(self.evidence_path, self.record)
+        elif self.journal.uid is not None:
+            self.journal.save(self.record)
+        elif self.record.get("creation_attempted"):
+            self.journal.start(self.record, reuse_restored=True)
+
+    def check_journal(self):
+        if self.journal is not None and self.creation_attempted:
+            self.journal.check()
 
     def _check(self, action: str) -> dict:
+        self.check_journal()
         value = self.probe.request(action)
         current = sorted(value.get("ips", []))
         require(current == self.addresses, "parent_dns_changed_during_fault")
@@ -762,13 +1660,27 @@ class ParentFault:
             "cilium_policy_crd_not_ready",
         )
         self.original = self.kube.policies()
+        if self.configuration.live:
+            require(
+                not any(item["name"].startswith("plane-demo-fault-") for item in self.original),
+                "unrestored_parent_fault_present",
+            )
         self.record["original_policies"] = self.original
 
     def plan_fault(self, cidrs):
         self.policy = deny_policy(self.target, self.component, cidrs, self.run_id)
+        if self.configuration.live:
+            self.policy["metadata"]["labels"]["plane-demo/journal"] = self.journal.name
+            self.policy["metadata"]["annotations"] = {
+                "plane-demo/journal-uid": self.journal.uid,
+                "plane-demo/rule-sha256": hashlib.sha256(
+                    canonical_json(self.policy["spec"]).encode()
+                ).hexdigest(),
+            }
         self.record["policy"] = self.policy
 
     def create_fault(self):
+        self.check_journal()
         # create, never apply: an existing object must never be overwritten.
         self.kube.run("create", "-f", "-", payload=json.dumps(self.policy))
         self.created = True
@@ -776,15 +1688,30 @@ class ParentFault:
         self.record["policy_uid"] = created["metadata"]["uid"]
 
     def remove_fault(self):
+        self.check_journal()
         self.kube.verify_scope()
         name = self.policy["metadata"]["name"]
         current = self.kube.optional(POLICY_RESOURCE, name)
+        require(self.kube.policies(exclude=name) == self.original, "original_policies_changed")
         if current:
             require(
                 current["metadata"].get("labels", {}).get("plane-demo/fault-run") == self.run_id
                 and current.get("spec") == self.policy["spec"],
                 "fault_policy_ownership_changed",
             )
+            if self.configuration.live:
+                require(
+                    current["metadata"].get("namespace") == self.target.namespace
+                    and all(
+                        current["metadata"].get("labels", {}).get(key) == value
+                        for key, value in self.policy["metadata"]["labels"].items()
+                    )
+                    and current["metadata"].get("annotations", {}).get("plane-demo/rule-sha256")
+                    == self.policy["metadata"]["annotations"]["plane-demo/rule-sha256"]
+                    and current["metadata"].get("annotations", {}).get("plane-demo/journal-uid")
+                    == self.journal.uid,
+                    "fault_policy_journal_binding_changed",
+                )
             if self.record.get("policy_uid"):
                 require(
                     current["metadata"]["uid"] == self.record["policy_uid"],
@@ -818,12 +1745,19 @@ class ParentFault:
         self.addresses = sorted(baseline.get("ips", []))
         cidrs = parent_cidrs(self.target, self.addresses)
         require(self.probe.request("local").get("ok") is True, "local_baseline_not_healthy")
-        self.plan_fault(cidrs)
         self.record["baseline"] = baseline
+        if self.journal is not None:
+            self.record["outcome"] = "preparing"
+            self.record["creation_attempted"] = False
+            self.journal.start(self.record, reuse_restored=True)
+        self.plan_fault(cidrs)
         self.record["outcome"] = "activating"
-        self.creation_attempted = True
         self.record["creation_attempted"] = True
-        self._save()
+        if self.journal is not None:
+            self.journal.commit_fault(self.record)
+        else:
+            self._save()
+        self.creation_attempted = True
         self.create_fault()
         self._save()
         deadline = self.clock() + 30
@@ -845,6 +1779,7 @@ class ParentFault:
         return self
 
     def assert_blocked(self):
+        self.check_journal()
         require(
             self.kube.pod(self.component)["metadata"]["uid"] == self.pod_uid,
             "reconciler_replaced_during_fault",
@@ -856,19 +1791,29 @@ class ParentFault:
         )
 
     def restore(self):
+        if self.journal is not None and self.journal.uid is not None and not self.journal.sealed:
+            self.cancel_unsealed()
+            return
         restoration_error = None
         self.record["restored"] = False
         self.record["physical_restored"] = False
         self.record.pop("restored_at", None)
         self.record.pop("physical_restored_at", None)
+        self.record.pop("restoration_error", None)
         try:
-            if self.creation_attempted:
+            if self.creation_attempted or (
+                self.journal is not None and self.journal.uid is not None
+            ):
                 self.recovery_started = self.clock()
                 self.recovery_deadline = self.recovery_started + RECOVERY_SECONDS
                 self.record["restoration_started_at"] = utc_now()
                 self.record["recovery_started_monotonic"] = self.recovery_started
                 self.record["recovery_deadline_monotonic"] = self.recovery_deadline
-                self.remove_fault()
+                if self.creation_attempted:
+                    self.remove_fault()
+                else:
+                    self.journal.check()
+                    self.verify_unattempted()
                 if self.probe:
                     self.probe.close()
                 self.probe = self.probe_factory(
@@ -912,7 +1857,14 @@ class ParentFault:
                     if isinstance(restoration_error, AcceptanceError)
                     else "restoration_failed"
                 )
-            self._save()
+            try:
+                self._save()
+            except AcceptanceError as error:
+                restoration_error = restoration_error or error
+                self.record["restored"] = False
+                self.record.pop("restored_at", None)
+                self.record["outcome"] = "restoration_failed"
+                self.record["restoration_error"] = str(error)
             if (
                 restoration_error is None
                 and self.recovery_deadline is not None
@@ -926,6 +1878,30 @@ class ParentFault:
                 self._save()
         if restoration_error:
             raise AcceptanceError("fault_restoration_failed") from restoration_error
+
+    def verify_unattempted(self):
+        self.kube.verify_scope()
+        require(
+            self.kube.policies(reject_faults=True) == self.original, "original_policies_changed"
+        )
+        self.record["restored_policies"] = self.original
+
+    def cancel_unsealed(self):
+        self.journal.require_unsealed_pre_mutation()
+        self.journal.check(allow_unsealed_pre_mutation=True)
+        require(self.creation_attempted is False, "unsealed_journal_not_pre_mutation")
+        self.verify_unattempted()
+        cancelled_at = utc_now()
+        record = {
+            **self.record,
+            "outcome": "cancelled_before_mutation",
+            "restored": True,
+            "physical_restored": True,
+            "restored_at": cancelled_at,
+            "physical_restored_at": cancelled_at,
+        }
+        self.journal.cancel_unsealed(record)
+        self.record = record
 
     def __enter__(self):
         try:
@@ -944,33 +1920,48 @@ class ParentFault:
 
     @classmethod
     def from_evidence(cls, configuration, path: Path, **kwargs):
+        require(not configuration.live, "live_restore_requires_journal_reference")
         path = state_path(path)
         require(path.is_relative_to(configuration.root / "evidence"), "restore_evidence_scope")
         record = read_json(path)
         require(record.get("version") == 1, "unsupported_fault_evidence_version")
         fault = cls(configuration, record["slot"], record["component"], path, **kwargs)
+        fault.restore_record(record)
+        return fault
+
+    @classmethod
+    def from_journal(cls, configuration, slot, component, reference=None, **kwargs):
+        require(configuration.live, "live_configuration_required")
+        fault = cls(configuration, slot, component, **kwargs)
+        record = fault.journal.load(reference, allow_unsealed_pre_mutation=True)
+        fault.restore_record(record)
+        return fault
+
+    def restore_record(self, record):
         require(
-            record.get("project") == fault.target.project
-            and record.get("cluster_uid") == fault.target.cluster_uid
-            and record.get("namespace_uid") == fault.target.namespace_uid,
+            record.get("project") == self.target.project
+            and record.get("cluster_uid") == self.target.cluster_uid
+            and record.get("namespace_uid") == self.target.namespace_uid,
             "restore_target_identity_changed",
         )
-        expected = deny_policy(
-            fault.target,
-            fault.component,
-            parent_cidrs(fault.target, record["baseline"]["ips"]),
-            record["run_id"],
-        )
+        if self.configuration.live:
+            require(
+                record.get("parent") == self.target.parent
+                and record.get("environment") == self.environment,
+                "restore_parent_binding_changed",
+            )
+        self.run_id = record["run_id"]
+        self.plan_fault(parent_cidrs(self.target, record["baseline"]["ips"]))
+        attempted = record.get("creation_attempted")
         require(
-            record.get("policy") == expected and record.get("creation_attempted") is True,
+            type(attempted) is bool
+            and (record.get("policy") == self.policy if attempted else "policy" not in record),
             "restore_policy_contract_mismatch",
         )
-        fault.record = record
-        fault.run_id = record["run_id"]
-        fault.policy = expected
-        fault.original = record["original_policies"]
-        fault.creation_attempted = True
-        return fault
+        self.record = record
+        self.original = record["original_policies"]
+        self.pod_uid = record["pod_uid"]
+        self.creation_attempted = attempted
 
 
 def fault_class(configuration):
@@ -979,7 +1970,7 @@ def fault_class(configuration):
     name = "plane_demo_local_fault_" + __name__
     if name not in sys.modules:
         spec = importlib.util.spec_from_file_location(
-            name, ROOT / "scripts/harness/local/fault-parent-link.py"
+            name, Path(__file__).parent / "local/fault-parent-link.py"
         )
         module = importlib.util.module_from_spec(spec)
         module.base = sys.modules[__name__]
@@ -1003,26 +1994,56 @@ def interruption_is_failure():
             signal.signal(value, handler)
 
 
-def main(argv=None) -> int:
+def main(argv=None, *, configuration_factory=LiveConfiguration) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--config", type=Path, default=ROOT / ".env", help="Checkout .env only")
     parser.add_argument("--slot")
     parser.add_argument("--component", choices=tuple(COMPONENT_DSN))
-    parser.add_argument("--restore", type=Path, help="Restore only this recorded, owned fault")
+    parser.add_argument(
+        "--restore",
+        type=Path,
+        nargs="?",
+        const=Path("active"),
+        help="Restore the slot/component's owned journal, optionally NAME@UID@RUN_ID",
+    )
     parser.add_argument("--duration", type=int, default=60)
     parser.add_argument("--execute", action="store_true", required=True)
     args = parser.parse_args(argv)
+    configuration = None
     try:
         require(60 <= args.duration <= 600, "fault_duration_must_be_60_to_600_seconds")
-        configuration = Configuration(args.config)
+        configuration = configuration_factory(args.config)
         selected_fault = fault_class(configuration)
         if args.restore:
             with interruption_is_failure():
-                fault = selected_fault.from_evidence(configuration, args.restore)
+                if configuration.live:
+                    require(bool(args.slot) and bool(args.component), "slot_and_component_required")
+                    fault = selected_fault.from_journal(
+                        configuration,
+                        args.slot,
+                        args.component,
+                        None if str(args.restore) == "active" else str(args.restore),
+                    )
+                    if fault.journal.sealed:
+                        fault.record["outcome"] = "restored_only"
+                else:
+                    fault = selected_fault.from_evidence(configuration, args.restore)
                 fault.restore()
             print(
                 json.dumps(
-                    {"outcome": "restored_only_not_acceptance", "evidence": str(args.restore)}
+                    {
+                        "outcome": (
+                            "cancelled_before_mutation"
+                            if configuration.live
+                            and fault.record.get("outcome") == "cancelled_before_mutation"
+                            else "restored_only_not_acceptance"
+                        ),
+                        **(
+                            {"journal": fault.journal.reference}
+                            if configuration.live
+                            else {"evidence": str(args.restore)}
+                        ),
+                    }
                 )
             )
             return 0
@@ -1041,11 +2062,34 @@ def main(argv=None) -> int:
                 while time.monotonic() < deadline:
                     fault.assert_blocked()
                     time.sleep(min(5, max(0, deadline - time.monotonic())))
-        print(json.dumps({"outcome": "fault_verified_and_restored", "evidence": str(evidence)}))
+        print(
+            json.dumps(
+                {
+                    "outcome": "fault_verified_and_restored",
+                    **(
+                        {"journal": fault.journal.reference}
+                        if configuration.live
+                        else {"evidence": str(evidence)}
+                    ),
+                }
+            )
+        )
         return 0
-    except Exception:
-        print(json.dumps({"outcome": "failed", "error": "parent_fault_failed"}))
+    except Exception as error:
+        print(
+            json.dumps(
+                {
+                    "outcome": "failed",
+                    "error": str(error)
+                    if isinstance(error, AcceptanceError)
+                    else "parent_fault_failed",
+                }
+            )
+        )
         return 1
+    finally:
+        if configuration is not None and configuration.live:
+            configuration.close()
 
 
 if __name__ == "__main__":
