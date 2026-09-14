@@ -125,6 +125,7 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F090 | 7 | Medium documentation | `docs/local-provider.md` | Fresh-run prerequisites | Fixed state paths make the retained historical checkout unsuitable for the fresh command sequence | Require a new clone/worktree without `.state/local`, preserve original evidence, and verify old cluster absence before using shared names/ports |
 | F091 | 7 | Medium documentation | `docs/local-provider.md` | Docker host scope | Generic Docker Desktop wording hides the deliberately account-specific socket endpoint | State the exact verified-host socket and non-portable-host scope; no global defaults or runtime endpoint behavior changed |
 | F092 | State removal | Medium correctness | `src/plane_demo/setup/bootstrap.py` | Schema contract fingerprint | A definition-only fingerprint could miss disabled triggers or invalid/not-ready indexes | Include trigger enabled state and index validity/readiness; actual disabled-trigger, replaced-index, and failed-concurrent-index cases reject initialization; both fix reviews pass |
+| F093 | State removal | Medium correctness | `src/plane_demo/management/providers/secret_store.py` | Demo-key validation | Generic password validation admitted API keys that HTTP serialization/authentication cannot use | Validate supplied and stored demo keys as visible ASCII, while retaining PostgreSQL password character support; 386 offline tests and both fix reviews pass before caller integration |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -1703,3 +1704,26 @@ reviews were clean; the fix rubber-duck review was clean.
 The disposable container was removed by its exact recorded ID and absence was
 checked. The image was a pinned test dependency, not a rebuilt demo image or
 a deployed environment. The broader state-removal implementation remains active.
+
+### Service-owned credential primitives, 2026-09-14
+
+The new credential-store module provides exact-name Key Vault and Kubernetes
+get/create operations for the privileged provisioner. Existing owned values are
+reused without rotation. Explicit mismatches, missing required existing values,
+foreign ownership, and backend failures are reported. Key Vault creation requires
+the caller's singleton-writer contract; its versioned set API is not represented
+as distributed compare-and-swap. Kubernetes uses immutable Secret creation and
+handles conflicting creation by reading and validating the actual owned record.
+Azure SDK imports are lazy so local use does not import Azure dependencies.
+
+The initial security review was clean. Rubber-duck review found F093: API keys
+need header-compatible validation that does not apply to PostgreSQL passwords.
+Both read paths and supplied/generated API keys now enforce that distinction.
+The 386 offline cases include actual HTTPX/HTTP serialization and the existing
+API authentication path, ownership/refusal behavior, and secret redaction.
+Ruff and both fix reviews passed.
+
+These are library primitives, not completed provider integration. Filesystem
+credential consumers still need to be rewired before claiming an empty-worker
+or fresh-checkout deployment passes. No Azure secret or deployed Kubernetes
+Secret was created by these tests.
