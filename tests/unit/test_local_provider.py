@@ -21,7 +21,12 @@ from plane_demo.management.providers.commands import Commands
 from plane_demo.management.providers.credentials import Credentials, database_dsn
 from plane_demo.management.providers.local import LocalProvider
 from plane_demo.management.providers.local_config import ACCESS_NAMESPACE, SCOPE, SLOTS, LocalConfig
-from plane_demo.management.provisioning import Cluster, ProvisioningError, provision_pair
+from plane_demo.management.provisioning import (
+    Cluster,
+    PairResult,
+    ProvisioningError,
+    provision_pair,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 CA = b"synthetic-ca"
@@ -307,19 +312,121 @@ def test_local_database_never_disables_tls_by_omission(mutation):
         database_dsn(properties, "mgmt_api", PASSWORD, environment="local")
 
 
-def test_second_shared_tenant_reuses_pair_without_provider_commands(provider, config):
+def test_second_shared_tenant_reuses_live_pair_without_creating_resources(
+    provider, config, monkeypatch
+):
     first = inventory(config, available=True)
+    live = PairResult(**{key: first.pop(key) for key in PairResult.__dataclass_fields__})
+    inspect = MagicMock(return_value=live)
+    monkeypatch.setattr(provider, "inspect_pair", inspect)
     result = provision_pair(operation(), provider, first, lambda _: None)
     second = provision_pair(operation(), provider, first, lambda _: None)
-    assert first["control_url"] == result.control_url == second.control_url
+    assert live.control_url == result.control_url == second.control_url
+    assert inspect.call_count == 2
     provider.commands.run.assert_not_called()
 
 
-def test_available_pair_mismatch_does_not_try_infrastructure(provider, config):
+def test_available_pair_mismatch_does_not_try_infrastructure(provider, config, monkeypatch):
     pair = inventory(config, available=True)
-    pair["data_cluster_id"] = "kind://radplanes-local-isolated-1-data"
+    monkeypatch.setattr(
+        provider,
+        "inspect_pair",
+        lambda _: PairResult(
+            pair["control_cluster_id"],
+            "kind://radplanes-local-isolated-1-data",
+            pair["control_url"],
+            pair["data_url"],
+        ),
+    )
     with pytest.raises(ProvisioningError, match="pair_inventory_mismatch"):
         provision_pair(operation(), provider, pair, lambda _: None)
+    provider.commands.run.assert_not_called()
+
+
+def test_local_available_pair_discovers_gateway_values_again(provider, config, monkeypatch):
+    reads = []
+
+    def resource(slot, kind, name, application):
+        reads.append((slot, kind, name, application))
+        if kind == "cluster":
+            return {
+                "clusterId": config.expected_cluster_id(name),
+                "provisioningState": "Succeeded",
+                "application": f"{SCOPE}/providers/Applications.Core/applications/{application}",
+                "environment": f"{SCOPE}/providers/Applications.Core/environments/provision-{name}",
+            }
+        return {
+            "url": f"http://127.0.0.1:{config.allocation(slot)['gatewayPort']}",
+            "provisioningState": "Succeeded",
+            "application": f"{SCOPE}/providers/Applications.Core/applications/{application}",
+            "environment": f"{SCOPE}/providers/Applications.Core/environments/{slot}",
+        }
+
+    monkeypatch.setattr(provider, "resource", resource)
+    monkeypatch.setattr(
+        provider,
+        "get_access",
+        lambda slot: SimpleNamespace(cluster_id=config.expected_cluster_id(slot)),
+    )
+    pair = {
+        "pair_id": "shared",
+        "isolation": "shared",
+        "reporting_role": "cp_shared",
+        "stage": "available",
+    }
+    first = provision_pair(operation(), provider, pair, lambda _: None)
+    second = provision_pair(operation(), provider, pair, lambda _: None)
+    assert first == second
+    assert len(reads) == 8
+    assert first.data_url == "http://127.0.0.1:35492"
+    provider.commands.run.assert_not_called()
+
+
+@pytest.mark.parametrize("kind", ["Demo.Platform/clusters", "Demo.Platform/gateways"])
+@pytest.mark.parametrize("field", ["application", "environment"])
+@pytest.mark.parametrize("foreign", [None, "/planes/radius/local/resourceGroups/foreign"])
+def test_worker_refuses_wrong_live_radius_owners(provider, monkeypatch, kind, field, foreign):
+    pending = operation()
+    store = MagicMock()
+    store.claim_pending.return_value = pending
+    store.connection.execute.return_value.fetchone.return_value = {
+        "pair_id": "shared",
+        "isolation": "shared",
+        "reporting_role": "cp_shared",
+        "stage": "available",
+    }
+
+    def rad(slot, *args):
+        resource_kind, name = args[2:4]
+        application = args[args.index("--application") + 1]
+        properties = {
+            "provisioningState": "Succeeded",
+            "application": f"{SCOPE}/providers/Applications.Core/applications/{application}",
+            "environment": f"{SCOPE}/providers/Applications.Core/environments/"
+            + (f"provision-{name}" if resource_kind.endswith("/clusters") else slot),
+        }
+        if resource_kind.endswith("/clusters"):
+            properties["clusterId"] = provider.expected_cluster_id(name)
+        else:
+            properties["url"] = (
+                f"http://127.0.0.1:{provider.config.allocation(slot)['gatewayPort']}"
+            )
+        if resource_kind == kind:
+            properties[field] = foreign
+        return json.dumps({"properties": properties})
+
+    monkeypatch.setattr(provider, "rad", rad)
+    monkeypatch.setattr(
+        provider,
+        "get_access",
+        lambda slot: SimpleNamespace(cluster_id=provider.expected_cluster_id(slot)),
+    )
+    assert provisioner.run_once(store, provider)
+    store.complete.assert_not_called()
+    assert store.observe.call_args.kwargs == {
+        "status": "failed",
+        "error_code": "pair_owner_mismatch",
+    }
     provider.commands.run.assert_not_called()
 
 

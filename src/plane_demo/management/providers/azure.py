@@ -24,6 +24,7 @@ from plane_demo.management.providers.redis_nic_tags import BASE_TAGS, ERRORS, Ta
 from plane_demo.management.provisioning import (
     Cluster,
     OperatorConfig,
+    PairResult,
     ProvisioningError,
     endpoint,
     plain,
@@ -280,6 +281,11 @@ class AzureProvider:
             f"managedClusters/{allocation['clusterName']}",
             context,
             kubeconfig,
+        )
+
+    def inspect_pair(self, pair_id: str) -> PairResult:
+        return workloads.inspect_pair(
+            self, pair_id, "/planes/radius/local/resourceGroups/radplanes"
         )
 
     def connect_management(self) -> None:

@@ -29,7 +29,7 @@ from plane_demo.management.providers.local_config import (
     private_ipv4,
     same_radius_id,
 )
-from plane_demo.management.provisioning import Cluster, ProvisioningError
+from plane_demo.management.provisioning import Cluster, PairResult, ProvisioningError
 
 TYPES = {
     "cluster": "Demo.Platform/clusters",
@@ -160,6 +160,9 @@ class LocalProvider:
 
     def paths(self, slot: str) -> tuple[str, Path]:
         return self.config.allocation(slot)["context"], self.state / f"{slot}.kubeconfig"
+
+    def inspect_pair(self, pair_id: str) -> PairResult:
+        return workloads.inspect_pair(self, pair_id, SCOPE)
 
     @staticmethod
     def names(slot: str) -> tuple[str, str]:

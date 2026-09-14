@@ -132,6 +132,7 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F097 | Local bootstrap | Medium correctness | `scripts/operations/local/encryption.sh` | Deadlines and cleanup | Host-only timeout did not bound node mutation; failed verification left synthetic probes | Bound both node mutations, terminate owned host process groups, and clean probes with UID-preconditioned DELETE while preserving the original error; fix reviews pass |
 | F098 | Local bootstrap | High correctness | `scripts/operations/local/encryption.sh` | Static Pod conversion | Dropping container ports broke kind's named `probe-port` startup/readiness probes | Preserve ports with probe definitions; actual helper install, reuse, node restart, ciphertext/decryption, and probe removal pass on kind 1.35 |
 | F099 | Local bootstrap | High correctness | `scripts/operations/local/bootstrap.py` | Scoped command environment | Encryption helper could not find Docker Desktop's context inside the operator's isolated HOME | Forward the already-resolved Docker socket explicitly; caller and empty-HOME helper regressions and both fix reviews pass |
+| F100 | Live pair discovery | Medium correctness | `src/plane_demo/management/providers/workloads.py` | Shared-pair reuse | Radius `resource show --application` does not establish resource ownership | Check returned cluster and gateway application/environment IDs; worker-level regressions through both provider parsers and both fix reviews pass |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -1786,3 +1787,23 @@ its targeted tests and both reviews. These are local verification results;
 GitHub Actions is not a delivery gate for this POC. Full `.env` deployment
 integration, service-owned credential wiring, and fresh Azure/local scenario
 proof remain in progress.
+
+### Logical placement without database endpoint inventory
+
+Management pairs now retain only logical placement and stage. The schema has no
+control/data cluster-ID or URL columns, operation completion records status only,
+and the tenant API no longer returns saved endpoint URLs. Available-pair reuse
+reads current Radius cluster and gateway resources instead of trusting stored
+discovery metadata. It checks expected cluster identity, provisioning status, and
+application/environment ownership without redeploying the pair.
+
+Rubber-duck review found F100. The correction checks returned owner IDs explicitly.
+Sixteen worker-level rejection cases use both real provider parsers and verify
+that missing or foreign owners produce a stable failure rather than operation
+completion. The targeted suite passed 265 tests. Both fix reviews passed.
+
+Forty-five integration tests passed against disposable PostgreSQL 17.8, including
+the exact management-pair column set, real status-only operation completion,
+tenant routes, initialization, reconciliation, and RLS. The test container was
+removed and its absence checked. These results do not claim a new Azure or
+full local deployment; harness and provider state-removal integration continues.

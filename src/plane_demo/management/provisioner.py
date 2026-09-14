@@ -7,7 +7,6 @@ import logging
 import os
 import signal
 import time
-from dataclasses import asdict
 from pathlib import Path
 
 import psycopg
@@ -29,10 +28,9 @@ def check_session(operations) -> None:
 
 
 def read_pair(operations, pair_id: str) -> dict:
-    """Read inventory on the singleton session; operation writes stay in db.py."""
+    """Read logical placement on the singleton session; operation writes stay in db.py."""
     pair = operations.connection.execute(
-        "SELECT pair_id,isolation,reporting_role,stage,control_cluster_id,"
-        "data_cluster_id,control_url,data_url FROM management.pairs WHERE pair_id=%s",
+        "SELECT pair_id,isolation,reporting_role,stage FROM management.pairs WHERE pair_id=%s",
         (pair_id,),
     ).fetchone()
     if pair is None:
@@ -54,7 +52,7 @@ def run_once(operations, provider) -> bool:
 
     try:
         pair = read_pair(operations, operation.pair_id)
-        result = provision_pair(operation, provider, pair, observe)
+        provision_pair(operation, provider, pair, observe)
     except psycopg.Error:
         raise
     except Exception as error:
@@ -68,7 +66,7 @@ def run_once(operations, provider) -> bool:
         )
         operations.observe(operation.operation_id, stage, status="failed", error_code=code)
         return True
-    operations.complete(operation.operation_id, **asdict(result))
+    operations.complete(operation.operation_id)
     return True
 
 

@@ -319,11 +319,12 @@ Expect three exported slots. Control should become `applied`; data should
 return `alpha`, version 1, and counter 0. Match the `onboarding_id` across
 the three APIs.
 
-Save the placement for the reuse check:
+Save the logical placement for the reuse check. Management does not store or
+return endpoint URLs; endpoint and cluster discovery use provider APIs.
 
 ```bash
 api management GET /tenants/shared-a \
-  | jq '{pair_id, control_url, data_url}' > "$STATE/manual/shared-pair.json"
+  | jq '{pair_id}' > "$STATE/manual/shared-pair.json"
 ```
 
 #### Optional admission checks
@@ -385,7 +386,7 @@ Wait for `applied` and the `bravo` response, then compare placement:
 
 ```bash
 api management GET /tenants/shared-b \
-  | jq '{pair_id, control_url, data_url}' > "$STATE/manual/shared-b-pair.json"
+  | jq '{pair_id}' > "$STATE/manual/shared-b-pair.json"
 diff -u "$STATE/manual/shared-pair.json" "$STATE/manual/shared-b-pair.json"
 export_state
 jq '.targets | keys' "$STATE/acceptance.json"

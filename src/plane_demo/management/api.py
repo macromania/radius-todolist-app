@@ -61,10 +61,10 @@ def create_app(settings: Settings):
         with connect(settings.management_dsn, settings.timeout_seconds) as connection:
             connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             row = connection.execute(
-                "SELECT t.*, p.control_url, p.data_url, o.operation_id,"
+                "SELECT t.*, o.operation_id,"
                 " o.status AS provisioning_status, o.stage, o.error_code "
-                "FROM management.tenants t JOIN management.pairs p USING(pair_id) "
-                "JOIN management.operations o USING(tenant_id) WHERE tenant_id=%s",
+                "FROM management.tenants t JOIN management.operations o USING(tenant_id) "
+                "WHERE tenant_id=%s",
                 (tenant_id,),
             ).fetchone()
             if not row:
@@ -100,8 +100,6 @@ def create_app(settings: Settings):
                 "observed_revision": report["version"] if report else None,
                 "reported_at": report["received_at"] if report else None,
             },
-            "control_url": row["control_url"],
-            "data_url": row["data_url"],
             "timeline": timeline,
             "next_after_event_id": next_id,
         }

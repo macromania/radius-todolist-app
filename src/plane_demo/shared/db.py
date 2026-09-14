@@ -138,34 +138,13 @@ class OperationStore:
     def complete(
         self,
         operation_id: UUID,
-        *,
-        control_cluster_id: str,
-        data_cluster_id: str,
-        control_url: str,
-        data_url: str,
     ) -> None:
-        from urllib.parse import urlsplit
-
-        for endpoint in (control_url, data_url):
-            parsed = urlsplit(endpoint)
-            if (
-                parsed.scheme not in {"http", "https"}
-                or not parsed.hostname
-                or parsed.username
-                or parsed.password
-                or parsed.query
-                or parsed.fragment
-            ):
-                raise ValueError("endpoint must be an HTTP(S) URL without credentials or query")
-        if not control_cluster_id or not data_cluster_id:
-            raise ValueError("cluster identifiers are required")
         with self.connection.transaction():
             row = self._locked(operation_id)
             if row["status"] != "running":
                 raise ValueError("operation_is_not_running")
             self.connection.execute(
-                "UPDATE management.pairs SET stage='available',control_cluster_id=%s,"
-                "data_cluster_id=%s,control_url=%s,data_url=%s WHERE pair_id=%s",
-                (control_cluster_id, data_cluster_id, control_url, data_url, row["pair_id"]),
+                "UPDATE management.pairs SET stage='available' WHERE pair_id=%s",
+                (row["pair_id"],),
             )
             self._observe(row, "succeeded", "available", None)

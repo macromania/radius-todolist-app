@@ -288,6 +288,7 @@ class Provider(Protocol):
     def ensure_child_cluster(self, slot: str) -> Cluster: ...
     def bootstrap_child(self, cluster: Cluster) -> None: ...
     def deploy_plane(self, slot: str, observe: Callable[[str], None]) -> str: ...
+    def inspect_pair(self, pair_id: str) -> PairResult: ...
 
 
 def provision_pair(
@@ -307,12 +308,13 @@ def provision_pair(
     slots = [f"{request.pair_id}-{role}" for role in ("control", "data")]
     expected_ids = [provider.expected_cluster_id(slot) for slot in slots]
     if pair["stage"] == "available":
-        if [pair["control_cluster_id"], pair["data_cluster_id"]] != expected_ids:
+        result = provider.inspect_pair(request.pair_id)
+        if [result.control_cluster_id, result.data_cluster_id] != expected_ids:
             raise ProvisioningError("pair_inventory_mismatch")
         observe("reuse-pair")
         urls = [
-            provider.validate_endpoint(slot, pair[f"{role}_url"])
-            for slot, role in zip(slots, ("control", "data"), strict=True)
+            provider.validate_endpoint(slot, url)
+            for slot, url in zip(slots, (result.control_url, result.data_url), strict=True)
         ]
         return PairResult(*expected_ids, *urls)
     clusters = []

@@ -209,13 +209,7 @@ with provisioner_session(management_dsn) as operations:
         # Provision from the immutable tenant/pair/message fields.
         operations.observe(operation.operation_id, "control-cluster")
         # After the actual child bootstrap and certificate steps:
-        operations.complete(
-            operation.operation_id,
-            control_cluster_id=actual_control_id,
-            data_cluster_id=actual_data_id,
-            control_url=actual_control_url,
-            data_url=actual_data_url,
-        )
+        operations.complete(operation.operation_id)
 ```
 
 `claim_pending()` returns frozen `PendingOperation` fields: `operation_id`,
@@ -223,8 +217,8 @@ with provisioner_session(management_dsn) as operations:
 `None`. `observe(id, stage, status="running", error_code=None)` accepts running,
 failed, and interrupted observations; failures require a stable error code.
 Repeated identical observations append nothing. Terminal operations cannot be
-resumed. `complete()` atomically stores non-secret pair identifiers/endpoints,
-marks the pair available, marks the operation succeeded, and appends its event;
+resumed. `complete()` atomically marks the pair available, marks the operation
+succeeded, and appends its event;
 it never reports control-record creation. `interrupt_running()` returns the
 number interrupted and never claims/replays them. Each method commits before
 returning, with no transaction held across provider calls.
@@ -235,16 +229,21 @@ lifetime. Do not create `OperationStore` directly, reconnect the session
 implicitly, or continue infrastructure work after its connection fails: the
 session is the singleton lock, not a lease or a recovery engine.
 
-`management.pairs` inventory fields are `pair_id`, `isolation`, `reporting_role`,
-`stage`, `control_cluster_id`, `data_cluster_id`, `control_url`, `data_url`, and
-`created_at`. They must contain no credentials. Once child databases/apps are
+`management.pairs` placement fields are `pair_id`, `isolation`, `reporting_role`,
+`stage`, and `created_at`. They contain no credentials, cluster IDs, or endpoint
+URLs. Once child databases/apps are
 initialized and accessible, set **`stage='available'`**. Only then does the
 control reconciler pull that pair's assigned tenants. Infrastructure completion
 must never fabricate a `control_record_created` event.
 
+Shared-pair reuse reads current cluster and gateway resources through the provider
+APIs. Cluster identity, readiness, and Radius application/environment ownership
+must match before reuse succeeds. It does not reprovision an available pair.
+
 `GET /operations/{operation_id}` exposes the persisted operation.
 `GET /tenants/{tenant_id}` exposes provisioning status separately from
-`onboarding_status`. Management becomes ready only from a valid
+`onboarding_status`. It contains no endpoint URLs; operator discovery reads those
+from live APIs. Management becomes ready only from a valid
 `control_record_created` report for that immutable onboarding UUID and revision
 1. It has no data-applied or Redis-health assertion.
 

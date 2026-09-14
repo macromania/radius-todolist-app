@@ -10,10 +10,6 @@ CREATE TABLE management.pairs (
     isolation text NOT NULL CHECK (isolation IN ('shared', 'isolated')),
     stage text NOT NULL DEFAULT 'allocated',
     reporting_role name NOT NULL UNIQUE,
-    control_cluster_id text,
-    data_cluster_id text,
-    control_url text,
-    data_url text,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     CHECK ((isolation = 'shared') = (pair_id = 'shared'))
 );

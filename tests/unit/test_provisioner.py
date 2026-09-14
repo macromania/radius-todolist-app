@@ -6,7 +6,6 @@ import os
 import subprocess
 import sys
 from contextlib import contextmanager
-from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -328,21 +327,132 @@ def test_nat_egress_requires_a_bare_ipv4_address(raw_config, value):
         OperatorConfig.from_dict(raw_config)
 
 
-def test_shared_reuse_runs_no_radius_or_provider_commands(provider):
+def test_shared_reuse_uses_live_pair_metadata_not_database_inventory(provider, monkeypatch):
     observe = MagicMock()
     existing = pair(provider.config, available=True)
+    live = PairResult(**{key: existing.pop(key) for key in PairResult.__dataclass_fields__})
+    inspect = MagicMock(return_value=live)
+    monkeypatch.setattr(provider, "inspect_pair", inspect)
     result = provision_pair(operation(), provider, existing, observe)
-    assert asdict(result) == {key: existing[key] for key in asdict(result)}
+    assert result == live
+    inspect.assert_called_once_with("shared")
     observe.assert_called_once_with("reuse-pair")
     provider.commands.run.assert_not_called()
     provider.commands.json.assert_not_called()
 
 
-def test_reuse_rejects_wrong_cluster_inventory(provider):
+def test_reuse_rejects_wrong_live_cluster_inventory(provider, monkeypatch):
     existing = pair(provider.config, available=True)
-    existing["control_cluster_id"] = "unowned"
+    monkeypatch.setattr(
+        provider,
+        "inspect_pair",
+        lambda _: PairResult(
+            "unowned",
+            existing["data_cluster_id"],
+            existing["control_url"],
+            existing["data_url"],
+        ),
+    )
     with pytest.raises(ProvisioningError, match="pair_inventory_mismatch"):
         provision_pair(operation(), provider, existing, MagicMock())
+
+
+def test_available_pair_reads_current_radius_owners_and_gateways(provider, monkeypatch):
+    reads = []
+    accesses = []
+
+    def resource(slot, kind, name, application):
+        reads.append((slot, kind, name, application))
+        if kind == "cluster":
+            return {
+                "clusterId": provider.expected_cluster_id(name),
+                "provisioningState": "Succeeded",
+                "application": (
+                    f"{RADIUS_SCOPE}/providers/Applications.Core/applications/{application}"
+                ),
+                "environment": (
+                    f"{RADIUS_SCOPE}/providers/Applications.Core/environments/provision-{name}"
+                ),
+            }
+        return {
+            "url": URLS[application],
+            "provisioningState": "Succeeded",
+            "application": f"{RADIUS_SCOPE}/providers/Applications.Core/applications/{application}",
+            "environment": f"{RADIUS_SCOPE}/providers/Applications.Core/environments/{slot}",
+        }
+
+    def access(slot):
+        accesses.append(slot)
+        return SimpleNamespace(cluster_id=provider.expected_cluster_id(slot))
+
+    monkeypatch.setattr(provider, "resource", resource)
+    monkeypatch.setattr(provider, "get_access", access)
+    result = provision_pair(
+        operation(),
+        provider,
+        {
+            "pair_id": "shared",
+            "isolation": "shared",
+            "reporting_role": "cp_shared",
+            "stage": "available",
+        },
+        MagicMock(),
+    )
+    assert result.control_url == URLS["control"]
+    assert accesses == ["shared-control", "shared-data"]
+    assert reads == [
+        ("management", "cluster", "shared-control", "cluster-shared-control"),
+        ("shared-control", "gateway", "gateway", "control"),
+        ("management", "cluster", "shared-data", "cluster-shared-data"),
+        ("shared-data", "gateway", "gateway", "data"),
+    ]
+    provider.commands.run.assert_not_called()
+
+
+@pytest.mark.parametrize("kind", ["Demo.Platform/clusters", "Demo.Platform/gateways"])
+@pytest.mark.parametrize("field", ["application", "environment"])
+@pytest.mark.parametrize("foreign", [None, "/planes/radius/local/resourceGroups/foreign"])
+def test_worker_refuses_wrong_live_radius_owners(provider, monkeypatch, kind, field, foreign):
+    pending = operation()
+    store = MagicMock()
+    store.claim_pending.return_value = pending
+    store.connection.execute.return_value.fetchone.return_value = {
+        "pair_id": "shared",
+        "isolation": "shared",
+        "reporting_role": "cp_shared",
+        "stage": "available",
+    }
+
+    def rad(slot, *args):
+        resource_kind, name = args[2:4]
+        application = args[args.index("--application") + 1]
+        properties = {
+            "provisioningState": "Succeeded",
+            "application": f"{RADIUS_SCOPE}/providers/Applications.Core/applications/{application}",
+            "environment": f"{RADIUS_SCOPE}/providers/Applications.Core/environments/"
+            + (f"provision-{name}" if resource_kind.endswith("/clusters") else slot),
+        }
+        if resource_kind.endswith("/clusters"):
+            properties["clusterId"] = provider.expected_cluster_id(name)
+        else:
+            properties["url"] = URLS[application]
+        if resource_kind == kind:
+            properties[field] = foreign
+        return json.dumps({"properties": properties})
+
+    monkeypatch.setattr(provider, "rad", rad)
+    monkeypatch.setattr(
+        provider,
+        "get_access",
+        lambda slot: SimpleNamespace(cluster_id=provider.expected_cluster_id(slot)),
+    )
+    assert provisioner.run_once(store, provider)
+    store.complete.assert_not_called()
+    assert store.observe.call_args.kwargs == {
+        "status": "failed",
+        "error_code": "pair_owner_mismatch",
+    }
+    provider.commands.run.assert_not_called()
 
 
 def test_child_creation_uses_radius_and_exact_allocation(provider, monkeypatch):
@@ -560,10 +670,7 @@ def test_run_loop_invokes_real_pair_driver_and_store(provider, monkeypatch):
     provisioner.run_loop(store, provider, sleep=sleep, stopped=lambda: finished, prepare=False)
     store.interrupt_running.assert_called_once_with()
     assert created == bootstrapped == ["shared-control", "shared-data"]
-    result = pair(provider.config)
-    store.complete.assert_called_once_with(
-        pending.operation_id, **{key: result[key] for key in PairResult.__dataclass_fields__}
-    )
+    store.complete.assert_called_once_with(pending.operation_id)
     assert [call.args[1] for call in store.observe.call_args_list] == [
         "control-cluster",
         "data-cluster",

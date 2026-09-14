@@ -8,6 +8,21 @@ from plane_demo.shared.db import ProvisionerAlreadyRunning, provisioner_session
 pytestmark = pytest.mark.integration
 
 
+def test_pair_schema_contains_only_logical_placement(databases):
+    with psycopg.connect(databases.management_admin) as connection:
+        columns = connection.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema='management' AND table_name='pairs'"
+        ).fetchall()
+    assert {row[0] for row in columns} == {
+        "pair_id",
+        "isolation",
+        "reporting_role",
+        "stage",
+        "created_at",
+    }
+
+
 def test_provisioner_singleton_lock_is_session_scoped(databases):
     with provisioner_session(databases.dsn("mgmt_provisioner")):
         with pytest.raises(ProvisionerAlreadyRunning):
@@ -30,17 +45,11 @@ def test_claim_stage_and_complete_are_transactional(databases, management_client
         assert store.claim_pending() is None
         store.observe(operation.operation_id, "control-cluster")
         store.observe(operation.operation_id, "control-cluster")
-        store.complete(
-            operation.operation_id,
-            control_cluster_id="control-cluster-id",
-            data_cluster_id="data-cluster-id",
-            control_url="https://control.example.test",
-            data_url="https://data.example.test",
-        )
+        store.complete(operation.operation_id)
     status = management_client.get("/tenants/alpha").json()
     assert status["provisioning_status"] == "succeeded"
     assert status["onboarding_status"] == "pending"
-    assert status["control_url"] == "https://control.example.test"
+    assert "control_url" not in status and "data_url" not in status
     assert len(status["timeline"]) == 4
     assert [event["stage"] for event in status["timeline"]] == [
         None,
@@ -96,11 +105,11 @@ def test_invalid_observation_rolls_back_without_an_event(databases, management_c
     assert len(status["timeline"]) == 2
 
 
-def test_completion_rejects_credential_bearing_endpoints(databases):
+def test_completion_accepts_no_endpoint_inventory(databases):
     databases.create()
     with provisioner_session(databases.dsn("mgmt_provisioner")) as store:
         operation = store.claim_pending()
-        with pytest.raises(ValueError, match="without credentials"):
+        with pytest.raises(TypeError):
             store.complete(
                 operation.operation_id,
                 control_cluster_id="control",

@@ -17,7 +17,7 @@ It does not rewrite the completed runs recorded in `FINDINGS.md`.
 ## Purpose / Big Picture
 
 
-An operator should configure the demo once with a small `demo init` command,
+An operator should configure the demo once with a small `make init` command,
 then run the Azure or local walkthrough from a checkout containing only source
 and a git-ignored `.env`. The operator must not recover a previous `.state`
 directory to inspect, use, or remove an existing deployment.
@@ -45,11 +45,13 @@ general-purpose workflow/retry engine.
 - [x] (2026-09-14) Initial security review found no vulnerabilities; rubber-duck review identified missing execution details.
 - [x] (2026-09-14) Both follow-up reviews passed after clarifying private-vault client access, naming, command stages, SQL initialization, local artifacts, orphaned-fault recovery, and node-owned encryption.
 - [x] (2026-09-14) Transaction-owned schema initialization implemented, reviewed, and verified on real disposable PostgreSQL 17.8; trigger/index enforcement drift fixes verified. Committed/pushed as `dd1526b`.
-- [ ] Complete script relocation under `scripts/operations`, `scripts/harness`, and `scripts/recipes` with root Make entrypoints.
-- [ ] Implement the `.env` initializer and shared configuration loader.
+- [x] (2026-09-14) Complete script relocation under `scripts/operations`, `scripts/harness`, and `scripts/recipes` with root Make entrypoints; committed/pushed in `e7146be`.
+- [x] (2026-09-14) Implement the literal `.env` initializer and typed configuration loader; Bash initialization and native endpoint/API helpers are Make-wired. Deployment consumption remains below.
+- [x] (2026-09-14) Implement and review service-owned credential-store primitives; committed/pushed in `84e8971`. Provider integration remains below.
 - [ ] Implement temporary workspaces and live metadata discovery.
 - [ ] Move Azure credentials to Key Vault and local credentials to Kubernetes.
-- [ ] Remove database endpoint inventories and filesystem operation markers.
+- [x] (2026-09-14) Remove database endpoint inventories and observe live shared-pair resources. Correct Radius ownership checks after rubber-duck review; both fix reviews, 265 focused tests, and 45 real PostgreSQL integration cases pass.
+- [ ] Remove remaining filesystem operation markers and wire transaction-owned database observation into providers.
 - [ ] Simplify local bootstrap and remove checkout-file mount dependencies.
 - [ ] Wire manual commands, API response contracts, scenarios, and cleanup.
 - [ ] Prove Azure first and local second, including fresh-checkout and empty-worker recovery.
@@ -69,15 +71,12 @@ kubeconfigs are therefore an implementation choice, not necessary discovery
 state. Radius 0.60.2's CLI does need a scoped HOME containing its kubeconfig;
 a temporary HOME can meet that requirement without becoming durable state.
 
-`management.pairs` currently stores `control_cluster_id`, `data_cluster_id`,
-`control_url`, and `data_url`. `OperationStore.complete()` writes them only when
-the entire pair finishes. Removing exported JSON alone would leave this second
-endpoint/infrastructure inventory in place.
 
-The current local bootstrap bind-mounts
+At the start of this work, local bootstrap bind-mounted
 `.state/local/management/encryption.yaml` into the kind node. That is an actual
-running-cluster dependency, not merely a CLI cache. Its replacement must be
-proved across management node stop/start, not just by deleting host metadata.
+running-cluster dependency, not merely a CLI cache. The replacement in `e7146be`
+stores the key in the node and passed actual helper reuse and management node
+stop/start without a checkout mount.
 
 There is an irreducible local execution constraint: kind creates Docker
 containers. The current management Radius executor therefore needs access to
@@ -157,10 +156,13 @@ The prior implementation proved the full scenario and was torn down. Those
 results establish a behavioral baseline, not proof of this simplification.
 Implementation is in progress. Transaction-owned database initialization is
 committed and pushed after real PostgreSQL verification and both review passes.
-The `.env` configuration primitives have 25 passing focused tests; their Make
-entrypoint and script relocation are still being integrated. Credential-store
-primitives are being implemented separately. No revised demo environment has
-been deployed, and the later integration/live milestones remain open.
+The Make-driven shell configuration/discovery/API helpers, script relocation,
+credential-store primitives, and node-owned local encryption are committed and
+pushed. Database endpoint columns are removed, and shared-pair reuse reads and
+checks live Radius owners. Service-owned credential integration, temporary
+provider workspaces, and owner-based fault recovery remain unfinished.
+No revised full demo environment has been deployed, and the later
+integration/live milestones remain open.
 
 The intended outcome is fewer authorities, not a different directory name.
 The final implementation must function without `.state`, with an empty

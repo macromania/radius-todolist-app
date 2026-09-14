@@ -11,7 +11,13 @@ from typing import Protocol
 
 from plane_demo.management.providers.commands import Commands, create_json
 from plane_demo.management.providers.credentials import Credentials, database_dsn
-from plane_demo.management.provisioning import ProvisioningConfig, ProvisioningError
+from plane_demo.management.providers.local_config import same_radius_id
+from plane_demo.management.provisioning import (
+    Cluster,
+    PairResult,
+    ProvisioningConfig,
+    ProvisioningError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,10 +38,43 @@ class PlaneRuntime(Protocol):
     def kubectl(self, slot: str, *args: str) -> str: ...
     def secret(self, slot: str, namespace: str, name: str, values: dict) -> None: ...
     def database_resource_exists(self, slot: str) -> bool: ...
+    def get_access(self, slot: str) -> Cluster: ...
+    def expected_cluster_id(self, slot: str) -> str: ...
+    def validate_endpoint(self, slot: str, value: str) -> str: ...
     def cleanup_initialization(self, slot: str, namespace: str, setup_name: str | None) -> None: ...
     def job(
         self, namespace: str, name: str, image: str, command: list[str], account: str
     ) -> dict: ...
+
+
+def inspect_pair(provider: PlaneRuntime, pair_id: str, radius_scope: str) -> PairResult:
+    identifiers, urls = [], []
+    owners = f"{radius_scope}/providers/Applications.Core"
+    for role in ("control", "data"):
+        slot = f"{pair_id}-{role}"
+        expected = provider.expected_cluster_id(slot)
+        cluster = provider.resource("management", "cluster", slot, f"cluster-{slot}")
+        if cluster.get("clusterId") != expected or cluster.get("provisioningState") != "Succeeded":
+            raise ProvisioningError("pair_inventory_mismatch")
+        if not same_radius_id(
+            cluster.get("application"), f"{owners}/applications/cluster-{slot}"
+        ) or not same_radius_id(
+            cluster.get("environment"), f"{owners}/environments/provision-{slot}"
+        ):
+            raise ProvisioningError("pair_owner_mismatch")
+        access = provider.get_access(slot)
+        if access.cluster_id != expected:
+            raise ProvisioningError("pair_inventory_mismatch")
+        gateway = provider.resource(slot, "gateway", "gateway", role)
+        if gateway.get("provisioningState") != "Succeeded":
+            raise ProvisioningError("gateway_not_ready")
+        if not same_radius_id(
+            gateway.get("application"), f"{owners}/applications/{role}"
+        ) or not same_radius_id(gateway.get("environment"), f"{owners}/environments/{slot}"):
+            raise ProvisioningError("pair_owner_mismatch")
+        urls.append(provider.validate_endpoint(slot, gateway["url"]))
+        identifiers.append(expected)
+    return PairResult(*identifiers, *urls)
 
 
 def initialize_database(provider: PlaneRuntime, slot: str) -> None:
