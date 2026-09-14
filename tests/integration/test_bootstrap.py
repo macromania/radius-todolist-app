@@ -7,7 +7,7 @@ import pytest
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
-from plane_demo.setup.bootstrap import OWNERS, initialize
+from plane_demo.setup.bootstrap import OWNERS, SCHEMA_VERSION, initialize
 
 pytestmark = pytest.mark.integration
 
@@ -64,6 +64,76 @@ def test_bootstrap_runs_with_nonsuperuser_setup(database_server):
                     "SELECT control.ensure_tenant('alpha',%s,'shared','hello')", (uuid4(),)
                 ).fetchone()[0]
                 == 1
+            )
+        initialize(
+            dsn,
+            "control",
+            {role: database_server.passwords[role] for role in roles},
+            [],
+            Path("sql"),
+            "shared",
+        )
+        with psycopg.connect(runtime) as connection:
+            assert connection.execute(
+                "SELECT schema_kind,version FROM demo_metadata.schema_version"
+            ).fetchone() == ("control", SCHEMA_VERSION)
+            assert (
+                connection.execute(
+                    "SELECT count(*) FROM control.tenant_config WHERE tenant_id='alpha'"
+                ).fetchone()[0]
+                == 1
+            )
+        with psycopg.connect(make_conninfo(admin, dbname=database)) as connection:
+            connection.execute("ALTER TABLE control.tenant_config DISABLE TRIGGER immutable_tenant")
+        with pytest.raises(ValueError, match="database_schema_contract_changed"):
+            initialize(
+                dsn,
+                "control",
+                {role: database_server.passwords[role] for role in roles},
+                [],
+                Path("sql"),
+                "shared",
+            )
+        with psycopg.connect(make_conninfo(admin, dbname=database)) as connection:
+            connection.execute("ALTER TABLE control.tenant_config ENABLE TRIGGER immutable_tenant")
+            connection.execute("DROP INDEX control.unique_data_report")
+            connection.execute(
+                "CREATE INDEX unique_data_report ON control.events(onboarding_id,version,type) "
+                "WHERE source='data'"
+            )
+        with pytest.raises(ValueError, match="database_schema_contract_changed"):
+            initialize(
+                dsn,
+                "control",
+                {role: database_server.passwords[role] for role in roles},
+                [],
+                Path("sql"),
+                "shared",
+            )
+        with psycopg.connect(make_conninfo(admin, dbname=database), autocommit=True) as connection:
+            connection.execute("DROP INDEX control.unique_data_report")
+            connection.execute(
+                "INSERT INTO control.events(tenant_id,onboarding_id,pair_id,source,type,version)"
+                "SELECT tenant_id,onboarding_id,pair_id,'data','config_applied',1 "
+                "FROM control.tenant_config CROSS JOIN generate_series(1,2)"
+            )
+            with pytest.raises(psycopg.errors.UniqueViolation):
+                connection.execute(
+                    "CREATE UNIQUE INDEX CONCURRENTLY unique_data_report "
+                    "ON control.events(onboarding_id,version,type) WHERE source='data'"
+                )
+            assert connection.execute(
+                "SELECT indisvalid FROM pg_index "
+                "WHERE indexrelid='control.unique_data_report'::regclass"
+            ).fetchone() == (False,)
+        with pytest.raises(ValueError, match="database_schema_contract_changed"):
+            initialize(
+                dsn,
+                "control",
+                {role: database_server.passwords[role] for role in roles},
+                [],
+                Path("sql"),
+                "shared",
             )
     finally:
         with psycopg.connect(admin, autocommit=True) as connection:

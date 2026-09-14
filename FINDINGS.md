@@ -124,6 +124,7 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F089 | 6 | Medium verification | Data API permission probe | Named grants | Unnamed authorization reviews miss resource-name-limited token minting or ConfigMap mutation grants | Add named account/map/parent-Secret reviews and ConfigMap watch checks; executable probe and named-grant refusal tests and fix review pass |
 | F090 | 7 | Medium documentation | `docs/local-provider.md` | Fresh-run prerequisites | Fixed state paths make the retained historical checkout unsuitable for the fresh command sequence | Require a new clone/worktree without `.state/local`, preserve original evidence, and verify old cluster absence before using shared names/ports |
 | F091 | 7 | Medium documentation | `docs/local-provider.md` | Docker host scope | Generic Docker Desktop wording hides the deliberately account-specific socket endpoint | State the exact verified-host socket and non-portable-host scope; no global defaults or runtime endpoint behavior changed |
+| F092 | State removal | Medium correctness | `src/plane_demo/setup/bootstrap.py` | Schema contract fingerprint | A definition-only fingerprint could miss disabled triggers or invalid/not-ready indexes | Include trigger enabled state and index validity/readiness; actual disabled-trigger, replaced-index, and failed-concurrent-index cases reject initialization; both fix reviews pass |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -1678,3 +1679,27 @@ bootstrap and the remaining kind executor's Docker connection. Initial and
 follow-up security reviews found no vulnerabilities; the follow-up rubber-duck
 review found the plan ready. No implementation, `.env` creation, state migration,
 or live resource change was performed.
+
+### Transaction-owned initialization step, 2026-09-14
+
+Fresh database initialization now writes `demo_metadata.schema_version` in the
+same transaction as schema creation, role setup, bindings, and grants. A repeated
+initializer observes the matching schema/version/configuration and actual
+catalog fingerprint without replaying DDL or rotating passwords. Missing
+metadata on an existing schema, version/configuration drift, and changed
+enforcement are explicit failures. This step does not yet remove all provider
+filesystem markers or endpoint columns; those remain later integration work.
+
+The initial rubber-duck review found F092. Trigger definitions/enabled state and
+index valid/ready/live flags now join the scoped role, membership, ACL, policy,
+column/default, function, constraint, and index-definition fingerprint.
+Seven focused offline tests pass. A real disposable PostgreSQL 17.8 test on
+reserved port 35510 verified non-superuser setup, readable runtime metadata,
+repeat initialization preserving tenant data, and refusal after disabling the
+immutability trigger, replacing a unique index with a nonunique one, or leaving
+an invalid index after failed concurrent creation. Both initial and fix security
+reviews were clean; the fix rubber-duck review was clean.
+
+The disposable container was removed by its exact recorded ID and absence was
+checked. The image was a pinned test dependency, not a rebuilt demo image or
+a deployed environment. The broader state-removal implementation remains active.
