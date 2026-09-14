@@ -44,7 +44,7 @@ def test_isolated_home_and_every_context_are_explicit(local_state, monkeypatch):
     assert "--kubeconfig" in common.kube("get", "nodes")
     assert str(local_state / "radius.yaml") in common.rad("group", "list")
     assert common.MANAGEMENT in common.rad("group", "list")
-    assert common.DOCKER_HOST in common.docker("info")
+    assert common.docker_host() in common.docker("info")
 
 
 def test_private_files_reject_symlinks_and_public_state(local_state, tmp_path):

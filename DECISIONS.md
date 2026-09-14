@@ -397,3 +397,16 @@ This is a targeted security correction, not an authentication redesign. The
 acceptance harness must verify the running API account and perform authenticated
 Secret GET/list denial checks inside its Pod, as well as checking ConfigMap-get
 permission and refusing write, Pod-create, and token-minting rights.
+
+## D041 - Resolve local Docker access from Docker Desktop
+
+Local operations and fault/export helpers select the `desktop-linux` context,
+resolve its endpoint before entering a project-scoped HOME, and pin that
+endpoint for the process. Only a local Unix socket is accepted. Missing or
+invalid contexts fail explicitly; there is no fallback to the current context,
+an inherited endpoint override, or another container runtime.
+
+This removes account-specific host paths without changing Docker defaults,
+management's daemon-access boundary, or child ownership checks. The README uses
+one-stage Make commands and teaches the Azure scenarios before repeating them
+with local Recipes.

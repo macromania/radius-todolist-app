@@ -15,6 +15,9 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "operations/local"))
+from docker_desktop import docker_host  # noqa: E402
+
 if "base" not in globals():
     spec = importlib.util.spec_from_file_location(
         "plane_demo_standalone_fault", Path(__file__).resolve().parents[1] / "fault-parent-link.py"
@@ -25,7 +28,6 @@ if "base" not in globals():
 
 require = base.require
 Error = base.AcceptanceError
-DOCKER_HOST = "unix:///Users/mahmutcanga/.docker/run/docker.sock"
 NODE_IMAGE = (
     "kindest/node:v1.35.0@sha256:452d707d4862f52530247495d180205e029056831160e22870e37e3f6c1ac31f"
 )
@@ -69,7 +71,7 @@ esac
 
 
 def docker(*args):
-    return ["docker", "--host", DOCKER_HOST, *args]
+    return ["docker", "--host", docker_host(), *args]
 
 
 def environment():
@@ -77,7 +79,7 @@ def environment():
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
         "HOME": str(base.ROOT / ".state/local/home"),
         "LC_ALL": "C",
-        "DOCKER_HOST": DOCKER_HOST,
+        "DOCKER_HOST": docker_host(),
     }
 
 

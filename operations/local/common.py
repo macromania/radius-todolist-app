@@ -10,12 +10,13 @@ import subprocess
 import time
 from pathlib import Path
 
+from docker_desktop import docker_host
+
 ROOT = Path(__file__).resolve().parents[2]
 STATE = ROOT / ".state/local"
 MANAGEMENT = "radplanes-local-management"
 CHILD = "radplanes-local-shared-control"
 CONTEXT = MANAGEMENT
-DOCKER_HOST = "unix:///Users/mahmutcanga/.docker/run/docker.sock"
 NODE_IMAGE = (
     "kindest/node:v1.35.0@sha256:452d707d4862f52530247495d180205e029056831160e22870e37e3f6c1ac31f"
 )
@@ -96,7 +97,7 @@ def environment() -> dict[str, str]:
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
         "HOME": str(home),
         "KUBECONFIG": str(home / ".kube/config"),
-        "DOCKER_HOST": DOCKER_HOST,
+        "DOCKER_HOST": docker_host(),
         "KIND_EXPERIMENTAL_PROVIDER": "docker",
         "KIND_EXPERIMENTAL_DOCKER_NETWORK": "kind",
         "LC_ALL": "C",
@@ -123,7 +124,7 @@ def rad(*args: str, workspace: bool = True) -> list[str]:
 
 
 def docker(*args: str) -> list[str]:
-    return ["docker", "--host", DOCKER_HOST, *args]
+    return ["docker", "--host", docker_host(), *args]
 
 
 class Commands:

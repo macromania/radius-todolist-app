@@ -16,8 +16,8 @@ they are not unresolved implementation failures.
 - Azure PostgreSQL/Redis remain private and TLS-verified. Local PostgreSQL and
   Redis deliberately use non-TLS transport on internal cluster/node paths;
   local HTTP gateways bind reserved loopback ports only.
-- Local execution is verified-host-specific, including the recorded Docker
-  Desktop socket. Management Radius's Docker socket has whole-daemon authority;
+- Local execution requires Docker Desktop's `desktop-linux` context with a local
+  Unix socket. Management Radius's Docker socket has whole-daemon authority;
   project names and labels are not a hostile isolation boundary.
 - Management Secret encryption is verified locally. Child datastore Secrets,
   Terraform state, and PVCs are not claimed encrypted at rest. Terraform state

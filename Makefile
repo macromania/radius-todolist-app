@@ -14,7 +14,8 @@ export TMPDIR := $(CURDIR)/.state/check/tmp
 .PHONY: help check lint test test-integration check-bicep check-shell check-terraform check-work \
         require-azure confirm-azure preflight bootstrap-preview validate-azure bootstrap \
         install-radius publish-recipes build-publish register-radius deploy-management \
-        export-state test-e2e test-outages clean-plan clean-azure verify-clean \
+        deploy-management-preview export-state test-e2e test-outages clean-plan clean-azure verify-clean \
+        local-prepare local-executor-build local-executor-inspect local-bootstrap local-install-radius \
         confirm-local local-runtime-build local-runtime-inspect local-runtime-load \
         local-setup local-deploy-management local-export local-test local-clean-plan \
         local-clean local-verify
@@ -61,6 +62,21 @@ check-terraform: check-work ## Validate the local Recipe with mocked providers; 
 
 confirm-local: check-work
 	@test "$(CONFIRM_LOCAL)" = yes || { echo "Set CONFIRM_LOCAL=yes for local Docker/Kubernetes mutations." >&2; exit 1; }
+
+local-prepare: check-work ## Prepare local Recipe bundles and manifests without creating resources
+	$(RUN) python operations/local/prepare.py
+
+local-executor-build: confirm-local ## Build the local Radius executor/operator images
+	$(RUN) python operations/local/images.py build --execute
+
+local-executor-inspect: confirm-local ## Verify the local Radius executor/operator image contents
+	$(RUN) python operations/local/images.py inspect --execute
+
+local-bootstrap: confirm-local ## Create the management kind cluster and verify Secret encryption
+	$(RUN) python operations/local/bootstrap.py create --execute
+
+local-install-radius: confirm-local ## Install Radius and its executor in the management cluster
+	$(RUN) python operations/local/bootstrap.py install --execute
 
 local-runtime-build: confirm-local ## Build native local API/provisioner images from committed inputs
 	$(RUN) python operations/local/runtime-images.py build --execute
@@ -125,6 +141,9 @@ register-radius: confirm-azure ## Register types/environment in an existing conf
 
 deploy-management: confirm-azure ## Submit the management operator Job; verify completion separately
 	$(RUN) python operations/run-management-job.py --config "$(CONFIG)" --execute
+
+deploy-management-preview: require-azure ## Prepare the management Job manifest without submitting it
+	$(RUN) python operations/run-management-job.py --config "$(CONFIG)"
 
 export-state: require-azure ## Export protected harness state once; exit 3 means not ready yet
 	$(RUN) python harness/export-state.py --config "$(CONFIG)" --once

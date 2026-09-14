@@ -7,12 +7,11 @@ see [the gate evidence](local.md) and [FINDINGS.md](../FINDINGS.md) for exact ru
 
 ## Fresh local run
 
-This procedure is verified on the recorded macOS host only. The local tools
-deliberately use Docker Desktop at
-`unix:///Users/mahmutcanga/.docker/run/docker.sock`; another user account or
-platform is not supported by these instructions. Do not substitute Colima,
-change global Docker defaults, or imply that setting `DOCKER_HOST` overrides
-the scoped endpoint. Use project Python 3.13, kind 0.31.0, Radius 0.60.2 with
+The local tools resolve Docker Desktop's `desktop-linux` context before
+switching subprocesses to a project-scoped HOME. They pin the returned local
+Unix socket for the process instead of using an account-specific path or the
+global current context. Remote endpoints and missing contexts fail explicitly;
+there is no fallback to another runtime. Use project Python 3.13, kind 0.31.0, Radius 0.60.2 with
 Bicep 0.42.1, and the reserved ports in `ports.env`.
 
 Preserve this checkout's historical `.state/local`. All local commands use that
@@ -32,13 +31,13 @@ ownership review. These commands do not retry, adopt, or clear its state.
 ```sh
 uv sync --locked
 make check
-uv run --no-sync python operations/local/prepare.py
-uv run --no-sync python operations/local/images.py build --execute
-uv run --no-sync python operations/local/images.py inspect --execute
+make local-prepare
+make local-executor-build CONFIRM_LOCAL=yes
+make local-executor-inspect CONFIRM_LOCAL=yes
 make local-runtime-build CONFIRM_LOCAL=yes
 make local-runtime-inspect CONFIRM_LOCAL=yes
-uv run --no-sync python operations/local/bootstrap.py create --execute
-uv run --no-sync python operations/local/bootstrap.py install --execute
+make local-bootstrap CONFIRM_LOCAL=yes
+make local-install-radius CONFIRM_LOCAL=yes
 make local-runtime-load CONFIRM_LOCAL=yes
 make local-setup CONFIRM_LOCAL=yes
 make local-deploy-management CONFIRM_LOCAL=yes

@@ -184,8 +184,8 @@ stdout, including destruction output. The chart does **not** wire an arbitrary
 visible, and the gate fails on private-key markers in executor logs without
 exporting those logs. Unexpected diagnostic disclosure still needs operator review.
 
-Docker Desktop's host client endpoint is
-`unix:///Users/mahmutcanga/.docker/run/docker.sock`. The management node's
+The host client endpoint comes from Docker Desktop's `desktop-linux` context
+and must be a local Unix socket. The management node's
 `extraMounts` uses the live-verified VM-side `/var/run/docker.sock` and
 exposes it inside that node at `/run/radplanes/docker.sock`; the RP hostPath refers
 to the node-side path, not the Mac home directory. Socket existence, group behavior,

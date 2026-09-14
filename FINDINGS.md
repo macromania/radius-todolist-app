@@ -1618,3 +1618,25 @@ without remaining issues. The final architecture/Azure/limitations maps link to
 the detailed contracts rather than duplicating their configuration. All 73 local
 links in the changed documentation resolve; `AGENTS.md` remains a 107-line map.
 No host acceptance/export process remains running.
+
+### Manual walkthrough update, 2026-09-14
+
+The README now follows Azure setup, individual manual scenarios, Azure cleanup,
+and a local repeat. Each step explains its outcome. The commands use the thin
+API/export/fault utilities rather than the all-mode runner. Azure's manual
+image-inspection and configuration-assembly handoffs are stated explicitly.
+Review corrected new-shell resume instructions and added a post-update timestamp
+boundary so old poll logs cannot pass the idempotency checkpoint.
+
+Local Docker access now resolves the explicit Docker Desktop context instead
+of a user-specific socket path. Local operations, exporter, and fault helpers
+share the cached, Unix-only resolver; global defaults are unchanged. New
+one-stage Make targets retain explicit mutation confirmation. Tests cover
+endpoint validation, environment isolation, caching, errors, and command
+construction; the narrow security review found no issues.
+
+`make check` passed **913 tests, 264 subtests, 50 dependency skips, 23 Bicep
+compiles, 24 Terraform mock-provider tests, Ruff, and ShellCheck**. A read-only
+Docker Desktop context/version check succeeded. No images were rebuilt and no
+cloud or cluster resources were created or changed for this documentation task;
+earlier deployment evidence remains scoped to its recorded source revisions.

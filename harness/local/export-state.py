@@ -187,7 +187,7 @@ class Exporter(shared.Exporter):
             "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
             "HOME": str(STATE / "home"),
             "LC_ALL": "C",
-            "DOCKER_HOST": network.DOCKER_HOST,
+            "DOCKER_HOST": network.docker_host(),
         }
         try:
             result = self.execute(

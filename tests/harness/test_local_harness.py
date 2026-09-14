@@ -257,7 +257,7 @@ class Operator:
         if argv[0] == "git":
             return ""
         if argv[0] == "docker":
-            if argv[:3] != ["docker", "--host", network.DOCKER_HOST]:
+            if argv[:3] != ["docker", "--host", network.docker_host()]:
                 raise AssertionError("unscoped Docker transport")
             args = argv[3:]
             if args[0] == "ps":
@@ -494,6 +494,9 @@ class LocalStateCase(unittest.TestCase):
         self.addCleanup(lambda: shutil.rmtree(self.root))
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
+        self.stack.enter_context(
+            patch.object(network, "docker_host", return_value="unix:///test/docker-desktop.sock")
+        )
         for module in (export, shared, runner, faults):
             self.stack.enter_context(patch.object(module, "ROOT", self.root))
         self.stack.enter_context(patch.object(export, "STATE", self.state))
@@ -1299,6 +1302,7 @@ class NativeScriptTests(unittest.TestCase):
     def test_local_operator_command_clears_proxy_and_global_home(self):
         result = SimpleNamespace(returncode=0, stdout="safe")
         with (
+            patch.object(network, "docker_host", return_value="unix:///test/docker-desktop.sock"),
             patch.object(network.subprocess, "run", return_value=result) as execute,
             patch.dict("os.environ", {"HTTPS_PROXY": "http://foreign"}),
         ):
