@@ -9,9 +9,9 @@ prove the Azure integration gates or authorize a deployment.
 * `python -m plane_demo.management.provisioner` runs only in management. It holds
   `provisioner_session()` for its lifetime, marks old running operations
   interrupted once, and claims pending work every five seconds.
-* `uv run python operations/register-radius.py --slot SLOT --config FILE`
+* `uv run python scripts/operations/register-radius.py --slot SLOT --config FILE`
   registers types, credentials, and the environment in an **existing** cluster.
-* `uv run python operations/deploy-plane.py --slot management --config FILE`
+* `uv run python scripts/operations/deploy-plane.py --slot management --config FILE`
   initializes management PostgreSQL and deploys management workloads/gateway.
   Child slots are accepted for explicit administrative deployment, not creation.
 
@@ -75,7 +75,7 @@ the correct environment variable. Scoped `HOME` addresses that loader, not a
 global-context workaround. `Commands` captures the original Azure CLI cache
 before overriding any command's `HOME`; an explicit `AZURE_CONFIG_DIR` is
 retained, and runtime authentication replaces it with the protected project
-cache. The installer uses the matching `operations/project.py` helper. The command
+cache. The installer uses the matching `scripts/operations/project.py` helper. The command
 runner never changes its own process's `HOME`, and each slot gets a distinct
 home.
 
@@ -402,17 +402,17 @@ Live create/tag/delete proof remains a separate parent-owned gate.
 
 ## In-cluster certificate issuance
 
-The driver calls the parent-owned `operations/run-certificate-job.py` coordinator.
+The driver calls the parent-owned `scripts/operations/run-certificate-job.py` coordinator.
 Only that wrapper creates issuance Jobs; the provider has no duplicate Job
-implementation. The in-cluster `operations/issue-certificate.py` is never run
+implementation. The in-cluster `scripts/operations/issue-certificate.py` is never run
 directly on the laptop.
 
 The optional `certificateCommand` configuration is an argument-vector array.
 Omit it or use `[]` for portable defaults:
 
-* Inside `/app`: `["python", "/app/operations/run-certificate-job.py"]`.
+* Inside `/app`: `["python", "/app/scripts/operations/run-certificate-job.py"]`.
 * On the operator machine: the current Python executable and the absolute
-  project path to `operations/run-certificate-job.py`.
+  project path to `scripts/operations/run-certificate-job.py`.
 
 When constructing management's ConfigMap, deployment fills an omitted/empty
 `certificateCommand` with the explicit container command shown above. The
@@ -423,7 +423,7 @@ or tenant input. Avoid putting a workstation-only executable path into the
 ConfigMap mounted inside the provisioner. The layout change does not rewrite
 saved operator configuration or live ConfigMaps: before deploying the new image,
 regenerate any override that still names `/app/scripts/run-certificate-job.py`
-to use `/app/operations/run-certificate-job.py`. Existing image evidence applies
+to use `/app/scripts/operations/run-certificate-job.py`. Existing image evidence applies
 to the original layout, not the rebuilt image. The driver appends:
 
 ```text
@@ -443,7 +443,7 @@ ConfigMap create/list permission, no Secret permission, and no Azure role grants
 Its command is:
 
 ```text
-python /app/operations/issue-certificate.py
+python /app/scripts/operations/issue-certificate.py
   --slot SLOT --domain ACTUAL_PROVIDER_HOST --namespace APPLICATION_NAMESPACE
   --vault-name ALLOCATED_VAULT --certificate-name gateway-SLOT
   --account-secret acme-SLOT
@@ -519,18 +519,18 @@ Healthy output is `.state/azure/endpoints.json`:
 }
 ```
 
-This is the existing `harness/api.py` contract. Key files are separate and
+This is the existing `scripts/harness/api.py` contract. Key files are separate and
 protected. `SLOT-endpoint.json` retains the non-secret HTTPS URL/certificate URI.
 The CLI prints only slot/URL JSON. `SLOT-certificate.json` is written immediately
 after issuance, before the HTTPS deployment, so a subsequent administrative
 reapply cannot downgrade an already-issued gateway after a failed health check.
 The provider's child endpoint/key files live on the management PVC, but operator
-access does not require copying them. `harness/export-state.py` independently
+access does not require copying them. `scripts/harness/export-state.py` independently
 discovers actual gateway/PIP DNS, cluster and namespace UIDs, and workload names,
 and reads only each named API runtime Secret's `DEMO_KEY` into protected operator
 state. It never reads `credentials.json`.
 
-Run `uv run python harness/export-state.py --watch --timeout 7200` during
+Run `uv run python scripts/harness/export-state.py --watch --timeout 7200` during
 onboarding. Wait for a fresh `.state/azure/export-status.json` reporting
 `ready_for_onboarding: true` before beginning the API scenario; the exporter
 continues publishing child targets as they appear. Missing resources remain
@@ -543,8 +543,8 @@ evidence.
 Run source verification without cloud access:
 
 ```sh
-uv run ruff check src/plane_demo/management operations/deploy-plane.py \
-  operations/register-radius.py tests/unit/test_provisioner.py
+uv run ruff check src/plane_demo/management scripts/operations/deploy-plane.py \
+  scripts/operations/register-radius.py tests/unit/test_provisioner.py
 mkdir -p .state/check/tmp
 TMPDIR="$PWD/.state/check/tmp" uv run pytest tests/unit/test_provisioner.py
 ```

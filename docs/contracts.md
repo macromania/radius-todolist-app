@@ -72,7 +72,12 @@ seeds the allocation/bindings, and restores temporary owner membership options
 it changed. PostgreSQL 16 grants a CREATEROLE creator ADMIN without INHERIT or
 SET by default; initialization temporarily enables these two options only for
 the trusted setup login and restores their original values before committing.
-It refuses existing schemas and incompatible or pre-privileged roles.
+It records schema version and a scoped catalog fingerprint in
+`demo_metadata.schema_version` within that transaction. Repeating the initializer
+observes a matching committed schema without replaying DDL or changing passwords.
+It refuses existing unversioned schemas, changed contracts, and incompatible
+or pre-privileged roles. The fingerprint includes trigger enabled state and
+index validity/readiness, not only their definitions.
 It never runs from a polling loop or HTTP request.
 
 For management set:
@@ -326,6 +331,22 @@ directory. Tokens use URL-safe characters, response size is bounded, path
 traversal is rejected, and everything else is 404. Tokens are intentionally
 public and have no demo-key requirement. ConfigMap projected-volume symlinks
 within the mount work; symlinks escaping it do not.
+
+## Operator output
+
+Human-facing Make output must be grouped into clearly named sections, with
+aligned command descriptions, whitespace between workflows, and actionable
+examples or next steps. `make` and `make help` list all public targets.
+`make help GROUP=azure` selects one group; `setup`, `checks`, and `local`
+are also available. Keep help dependency-free and safe to run before
+configuration. Put confirmation requirements beside live operations
+and keep preview, execution, and verification distinct.
+
+Each command run prints its stage heading to stderr. Routine recipe echo is
+hidden, but tool stdout, errors, exit codes, and full image build/push logs
+remain intact. JSON-producing commands keep stdout machine-readable.
+`make check` reports success only after all its required stages succeed;
+source checks do not claim deployment success.
 
 ## Validation
 

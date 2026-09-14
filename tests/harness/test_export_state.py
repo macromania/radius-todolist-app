@@ -13,7 +13,8 @@ from unittest.mock import Mock
 from uuid import NAMESPACE_DNS, uuid4, uuid5
 
 SPEC = importlib.util.spec_from_file_location(
-    "operator_state_exporter", Path(__file__).resolve().parents[2] / "harness/export-state.py"
+    "operator_state_exporter",
+    Path(__file__).resolve().parents[2] / "scripts/harness/export-state.py",
 )
 export_module = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = export_module
@@ -21,7 +22,7 @@ SPEC.loader.exec_module(export_module)
 
 CONTRACT = importlib.util.spec_from_file_location(
     "export_acceptance_contract",
-    Path(__file__).resolve().parents[2] / "harness/fault-parent-link.py",
+    Path(__file__).resolve().parents[2] / "scripts/harness/fault-parent-link.py",
 )
 contract = importlib.util.module_from_spec(CONTRACT)
 sys.modules[CONTRACT.name] = contract

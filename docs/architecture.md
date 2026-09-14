@@ -37,8 +37,8 @@ children; each child's Radius owns its workloads and dependencies. The same
 three application declarations use Azure or local Recipes without branching
 on environment names.
 
-Runtime code is under `src/plane_demo/`. `operations/` administers infrastructure;
-`harness/` exercises the APIs, records outcomes, and injects bounded faults.
+Runtime code is under `src/plane_demo/`. `scripts/operations/` administers infrastructure;
+`scripts/harness/` exercises the APIs, records outcomes, and injects bounded faults.
 Neither is another application plane.
 
 API and provisioner images/identities remain separate. The data API's

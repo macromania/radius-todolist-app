@@ -8,14 +8,16 @@ from unittest.mock import Mock, patch
 import test_export_state as exports
 
 SPEC = importlib.util.spec_from_file_location(
-    "export_cleanup_contract", Path(__file__).resolve().parents[2] / "operations/clean-azure.py"
+    "export_cleanup_contract",
+    Path(__file__).resolve().parents[2] / "scripts/operations/clean-azure.py",
 )
 cleanup = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = cleanup
 SPEC.loader.exec_module(cleanup)
 export_module = exports.export_module
 PROJECT_SPEC = importlib.util.spec_from_file_location(
-    "export_bootstrap_contract", Path(__file__).resolve().parents[2] / "operations/project.py"
+    "export_bootstrap_contract",
+    Path(__file__).resolve().parents[2] / "scripts/operations/project.py",
 )
 project = importlib.util.module_from_spec(PROJECT_SPEC)
 PROJECT_SPEC.loader.exec_module(project)
@@ -106,7 +108,7 @@ class CleanupExportTests(unittest.TestCase):
         )
         document = json.loads((state / "cleanup-targets.json").read_text())
         self.assertEqual(document["version"], 1)
-        self.assertEqual(document["generatedBy"], "harness/export-state.py")
+        self.assertEqual(document["generatedBy"], "scripts/harness/export-state.py")
         engine = cleanup.Cleanup(
             manifest, root=self.root.resolve(), commands=Mock(), targets=document["targets"]
         )
@@ -167,7 +169,7 @@ class CleanupExportTests(unittest.TestCase):
                 result = self.platform.execute(args)
                 self.assertEqual(result.returncode, 0)
                 return result.stdout
-            self.assertEqual(args[1], "operations/install-radius.py")
+            self.assertEqual(args[1], "scripts/operations/install-radius.py")
             return ""
 
         with (

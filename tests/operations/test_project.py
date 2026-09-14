@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 SPEC = importlib.util.spec_from_file_location(
-    "project", Path(__file__).parents[2] / "operations/project.py"
+    "project", Path(__file__).parents[2] / "scripts/operations/project.py"
 )
 project = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(project)

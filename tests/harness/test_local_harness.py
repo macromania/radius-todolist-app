@@ -24,7 +24,7 @@ from plane_demo.shared import settings
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location(
-    "local_harness_export_under_test", ROOT / "harness/local/export-state.py"
+    "local_harness_export_under_test", ROOT / "scripts/harness/local/export-state.py"
 )
 export = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = export
@@ -1250,6 +1250,7 @@ class LocalRunnerTests(LocalStateCase):
             with self.assertRaisesRegex(faults.AcceptanceError, "source_worktree_dirty"):
                 subject.run()
         self.assertIn("images/local-provisioner", command.call_args.args[0])
+        self.assertIn("scripts/recipes/local", command.call_args.args[0])
         workload.assert_not_called()
 
     def test_local_all_uses_full_scenario_and_both_original_outage_methods(self):

@@ -10,9 +10,14 @@ publish these Recipes.
 
 ## Publication and provider contract
 
-`operations/local/prepare.py` keeps `module_archive()` and `manifests(archive)`
+`scripts/operations/local/prepare.py` keeps `module_archive()` and `manifests(archive)`
 compatible with the shared-control gate. `module_archive(name)` additionally
 accepts `postgresql`, `redis`, and `gateway`.
+
+Terraform stays under `infra/radius/recipes/local/`. The cluster shell helpers
+live under `scripts/recipes/local/cluster/`; the packager inserts their bytes as
+`node-address.sh` and `load-images.sh` at the archive root. Terraform's module
+paths and the published Recipe contract are unchanged.
 
 `recipe_manifests()` returns `(objects, recipes, modules)`:
 
@@ -29,7 +34,7 @@ accepts `postgresql`, `redis`, and `gateway`.
 `recipe_bundle()` includes these fields plus `sharedSourceHashes` and
 `liveStatus: not-run`. The source hashes cover the identical application,
 module, schema, and Azure Recipe files used with either environment. The CLI
-`uv run python operations/local/recipe-bundle.py` emits this source-only JSON.
+`uv run python scripts/operations/local/recipe-bundle.py` emits this source-only JSON.
 It reads neither deployment state nor credentials and runs no platform commands.
 It takes no arguments; execution or module-selection flags are rejected. It
 does not write `prepared.json` or deploy anything. Operator setup owns freezing
@@ -138,10 +143,14 @@ each exact image from `docker image save` to that node's
 and the loaded reference returned by child `ctr images list --quiet`.
 
 A POSIX FIFO avoids relying on shell `pipefail` or Python. A 600-second watchdog
-bounds ownership checks, both imports, and reference verification; cleanup
-terminates only its recorded child PIDs and removes its own private working
-files. Stopping the Docker client does not promise cancellation of an import
-already executing inside the node. No image archive is saved to disk. Tests
+bounds ownership checks, both imports, and reference verification. Invalid
+image inputs are rejected before that watchdog starts. Cleanup records
+cancellation before signaling the watchdog, waits for it to reap its timer,
+and removes its own private working files. This avoids leaving a timer holding
+output pipes open when a POSIX shell exits during watchdog startup. Cleanup
+terminates only recorded child PIDs. Stopping the Docker client does not promise
+cancellation of an import already executing inside the node. No image archive
+is saved to disk. Tests
 execute this real helper against
 offline Docker doubles, including producer/import failure, missing loaded
 reference, label mismatch, injection refusals, and a hung command.
@@ -248,10 +257,10 @@ Do not relax Azure's verified PostgreSQL/Redis TLS settings.
 Run only the offline checks before the parent reviews and executes:
 
 ```sh
-uv run python operations/local/validate.py
+uv run python scripts/operations/local/validate.py
 uv run pytest -q tests/operations/local
-uv run ruff check operations/local tests/operations/local
-shellcheck infra/radius/recipes/local/cluster/*.sh
+uv run ruff check scripts/operations/local tests/operations/local
+shellcheck scripts/recipes/local/cluster/*.sh
 ```
 
 The validator extracts each exact published archive into private project state,

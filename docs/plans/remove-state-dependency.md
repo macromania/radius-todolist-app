@@ -2,8 +2,12 @@
 
 This ExecPlan is a living document. Keep `Progress`, `Surprises & Discoveries`,
 `Decision Log`, and `Outcomes & Retrospective` current. It uses the OpenAI
-Cookbook ExecPlan format. The request on September 14, 2026 is to revise the
-plan, not implement or deploy it.
+Cookbook ExecPlan format. On September 14, 2026 the user approved implementation,
+rubber-duck/security review in every step, verification, commits, and pushing
+verified work. A subsequent instruction requires all operator/demo scripts
+under `scripts/` and Make-driven entrypoints from the repository root.
+The operator layer should use small Bash scripts and native CLIs for
+straightforward sequences, not a new Python orchestration framework.
 
 This is the current plan for the simplification work. It supersedes the original
 plan's requirements for durable `.state` files, exported endpoint inventories,
@@ -40,6 +44,8 @@ general-purpose workflow/retry engine.
 - [x] (2026-09-14) Draft the revised ownership, `.env`, discovery, local, and acceptance contracts.
 - [x] (2026-09-14) Initial security review found no vulnerabilities; rubber-duck review identified missing execution details.
 - [x] (2026-09-14) Both follow-up reviews passed after clarifying private-vault client access, naming, command stages, SQL initialization, local artifacts, orphaned-fault recovery, and node-owned encryption.
+- [x] (2026-09-14) Transaction-owned schema initialization implemented, reviewed, and verified on real disposable PostgreSQL 17.8; trigger/index enforcement drift fixes verified. Committed/pushed as `dd1526b`.
+- [ ] Complete script relocation under `scripts/operations`, `scripts/harness`, and `scripts/recipes` with root Make entrypoints.
 - [ ] Implement the `.env` initializer and shared configuration loader.
 - [ ] Implement temporary workspaces and live metadata discovery.
 - [ ] Move Azure credentials to Key Vault and local credentials to Kubernetes.
@@ -48,6 +54,7 @@ general-purpose workflow/retry engine.
 - [ ] Wire manual commands, API response contracts, scenarios, and cleanup.
 - [ ] Prove Azure first and local second, including fresh-checkout and empty-worker recovery.
 - [ ] Retire the old runtime paths, update documentation, and commit the verified implementation.
+- [ ] After implementation and verification, consolidate `docs/`, remove obsolete/duplicate documents and this ExecPlan, and update all surviving links.
 
 ## Surprises & Discoveries
 
@@ -148,10 +155,12 @@ rediscovery as permission to replay a partially completed operation automaticall
 
 The prior implementation proved the full scenario and was torn down. Those
 results establish a behavioral baseline, not proof of this simplification.
-The current work has produced a revised plan only. No `.env`, credentials,
-application code, database schema, or deployed resources have been changed.
-The plan and its concrete execution contracts passed rubber-duck and security
-review. Implementation milestones remain unchecked.
+Implementation is in progress. Transaction-owned database initialization is
+committed and pushed after real PostgreSQL verification and both review passes.
+The `.env` configuration primitives have 25 passing focused tests; their Make
+entrypoint and script relocation are still being integrated. Credential-store
+primitives are being implemented separately. No revised demo environment has
+been deployed, and the later integration/live milestones remain open.
 
 The intended outcome is fewer authorities, not a different directory name.
 The final implementation must function without `.state`, with an empty
@@ -180,8 +189,8 @@ This work removes discovery columns and file markers, not those access rules.
 `infra/bootstrap/azure.bicep` creates Azure management and the shared foundation.
 `infra/radius/apps/` contains the three environment-independent applications.
 Types define Radius APIs; Recipes implement Azure or local resources.
-`operations/local/` currently adds Docker/kind execution, persistent host
-records, and image inspection. `harness/` consumes exported state for API calls,
+`scripts/operations/local/` currently adds Docker/kind execution, persistent host
+records, and image inspection. `scripts/harness/` consumes exported state for API calls,
 faults, and acceptance. All these operator surfaces must use the new loader
 and live discovery, not only a new front-end command.
 
@@ -196,12 +205,15 @@ the former belongs in `.env`.
 ### One starting configuration, not a hidden deployment inventory
 
 
-Introduce a thin repository command `./demo` backed by `operations/demo.py`.
-Its first subcommand is `init`. These are proposed commands, not commands
+Use root Make targets backed by small scripts under `scripts/operations/`;
+do not add another root shell-script frontdoor. Prefer Bash plus native CLIs
+for initialization and straightforward operator sequences, keeping a narrow
+typed Python configuration helper only where shared runtime use justifies it.
+The first target is `init`. These are proposed commands, not commands
 available at the baseline:
 
-    ./demo init --environment azure
-    ./demo init --environment local
+    make init ENV=azure
+    make init ENV=local
 
 Interactive use prompts for missing starting values. Explicit flags support
 repeatable use without a terminal. At minimum, collect environment, project
@@ -236,7 +248,7 @@ with the same values leaves resource identities unchanged. Switching to local
 removes Azure-only values from the newly generated file and makes no cloud calls.
 Replacing `.env` changes the selected target, not the resources themselves.
 
-Implement a small typed loader in `operations/config.py` with a strict,
+Implement a small typed loader in `scripts/operations/config.py` with a strict,
 documented key/value format. Do not execute `.env` with `source`, `eval`, shell
 substitution, or interpolation. Support quoted literal values so punctuation in
 credentials round-trips. Reject duplicate/unknown keys and malformed identifiers
@@ -301,8 +313,8 @@ endpoint, and Kubernetes access come from the child/resource owner APIs.
 No management database URL column, `endpoints.json`, `acceptance.json`, or
 previous run output may substitute for a failed discovery call.
 
-`./demo endpoints` and `./demo api management|control:PAIR|data:PAIR ...` resolve
-the target at command time. `./demo kube SLOT ...` obtains fresh scoped access.
+`make endpoints` and `make api ARGS='management|control:PAIR|data:PAIR ...'` resolve
+the target at command time. `make kube ARGS='SLOT ...'` obtains fresh scoped access.
 Scenario tools use the same interface and actual plane APIs; they do not query
 SQL for endpoint inventory. A discovery outage is reported as such rather than
 an empty inventory, stale URL, or successful health result.
@@ -423,7 +435,7 @@ Active fault restoration needs a recoverable description even if the host
 command exits. Store the fault's non-secret ID, target UID, rule/policy reference,
 and restoration status in an owned Kubernetes ConfigMap alongside its target,
 before mutation. Azure's actual Cilium policy and local's actual Pod network
-rule remain the mechanisms. A later `./demo fault restore ID` discovers and
+rule remain the mechanisms. A later `make fault ARGS='restore ID'` discovers and
 restores the exact owned fault without a local journal pathname. Do not store
 access credentials or treat a journal's claim as proof that the rule was removed.
 
@@ -458,7 +470,7 @@ container runtime. Public dependency downloads during tool/image preparation
 are distinct from an Azure runtime dependency; once those dependencies are
 available, local deployment and scenarios must work without cloud access.
 
-Make `./demo build` prepare the complete local dependency set before bootstrap:
+Make `make build` prepare the complete local dependency set before bootstrap:
 the pinned kind node and workload images, Radius chart and all rendered Radius
 images, Terraform binary and provider packages, and the existing administrative
 CLI binaries. Store reusable dependencies in the local Docker image store and
@@ -519,16 +531,17 @@ no deployed workload or manual scenario may require it.
 ### Milestone 1: establish the `.env` entrypoint
 
 
-Add `demo`, `operations/demo.py`, `operations/config.py`, `.env.example`, and
-focused tests under `tests/operations/`. Keep the CLI as a thin dispatcher to
-existing operations, not a replacement orchestration framework. Every command
+Add root Make targets, a small initialization script, shared configuration
+parsing, `.env.example`, and focused tests under `tests/operations/`. Keep the
+entrypoints as thin calls to existing tools, not a replacement orchestration
+framework. Every command
 must receive the same typed starting configuration. Replace hard-coded operator
 subscription/project/deployment inputs at the boundary; retain valid existing
 logical role names, component labels, and five slot names.
 
 This is not only a command-line substitution. Update `OperatorConfig.from_dict`
 in `management/provisioning.py`, `LocalConfig.from_dict` in
-`management/providers/local_config.py`, `operations/project.py`,
+`management/providers/local_config.py`, `scripts/operations/project.py`,
 `infra/bootstrap/*.bicep`, the local cluster Recipe naming locals, and the
 export/fault/cleanup target validators that currently require fixed project,
 region, or resource names. They must share the deterministic naming contract
@@ -549,8 +562,8 @@ cloud lookup for local initialization.
 Add the discovery interface and provider-specific implementation. Wire Azure
 access methods in `management/providers/azure.py`, kind/Kubernetes access in
 `management/providers/local.py`, and temporary CLI homes in
-`management/providers/commands.py`. Refactor `operations/project.py` bootstrap
-output handling and `operations/run-management-job.py` so a fresh operator
+`management/providers/commands.py`. Refactor `scripts/operations/project.py` bootstrap
+output handling and `scripts/operations/run-management-job.py` so a fresh operator
 discovers existing outputs instead of rebuilding a saved configuration bundle.
 
 Complete the currently manual Azure artifact handoffs as part of this wiring:
@@ -562,8 +575,8 @@ not a durable approval-file requirement.
 
 Update the explicit copied-source lists in `images/provisioner/Dockerfile`
 and `images/local-provisioner/Dockerfile` for the new operator configuration
-and discovery helpers. Update `operations/local/runtime-images.py`,
-`operations/build-images.py`, and `harness/test-e2e.py` source inspection
+and discovery helpers. Update `scripts/operations/local/runtime-images.py`,
+`scripts/operations/build-images.py`, and `scripts/harness/test-e2e.py` source inspection
 manifests at the same time. Verify the built administrative images contain the
 actual new entrypoints; keep those helpers and secret-store libraries out of
 the public API image unless they are genuinely needed by its allowed runtime.
@@ -577,7 +590,7 @@ discovery failures must remain visible; no stale-data fallback is permitted.
 
 Implement the two credential stores and update
 `management/providers/credentials.py`, `management/providers/workloads.py`,
-`management/provisioner.py`, `operations/deploy-plane.py`, and both provider
+`management/provisioner.py`, `scripts/operations/deploy-plane.py`, and both provider
 prerequisite paths. Add required secret-object access under the existing
 bootstrap identity model; do not grant runtime role delegation.
 
@@ -617,8 +630,8 @@ password reuse from the actual initialization entrypoint, not only a helper.
 
 
 Prove the node-owned encryption bootstrap experiment. Then update
-`operations/local/bootstrap.py`, `operations/local/setup-demo.py`,
-`operations/local/deploy-demo.py`, local Recipe publication and image access,
+`scripts/operations/local/bootstrap.py`, `scripts/operations/local/setup-demo.py`,
+`scripts/operations/local/deploy-demo.py`, local Recipe publication and image access,
 and the management executor setup. Preserve child ownership through Radius
 while eliminating checkout mounts and durable host records.
 
@@ -631,13 +644,13 @@ not merely the top-level CLI branch.
 ### Milestone 6: wire the guides, APIs, fault controls, and cleanup
 
 
-Replace required `harness/api.py` endpoint-file lookup with live discovery.
-Refactor `harness/export-state.py`, `harness/local/export-state.py`,
-`harness/test-e2e.py`, and both fault implementations. Any retained export command
+Replace required `scripts/harness/api.py` endpoint-file lookup with live discovery.
+Refactor `scripts/harness/export-state.py`, `scripts/harness/local/export-state.py`,
+`scripts/harness/test-e2e.py`, and both fault implementations. Any retained export command
 is an optional report command; it must not prepare hidden prerequisites for the
 next action.
 
-Add `./demo endpoints`, `./demo api`, `./demo kube`, and fault/status/cleanup
+Add `make endpoints`, `make api`, `make kube`, and fault/status/cleanup
 subcommands as thin uses of the shared resolver. Every plane target and
 scenario, including reused pairs, must follow the same API-only discovery path.
 Do not maintain an old `.state` path as a silent fallback.
@@ -670,6 +683,13 @@ their callers use the new owners. Do not bulk-delete historical `.state`
 evidence or the unrelated user file. Retain optional scratch/report export as
 clearly disposable output. Commit reviewed, verified changes in coherent phases.
 
+The user explicitly requested a lean final `docs/` folder. Once the implementation
+and its verification are complete, consolidate useful current material, delete
+obsolete or duplicate documents under `docs/`, and delete this ExecPlan itself.
+Keep the root Azure/local scenario guides as the manual walkthroughs and fix
+README, AGENTS, and reference links. Do not delete the active plan early or
+silently remove unrelated user-authored root design documents.
+
 ## Concrete Steps
 
 
@@ -694,7 +714,7 @@ registers the types/environment/Recipes, initializes PostgreSQL and its roles,
 injects scoped ConfigMaps/Secrets, deploys management's API/provisioner/gateway,
 and waits for the actual completion/health/readiness checks. Azure keeps its
 certificate issuance path; local does not invoke it. Reuse
-`operations/deploy-plane.py`, `run-management-job.py`, and local setup/deploy
+`scripts/operations/deploy-plane.py`, `run-management-job.py`, and local setup/deploy
 functions behind these commands rather than maintaining two independent
 implementations. A submitted asynchronous Job is reported as submitted until
 its completion is observed.
@@ -702,35 +722,35 @@ its completion is observed.
 The following is the intended command surface to implement. Do not claim these
 commands exist until their milestone is complete:
 
-    ./demo init --environment azure
-    ./demo bootstrap
-    ./demo build
-    ./demo deploy-management
-    ./demo endpoints
-    ./demo api management POST /tenants '{"tenant_id":"shared-a","isolation":"shared","initial_message":"alpha"}'
-    ./demo api management GET /tenants/shared-a
-    ./demo api control:shared GET /tenants/shared-a
-    ./demo api data:shared GET /tenants/shared-a
+    make init ENV=azure
+    make bootstrap
+    make build
+    make deploy-management
+    make endpoints
+    printf '%s' '{"tenant_id":"shared-a","isolation":"shared","initial_message":"alpha"}' | make api ARGS='management POST /tenants'
+    make api ARGS='management GET /tenants/shared-a'
+    make api ARGS='control:shared GET /tenants/shared-a'
+    make api ARGS='data:shared GET /tenants/shared-a'
 
 The API response still distinguishes accepted provisioning from ready control
 records and applied data configuration. Repeat manual scenarios for `shared-b`
 and `isolated-c`. Fault commands must target logical slots and return a
 discoverable fault ID rather than a local file dependency:
 
-    ./demo fault start --slot shared-control --component control-reconciler --duration 60
-    ./demo fault status
-    ./demo fault restore <fault-id>
-    ./demo clean
-    ./demo verify-clean
+    make fault ARGS='start --slot shared-control --component control-reconciler --duration 60'
+    make fault ARGS='status'
+    make fault ARGS='restore <fault-id>'
+    make clean
+    make verify-clean
 
 For local, initialize the same file for local and follow the same logical
 commands. Initialization itself does not delete or change an Azure deployment:
 
-    ./demo init --environment local
-    ./demo build
-    ./demo bootstrap
-    ./demo deploy-management
-    ./demo endpoints
+    make init ENV=local
+    make build
+    make bootstrap
+    make deploy-management
+    make endpoints
 
 Normal operation must not require manual `source .env`, `export_state`,
 `acceptance.json`, a particular working directory under `.state`, or copying
@@ -760,7 +780,7 @@ the next independent client command to query the owner API and use the new
 value. A failed discovery request must not return a stale value or silently
 use another scope.
 
-For `./demo api`, first discover the selected plane's cluster and namespace.
+For `make api`, first discover the selected plane's cluster and namespace.
 An authenticated operator reads only `DEMO_KEY` from that plane's existing
 `<role>-api-runtime` Kubernetes Secret, in memory, and sends it to the discovered
 API. This is a read by the operator, not a new permission on the public API.
@@ -846,7 +866,7 @@ separately approved migration path if one is later needed.
 ## Interfaces and Dependencies
 
 
-Keep new interfaces small and typed. `DemoConfig` in `operations/config.py`
+Keep new interfaces small and typed. `DemoConfig` in `scripts/operations/config.py`
 represents user-selected environment, project, deployment, Azure fields when
 applicable, and optional secret inputs with redacted representations.
 `load_config(path)` has no resource mutations; `initialize_config(...)` performs
@@ -902,4 +922,5 @@ Revision note, review corrections: made operator key access work without direct
 workstation connectivity to the private vault; defined naming and command-stage
 contracts; replaced vague initialization markers with a transactional schema
 version; specified local dependency preparation and actual orphaned-fault
-recovery tests. All source/workload changes remain future implementation work.
+recovery tests. Implementation status is recorded in `Progress`; uncompleted milestones must
+not be described as verified.

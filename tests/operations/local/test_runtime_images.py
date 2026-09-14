@@ -7,7 +7,7 @@ from unittest.mock import Mock
 import pytest
 from local_support import ROOT, common, load
 
-runtime = load("local_runtime_images", ROOT / "operations/local/runtime-images.py")
+runtime = load("local_runtime_images", ROOT / "scripts/operations/local/runtime-images.py")
 REVISION = "a" * 40
 
 
@@ -150,14 +150,15 @@ def test_api_source_manifest_excludes_privileged_code():
     assert "src/plane_demo/data/api.py" in sources
     assert "sql/management.sql" in sources
     assert not any(
-        "/providers/" in path or path.endswith("/provisioner.py") or path.startswith("operations/")
+        "/providers/" in path or path.endswith("/provisioner.py") or path.startswith("scripts/")
         for path in sources
     )
 
 
 def test_copied_local_overlay_is_part_of_the_worker_source_manifest():
-    assert "operations/local/dynamic-rp-overlay.yaml" in runtime.expected_hashes("provisioner")
-    assert "operations/local/dynamic-rp-overlay.yaml" not in runtime.expected_hashes("api")
+    relative = "scripts/operations/local/dynamic-rp-overlay.yaml"
+    assert relative in runtime.expected_hashes("provisioner")
+    assert relative not in runtime.expected_hashes("api")
 
 
 def test_inspection_requires_a_recorded_guarded_build(images, local_state):

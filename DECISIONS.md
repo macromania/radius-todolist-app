@@ -448,3 +448,17 @@ child ownership remain explicit infrastructure mechanisms. The full
 [revised ExecPlan](docs/plans/remove-state-dependency.md) defines the interfaces,
 local executor tradeoff, and fresh-checkout/empty-worker acceptance. This
 decision is planned, not implemented by the documentation revision.
+
+## D044 - Keep operator scripts small and Make-driven
+
+The September 14 implementation direction puts operational and scenario scripts
+under `scripts/`, with the root Makefile as the public entrypoint. Preserve
+administration, harness, and Recipe-helper groups rather than creating one flat
+directory.
+
+Use Bash and native `az`, `rad`, `kubectl`, `kind`, `docker`, and `jq` commands
+for straightforward operator sequences. Python remains appropriate for the
+application APIs, reconciliation, provisioning state transitions, database
+transactions, and narrowly scoped reusable logic. Do not add a Python
+orchestration framework around commands that are clearer as shell, or translate
+complex tested logic into equally complex shell merely for uniformity.

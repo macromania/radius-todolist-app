@@ -31,10 +31,13 @@ COPY infra/radius/environments/*.bicep /app/infra/radius/environments/
 COPY infra/radius/types/*.yaml infra/radius/types/*.tgz /app/infra/radius/types/
 COPY infra/radius/bicepconfig.json /app/infra/radius/
 COPY infra/radius/recipes /app/infra/radius/recipes
-COPY operations/project.py operations/install-radius.py operations/deploy-plane.py \
-    operations/register-radius.py operations/issue-certificate.py operations/acme-hook.py \
-    operations/run-certificate-job.py /app/operations/
-COPY operations/local /app/operations/local
+COPY scripts/__init__.py /app/scripts/
+COPY scripts/operations/__init__.py scripts/operations/config.py scripts/operations/demo.py \
+    scripts/operations/project.py scripts/operations/install-radius.py scripts/operations/deploy-plane.py \
+    scripts/operations/register-radius.py scripts/operations/issue-certificate.py scripts/operations/acme-hook.py \
+    scripts/operations/run-certificate-job.py /app/scripts/operations/
+COPY scripts/operations/local /app/scripts/operations/local
+COPY scripts/recipes/local/cluster/*.sh /app/scripts/recipes/local/cluster/
 ENV HOME=/home/plane
 USER 10001:10001
 RUN /home/plane/.rad/bin/bicep --version && rad version --cli && kubectl version --client && \

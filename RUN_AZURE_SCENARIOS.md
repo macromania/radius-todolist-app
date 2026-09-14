@@ -85,6 +85,32 @@ Expect a clean worktree. `make check-bicep` compiles the infrastructure and
 generates the Radius extensions needed by the images. To explore the unit and
 infrastructure tests separately, run `make check`; it creates no clusters.
 
+### Select operator configuration
+
+The root Makefile is the public command entrypoint. Operator and demo utilities
+live under `scripts/operations/` and `scripts/harness/`.
+
+```bash
+make init ENV=azure
+make show-config
+```
+
+Initialization creates or replaces the checkout's private `.env`. It may read
+the active Azure subscription as a suggestion but does not deploy resources.
+Supply nonsecret options through `ARGS` to avoid the account lookup:
+
+```bash
+make init ENV=azure \
+  ARGS='--subscription <subscription-uuid> --location centralus --project demo --deployment team'
+```
+
+`make show-config` reads `.env` without executing its contents and redacts demo
+keys. For demo keys, forward `--prompt-demo-key SLOT` or
+`--demo-key-from-env SLOT=VARIABLE`, never the key value itself.
+
+The deployment targets below still use their existing explicit configuration
+and `.state` records. Initializing `.env` does not yet retarget those commands.
+
 Keep source unchanged during the demo. Image and export checks bind the
 deployment to the committed source.
 
@@ -204,10 +230,10 @@ set -o pipefail
 umask 077
 mkdir -p "$STATE/manual"
 
-api() { ./harness/api.sh "$DEMO_ENV" "$@"; }
+api() { ./scripts/harness/api.sh "$DEMO_ENV" "$@"; }
 
 export_state() {
-  uv run --no-sync python harness/export-state.py --once
+  uv run --no-sync python scripts/harness/export-state.py --once
 }
 
 k() {
@@ -518,7 +544,7 @@ k shared-data auth can-i list secrets --as="$API_ID"
 Expect `data-api-runtime`, then `yes`, `no`, `no`. A denial exits nonzero.
 An operator impersonation error is not a successful denial check.
 The full in-Pod/named-permission check is available as
-[`DATA_API_PERMISSIONS_PROBE`](harness/test-e2e.py).
+[`DATA_API_PERMISSIONS_PROBE`](scripts/harness/test-e2e.py).
 
 ### F. Block the management database link
 
@@ -534,7 +560,7 @@ database connection.
 In the second terminal:
 
 ```bash
-uv run --no-sync python harness/fault-parent-link.py \
+uv run --no-sync python scripts/harness/fault-parent-link.py \
   --config "$STATE/acceptance.json" \
   --slot shared-control --component control-reconciler --duration 300 --execute
 ```
@@ -603,7 +629,7 @@ jq . "$STATE/manual/outage-baseline.json"
 In the fault terminal:
 
 ```bash
-uv run --no-sync python harness/fault-parent-link.py \
+uv run --no-sync python scripts/harness/fault-parent-link.py \
   --config "$STATE/acceptance.json" \
   --slot shared-data --component data-reconciler --duration 300 --execute
 ```
@@ -665,7 +691,7 @@ Prefer letting the timer finish. Ctrl-C requests restoration; still inspect
 the journal. If the process has stopped without confirmed restoration:
 
 ```bash
-uv run --no-sync python harness/fault-parent-link.py \
+uv run --no-sync python scripts/harness/fault-parent-link.py \
   --config "$STATE/acceptance.json" --restore "$FAULT_FILE" --execute
 jq '{outcome, restored, physical_restored}' "$FAULT_FILE"
 ```
@@ -704,8 +730,8 @@ deployment removal. Retain protected evidence and access records for review.
 | How Azure child clusters are provisioned | [Step-by-step Recipe walkthrough and deployment scopes](HOW_PROVISIONING_WORKS.md) |
 | Runtime | `src/plane_demo/{management,control,data,shared,setup}`, `sql/` |
 | Infrastructure | `infra/radius/apps/` declares planes; `types/` defines APIs; `recipes/` implements them; `environments/` selects Recipes |
-| Administration | `operations/`, [Azure operations](docs/azure.md) |
-| Harness pieces to inspect | `harness/api.py`, exporters, [`Runner.scenario`, `management_outage`, `control_outage`](harness/test-e2e.py), [harness reference](tests/harness/README.md) |
+| Administration | `scripts/operations/`, [Azure operations](docs/azure.md) |
+| Harness pieces to inspect | `scripts/harness/api.py`, exporters, [`Runner.scenario`, `management_outage`, `control_outage`](scripts/harness/test-e2e.py), [harness reference](tests/harness/README.md) |
 | Results and limits | [Findings](FINDINGS.md), [decisions](DECISIONS.md), [limitations](docs/limitations.md) |
 
 Use synthetic data. Shared demo keys keep the API examples simple; production

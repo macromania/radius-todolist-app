@@ -1,6 +1,6 @@
 # Full local cleanup
 
-`operations/local/cleanup.py` implements bounded, owner-ordered teardown of the
+`scripts/operations/local/cleanup.py` implements bounded, owner-ordered teardown of the
 five-cluster local demonstration. **It destroys the demo databases, Redis data,
 and node-local PVC storage.** Run acceptance and preserve its evidence first.
 Offline tests are not proof that live cleanup or the full local scenario passed.
@@ -11,13 +11,13 @@ this operator does not adopt that gate's resource or Terraform state.
 
 ```sh
 # Read-only Docker/Kubernetes/Radius checks and an ordered preview:
-uv run python operations/local/cleanup.py
+uv run python scripts/operations/local/cleanup.py
 
 # Explicit destructive opt-in, only after reviewing the preview:
-uv run python operations/local/cleanup.py --execute
+uv run python scripts/operations/local/cleanup.py --execute
 
 # Independent read-only verification using the exact retained cleanup record:
-uv run python operations/local/cleanup.py \
+uv run python scripts/operations/local/cleanup.py \
   --verify .state/local/evidence/cleanup-<run-id>.json
 ```
 
@@ -38,7 +38,7 @@ path, a state-relative `evidence/...` path, or an absolute path inside protected
 Export state while **all five clusters remain reachable**:
 
 ```sh
-uv run python harness/local/export-state.py --once
+uv run python scripts/harness/local/export-state.py --once
 ```
 
 Cleanup requires the protected `.state/local/provisioning.json`,

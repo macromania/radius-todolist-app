@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-SCRIPTS = Path(__file__).parents[2] / "operations"
+SCRIPTS = Path(__file__).parents[2] / "scripts/operations"
 sys.path.insert(0, str(SCRIPTS))
 SPEC = importlib.util.spec_from_file_location("install_radius", SCRIPTS / "install-radius.py")
 installer = importlib.util.module_from_spec(SPEC)

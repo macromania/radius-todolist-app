@@ -16,11 +16,11 @@ be recreated for this gate.
 |---|---|
 | `infra/radius/recipes/local/cluster/` | Radius-owned Terraform child creation, protected access Secret, and destruction |
 | `images/radius-kind/Dockerfile` | Separate `executor` and `operator` targets; no API/provisioner image reuse |
-| `operations/local/prepare.py` | Deterministic, allowlisted module archive and static in-cluster publication manifests |
-| `operations/local/images.py` | Explicit image build and actual binary/content inspection |
-| `operations/local/bootstrap.py` | Operator-owned management kind exception, Radius installation, management-only overlay |
-| `operations/local/bootstrap-child.py` | Runs inside a management Pod; verifies child TLS and installs child Radius/workload |
-| `harness/local/cluster-gate.py` | Drives and verifies the single-child experiment, including Radius deletion |
+| `scripts/operations/local/prepare.py` | Deterministic, allowlisted module archive and static in-cluster publication manifests |
+| `scripts/operations/local/images.py` | Explicit image build and actual binary/content inspection |
+| `scripts/operations/local/bootstrap.py` | Operator-owned management kind exception, Radius installation, management-only overlay |
+| `scripts/operations/local/bootstrap-child.py` | Runs inside a management Pod; verifies child TLS and installs child Radius/workload |
+| `scripts/harness/local/cluster-gate.py` | Drives and verifies the single-child experiment, including Radius deletion |
 | `tests/operations/local/` | Offline command-path, refusal, protection, and Terraform mock-provider tests |
 
 Management is `radplanes-local-management`. The only admitted child is
@@ -57,21 +57,21 @@ commands make no cluster/Docker calls. Preparation writes only ignored, private
 `.state/local/` artifacts:
 
 ```sh
-uv run python operations/local/prepare.py
-uv run python operations/local/images.py build
-uv run python operations/local/bootstrap.py create
-uv run python operations/local/bootstrap.py install
-uv run python harness/local/cluster-gate.py run
+uv run python scripts/operations/local/prepare.py
+uv run python scripts/operations/local/images.py build
+uv run python scripts/operations/local/bootstrap.py create
+uv run python scripts/operations/local/bootstrap.py install
+uv run python scripts/harness/local/cluster-gate.py run
 ```
 
 After reviewing the source, the parent executes each stage explicitly:
 
 ```sh
-uv run python operations/local/images.py build --execute
-uv run python operations/local/images.py inspect --execute
-uv run python operations/local/bootstrap.py create --execute
-uv run python operations/local/bootstrap.py install --execute
-uv run python harness/local/cluster-gate.py run --execute
+uv run python scripts/operations/local/images.py build --execute
+uv run python scripts/operations/local/images.py inspect --execute
+uv run python scripts/operations/local/bootstrap.py create --execute
+uv run python scripts/operations/local/bootstrap.py install --execute
+uv run python scripts/harness/local/cluster-gate.py run --execute
 ```
 
 The image build uses a narrow `images/radius-kind/` context, native Docker Desktop
@@ -149,12 +149,15 @@ or secrets-manager integration. **Terraform state contains the child administrat
 private key.** `sensitive()` limits expression disclosure; it does not encrypt
 state, and the provider's own computed credentials are not marked sensitive.
 
-Management's Kubernetes API encrypts Secrets in etcd using a generated AES-CBC
-key held in a mode-0600 project file under mode-0700 state directories. kind 0.31
-generates kubeadm v1beta3 even for Kubernetes 1.35, so both encryption and child
-certificate-SAN patches must match that API and its map-shaped `extraArgs`.
-Bootstrap verifies a harmless Secret's actual ciphertext before reporting ready
-or permitting Radius installation. The gate
+Management's Kubernetes API encrypts new Secrets in etcd using a generated
+AES-CBC key stored mode `0600` inside the management node. Bootstrap invokes
+`scripts/operations/local/encryption.sh` after kind starts, configures the static
+API server Pod, and verifies a harmless Secret's actual ciphertext before
+reporting ready or permitting Radius installation. No checkout key file is
+mounted. The helper preserves named probe ports and reuses the same node-owned
+key across reruns and node stop/start. Existing Secrets are not claimed encrypted
+unless rewritten. Child certificate-SAN patches still use kind's kubeadm
+v1beta3 format and map-shaped `extraArgs`. The gate
 reads the actual etcd value through the scoped etcd Pod and verifies the encryption
 prefix, both for the Radius encryption-key Secret and the Recipe's state/access
 Secrets. These are read-only backing-store checks, never edits. Default service
@@ -226,7 +229,7 @@ gate already recorded completed child/state ownership, the parent can request
 only the supported Radius deletion:
 
 ```sh
-uv run python harness/local/cluster-gate.py delete \
+uv run python scripts/harness/local/cluster-gate.py delete \
   --run .state/local/runs/<run-id>.json --execute
 ```
 
@@ -248,9 +251,9 @@ The local provisioner adds Kubernetes/Radius/Bicep tools and administrative code
 but no Docker socket or Azure login. Prepare them from committed image inputs:
 
 ```sh
-uv run python operations/local/runtime-images.py build --execute
-uv run python operations/local/runtime-images.py inspect --execute
-uv run python operations/local/runtime-images.py load-management --execute
+uv run python scripts/operations/local/runtime-images.py build --execute
+uv run python scripts/operations/local/runtime-images.py inspect --execute
+uv run python scripts/operations/local/runtime-images.py load-management --execute
 ```
 
 These commands never publish images to a registry. Tags include the full source
@@ -302,10 +305,10 @@ five-cluster tenant scenario, or local outage behavior.
 ## Offline validation
 
 ```sh
-uv run ruff check operations/local harness/local tests/operations/local
+uv run ruff check scripts/operations/local scripts/harness/local tests/operations/local
 uv run pytest -q tests/operations/local
-uv run python operations/local/validate.py
-shellcheck infra/radius/recipes/local/cluster/node-address.sh
+uv run python scripts/operations/local/validate.py
+shellcheck scripts/recipes/local/cluster/node-address.sh
 ```
 
 The Terraform validator copies the exact archive into private temporary project

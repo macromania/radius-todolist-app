@@ -17,7 +17,9 @@ from unittest.mock import Mock, patch
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[2]
-SPEC = importlib.util.spec_from_file_location("azure_harness", ROOT / "harness/run-azure.py")
+SPEC = importlib.util.spec_from_file_location(
+    "azure_harness", ROOT / "scripts/harness/run-azure.py"
+)
 runner = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(runner)
 COMMIT = "a" * 40
@@ -184,7 +186,10 @@ class AzureRunnerTests(unittest.TestCase):
             runner.state_path(link / "config")
 
     def test_source_guard_includes_untracked_exercised_code_and_real_git_root(self):
-        for dirty, git_root in (("?? harness/run-azure.py", str(self.root)), ("", "/foreign")):
+        for dirty, git_root in (
+            ("?? scripts/harness/run-azure.py", str(self.root)),
+            ("", "/foreign"),
+        ):
             calls = []
 
             def git(argv, calls=calls, git_root=git_root, dirty=dirty):
@@ -199,7 +204,7 @@ class AzureRunnerTests(unittest.TestCase):
             if dirty:
                 status = next(a for a in calls if "status" in a)
                 self.assertIn("--untracked-files=all", status)
-                for path in ("harness", "src", "operations", "infra", "images", "sql"):
+                for path in ("scripts", "src", "infra", "images", "sql"):
                     self.assertIn(path, status)
 
     def test_clean_committed_source_and_tracked_state_refusal(self):

@@ -8,7 +8,7 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 SPEC = importlib.util.spec_from_file_location(
-    "issuance", Path(__file__).parents[2] / "operations/issue-certificate.py"
+    "issuance", Path(__file__).parents[2] / "scripts/operations/issue-certificate.py"
 )
 issuance = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(issuance)

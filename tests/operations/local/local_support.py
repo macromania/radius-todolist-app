@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
-LOCAL = ROOT / "operations/local"
+LOCAL = ROOT / "scripts/operations/local"
 sys.path.insert(0, str(LOCAL))
 
 import bootstrap as bootstrap  # noqa: E402
@@ -20,6 +20,6 @@ def load(name, path):
     return module
 
 
-gate = load("local_cluster_gate", ROOT / "harness/local/cluster-gate.py")
+gate = load("local_cluster_gate", ROOT / "scripts/harness/local/cluster-gate.py")
 child = load("local_bootstrap_child", LOCAL / "bootstrap-child.py")
 server = load("local_module_server", LOCAL / "module-server.py")

@@ -14,7 +14,8 @@ from uuid import uuid4
 import httpx
 
 SPEC = importlib.util.spec_from_file_location(
-    "acceptance_runner_under_test", Path(__file__).resolve().parents[2] / "harness/test-e2e.py"
+    "acceptance_runner_under_test",
+    Path(__file__).resolve().parents[2] / "scripts/harness/test-e2e.py",
 )
 runner_module = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = runner_module

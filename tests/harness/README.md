@@ -19,7 +19,7 @@ state directory.
 uv run python -m unittest discover -s tests/harness -p 'test_*.py'
 
 # After parent deployment/integration gates, reviewed commits, and state export:
-uv run python harness/test-e2e.py --config .state/azure/acceptance.json --mode all --execute
+uv run python scripts/harness/test-e2e.py --config .state/azure/acceptance.json --mode all --execute
 ```
 
 Modes are `scenario`, `outages`, `all` (default), and `verify-existing`.
@@ -57,18 +57,18 @@ After committed, inspected native runtime images and management deployment:
 
 ```sh
 # Read-only: exit 3 means the expected child state is incomplete, not failure.
-uv run python harness/local/export-state.py --once
+uv run python scripts/harness/local/export-state.py --once
 
 # Keep this foreground process, or a parent-owned attached async process, running
 # through admissions. Wait for export-status.json ready_for_onboarding: true.
-uv run python harness/local/export-state.py --watch --timeout 10800
+uv run python scripts/harness/local/export-state.py --watch --timeout 10800
 
 # Mutations and API requests require the explicit execution switch.
-uv run python harness/test-e2e.py --config .state/local/acceptance.json --mode all --execute
+uv run python scripts/harness/test-e2e.py --config .state/local/acceptance.json --mode all --execute
 
-./harness/api.sh local management GET /tenants/shared-a
-./harness/api.sh local control:shared GET /tenants/shared-a
-./harness/api.sh local data:isolated-1 POST /tenants/isolated-c/counter
+./scripts/harness/api.sh local management GET /tenants/shared-a
+./scripts/harness/api.sh local control:shared GET /tenants/shared-a
+./scripts/harness/api.sh local data:isolated-1 POST /tenants/isolated-c/counter
 ```
 
 The only provisioning input is the protected `.state/local/provisioning.json`
@@ -167,18 +167,18 @@ investigate; do not flush rules or reset clusters. After an interruption, only
 the recorded, still-owned rule may be restored:
 
 ```sh
-uv run python harness/fault-parent-link.py --config .state/local/acceptance.json \
+uv run python scripts/harness/fault-parent-link.py --config .state/local/acceptance.json \
   --restore .state/local/evidence/RECORDED-FAULT.json --execute
 ```
 
 Standalone local faults route through the same command (or
-`harness/local/fault-parent-link.py`) using `--slot shared-control
+`scripts/harness/local/fault-parent-link.py`) using `--slot shared-control
 --component control-reconciler --duration 60 --execute`. Restore-only success
 is not acceptance. The Azure-only first-admission continuation remains
 Azure-only; local execution must not reinterpret historical Azure evidence.
 
 Cleanup tooling can call `assert_restored_for_cleanup(commands.run, configuration)`
-from `harness/local/fault-parent-link.py`, using that module's
+from `scripts/harness/local/fault-parent-link.py`, using that module's
 `base.Configuration`. This read-only helper requires a complete five-target
 export, validates protected fault journals, and reuses the exact node/Pod/CRI
 network-namespace guards. Attempted faults must have successful restoration
@@ -195,7 +195,7 @@ inserts or removes a rule.
 For in-cluster execution when the workstation cannot reach the AKS API:
 
 ```sh
-CONFIRM_AZURE=yes uv run python harness/run-azure.py --images-inspected --mode all --execute
+CONFIRM_AZURE=yes uv run python scripts/harness/run-azure.py --images-inspected --mode all --execute
 ```
 
 This submits, but does not await, a `demo-acceptance-*` Job in management through
@@ -235,11 +235,11 @@ No configurable timeout or general retry mechanism is added.
 ### Verify already-existing tenants
 
 ```sh
-uv run python harness/test-e2e.py --config .state/azure/acceptance.json \
+uv run python scripts/harness/test-e2e.py --config .state/azure/acceptance.json \
   --mode verify-existing --execute
 
 # Through the existing in-cluster launcher, with the usual deployment guards:
-CONFIRM_AZURE=yes uv run python harness/run-azure.py \
+CONFIRM_AZURE=yes uv run python scripts/harness/run-azure.py \
   --images-inspected --mode verify-existing --execute
 ```
 
@@ -322,10 +322,10 @@ key, namespace UID, or component-name editing is required:
 
 ```sh
 # One read-only pass. Exit 3 means expected child state is still incomplete.
-uv run python harness/export-state.py --once
+uv run python scripts/harness/export-state.py --once
 
 # Run in the foreground, or as a parent-owned attached async command, during onboarding.
-uv run python harness/export-state.py --watch --timeout 7200
+uv run python scripts/harness/export-state.py --watch --timeout 7200
 ```
 
 The default input is `.state/azure/provisioning.json`; `--config` accepts another
@@ -364,7 +364,7 @@ order is never used as a role index.
 Each complete plane is published progressively. Every `acceptance.json` points
 at a matching immutable `exported-state/GENERATION/endpoints.json`, so the
 unchanged runner cannot mix generations. `endpoints.json` remains an atomic
-compatibility projection for `harness/api.py`. Generations and keys remain
+compatibility projection for `scripts/harness/api.py`. Generations and keys remain
 protected in project state until environment teardown. A single-writer lock
 prevents concurrent exporters from dropping newer targets. Missing children
 preserve the previous snapshot; authorization errors, ownership/identity changes,
@@ -629,11 +629,11 @@ Restoration failure is a failure, never masked by successful API requests.
 Standalone fault and recovery commands:
 
 ```sh
-uv run python harness/fault-parent-link.py --config .state/azure/acceptance.json \
+uv run python scripts/harness/fault-parent-link.py --config .state/azure/acceptance.json \
   --slot shared-control --component control-reconciler --duration 60 --execute
 
 # After an interrupted operator process, use its exact recorded evidence file:
-uv run python harness/fault-parent-link.py --config .state/azure/acceptance.json \
+uv run python scripts/harness/fault-parent-link.py --config .state/azure/acceptance.json \
   --restore .state/azure/evidence/fault-EXACT-RUN.json --execute
 ```
 

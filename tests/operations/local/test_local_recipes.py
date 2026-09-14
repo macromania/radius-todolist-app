@@ -2,6 +2,7 @@ import base64
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
 import tarfile
@@ -12,6 +13,7 @@ import pytest
 from local_support import ROOT, common, load, prepare, server
 
 RECIPES = ROOT / "infra/radius/recipes/local"
+HELPERS = ROOT / "scripts/recipes/local"
 SLOTS = ("shared-control", "shared-data", "isolated-1-control", "isolated-1-data")
 API_IMAGE = "localhost/radplanes-plane-api:" + "a" * 40
 WORKER_IMAGE = "localhost/radplanes-plane-provisioner:" + "b" * 40
@@ -25,7 +27,8 @@ def test_every_recipe_archive_is_deterministic_and_source_only(recipe):
         assert archive.getnames() == list(prepare.RECIPE_FILES[recipe])
         assert all(member.isfile() and member.mode == 0o644 for member in archive)
         for member in archive:
-            expected = (RECIPES / recipe / member.name).read_bytes()
+            directory = HELPERS if member.name.endswith(".sh") else RECIPES
+            expected = (directory / recipe / member.name).read_bytes()
             assert archive.extractfile(member).read() == expected
     assert ".terraform.lock.hcl" in prepare.RECIPE_FILES[recipe]
     assert all(not name.startswith(".terraform/") for name in prepare.RECIPE_FILES[recipe])
@@ -59,7 +62,7 @@ def test_archive_rejects_symlinked_parent_without_reading_target(tmp_path, monke
 
 def test_publication_refuses_symlinked_server_code(tmp_path, monkeypatch):
     monkeypatch.setattr(prepare, "ROOT", tmp_path)
-    directory = tmp_path / "operations/local"
+    directory = tmp_path / "scripts/operations/local"
     directory.mkdir(parents=True)
     (directory / "module-server.py").symlink_to(tmp_path / "private-credential")
     with pytest.raises(common.LocalError, match="symlinked"):
@@ -105,7 +108,7 @@ def test_bundle_keeps_one_exact_immutable_archive_per_server():
 
 def test_recipe_bundle_cli_returns_same_source_inputs():
     result = subprocess.run(
-        [sys.executable, str(ROOT / "operations/local/recipe-bundle.py")],
+        [sys.executable, str(ROOT / "scripts/operations/local/recipe-bundle.py")],
         cwd=ROOT,
         check=True,
         capture_output=True,
@@ -117,7 +120,7 @@ def test_recipe_bundle_cli_returns_same_source_inputs():
 @pytest.mark.parametrize("args", [["--execute"], ["--module", "cluster"]])
 def test_recipe_bundle_cli_rejects_unsupported_execution_or_selection(args):
     result = subprocess.run(
-        [sys.executable, str(ROOT / "operations/local/recipe-bundle.py"), *args],
+        [sys.executable, str(ROOT / "scripts/operations/local/recipe-bundle.py"), *args],
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -261,16 +264,25 @@ def docker_double(tmp_path):
     return tmp_path, env, calls
 
 
-def run_import(fixture):
+def run_import(fixture, *, trace=False):
     directory, environment, calls = fixture
-    result = subprocess.run(
-        ["sh", str(RECIPES / "cluster/load-images.sh")],
+    argv = ["sh", *(["-x"] if trace else []), str(HELPERS / "cluster/load-images.sh")]
+    with subprocess.Popen(
+        argv,
         cwd=directory,
         env=environment,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=15,
-    )
+        start_new_session=True,
+    ) as process:
+        try:
+            stdout, stderr = process.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.communicate()
+            raise
+        result = subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
     lines = calls.read_text().splitlines() if calls.exists() else []
     commands = [json.loads(line) for line in lines]
     assert not list(directory.glob(".radplanes-image-import-*"))
@@ -360,6 +372,34 @@ def test_image_copy_refuses_unapproved_images_before_docker(docker_double, image
     assert commands == []
 
 
+@pytest.mark.parametrize(
+    "images",
+    [
+        "localhost/radplanes-plane-api:latest",
+        API_IMAGE + "\n" + WORKER_IMAGE + "\n" + API_IMAGE,
+    ],
+)
+def test_image_copy_rejects_invalid_inputs_without_starting_a_watchdog(docker_double, images):
+    _, env, _ = docker_double
+    env["LOCAL_IMAGES"] = images
+    result, commands = run_import(docker_double, trace=True)
+    assert result.returncode != 0
+    assert commands == []
+    assert not any(
+        line.removeprefix("+ ").startswith("watchdog=")
+        and line.removeprefix("+ ").partition("=")[2].strip()
+        for line in result.stderr.splitlines()
+    )
+
+
+def test_image_copy_reaps_watchdog_after_immediate_docker_failure(docker_double):
+    directory, _, _ = docker_double
+    (directory / "docker").write_text("#!/bin/sh\nexit 27\n")
+    result, commands = run_import(docker_double)
+    assert result.returncode == 27
+    assert commands == []
+
+
 @pytest.mark.parametrize("cluster", ["radplanes-local-management", "foreign", "x;id"])
 def test_image_copy_refuses_unowned_node_before_docker(docker_double, cluster):
     _, env, _ = docker_double
@@ -374,7 +414,7 @@ def test_node_address_helper_accepts_all_reserved_children(docker_double, slot):
     directory, env, calls = docker_double
     env["LOCAL_CLUSTER"] = f"radplanes-local-{slot}"
     result = subprocess.run(
-        ["sh", str(RECIPES / "cluster/node-address.sh"), env["LOCAL_CLUSTER"]],
+        ["sh", str(HELPERS / "cluster/node-address.sh"), env["LOCAL_CLUSTER"]],
         cwd=directory,
         env=env,
         capture_output=True,
@@ -387,7 +427,7 @@ def test_node_address_helper_accepts_all_reserved_children(docker_double, slot):
 
 
 def test_validator_checks_the_actual_archive_of_every_recipe(local_state, monkeypatch):
-    validator = load("local_recipe_validator", ROOT / "operations/local/validate.py")
+    validator = load("local_recipe_validator", ROOT / "scripts/operations/local/validate.py")
     monkeypatch.setattr(validator, "STATE", local_state)
     commands = Mock()
     monkeypatch.setattr(validator, "Commands", Mock(return_value=commands))
@@ -399,7 +439,8 @@ def test_validator_checks_the_actual_archive_of_every_recipe(local_state, monkey
         directory = Path(argv[1].removeprefix("-chdir="))
         recipe = directory.name.rsplit("-", 1)[0]
         for name in prepare.RECIPE_FILES[recipe]:
-            assert (directory / name).read_bytes() == (RECIPES / recipe / name).read_bytes()
+            source = HELPERS if name.endswith(".sh") else RECIPES
+            assert (directory / name).read_bytes() == (source / recipe / name).read_bytes()
         assert "-backend=false" in argv and "-lockfile=readonly" in argv
         assert (directory / "tests" / f"{recipe}.tftest.hcl").is_file()
         seen.append(recipe)

@@ -14,7 +14,7 @@ from uuid import uuid5
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location(
-    "azure_cleanup_tests", ROOT / "operations/clean-azure.py"
+    "azure_cleanup_tests", ROOT / "scripts/operations/clean-azure.py"
 )
 cleanup = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = cleanup
@@ -605,7 +605,7 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual(self.commands.calls, [])
 
     def test_optimized_python_keeps_confirmation_and_mutation_guards(self):
-        path = ROOT / "operations/clean-azure.py"
+        path = ROOT / "scripts/operations/clean-azure.py"
         namespace = {"__name__": "optimized_cleanup", "__file__": str(path)}
         exec(compile(path.read_text(), str(path), "exec", optimize=2), namespace)
         error, engine_type = namespace["CleanupError"], namespace["Cleanup"]
@@ -1090,7 +1090,7 @@ class CleanupTests(unittest.TestCase):
 
     def test_verify_entrypoint_delegates_only_read_only_mode(self):
         spec = importlib.util.spec_from_file_location(
-            "verify_cleanup_tests", ROOT / "operations/verify-clean.py"
+            "verify_cleanup_tests", ROOT / "scripts/operations/verify-clean.py"
         )
         verifier = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(verifier)

@@ -53,14 +53,14 @@ Do not replace those abstractions with direct cluster creation in Python.
 
 ## Operations, harness, and images
 
-- `operations/` is platform administration, not a fourth application plane.
-- `operations/project.py` scopes bootstrap commands and project configuration.
-- `operations/deploy-plane.py` and `run-management-job.py` coordinate deployment.
+- `scripts/operations/` is platform administration, not a fourth application plane.
+- `scripts/operations/project.py` scopes bootstrap commands and project configuration.
+- `scripts/operations/deploy-plane.py` and `run-management-job.py` coordinate deployment.
 - [docs/provisioning.md](docs/provisioning.md) explains prerequisites and ownership.
 - [docs/local-provider.md](docs/local-provider.md) and [docs/local-cleanup.md](docs/local-cleanup.md) define local operations.
-- `harness/api.sh` is the operator's thin API client.
-- `harness/export-state.py` exports protected local access/acceptance state.
-- `harness/test-e2e.py` and `fault-parent-link.py` drive acceptance and faults.
+- `scripts/harness/api.sh` is the operator's thin API client.
+- `scripts/harness/export-state.py` exports protected local access/acceptance state.
+- `scripts/harness/test-e2e.py` and `fault-parent-link.py` drive acceptance and faults.
 - [tests/harness/README.md](tests/harness/README.md) defines opt-in live testing.
 - `images/api/Dockerfile` has an explicit public-runtime source allowlist.
 - `images/provisioner/Dockerfile` adds privileged code and administrative tools.
@@ -68,6 +68,8 @@ Do not replace those abstractions with direct cluster creation in Python.
 
 ## Validation
 
+Keep Make output sectioned, tidy, and actionable, never a flat wall of text.
+Follow the [operator output contract](docs/contracts.md#operator-output).
 Use `make help` and `make check`; neither claims a deployment succeeded.
 Install project dependencies with `uv sync --locked` when required.
 `make check` generates extensions, compiles all Bicep, runs Ruff, offline tests,

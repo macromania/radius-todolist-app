@@ -25,13 +25,16 @@ def image_sources(component):
         str(path.relative_to(ROOT))
         for path in sources
         if path.is_file()
-        and (path.suffix in {".py", ".sql", ".bicep", ".yaml"} or path.name == "bicepconfig.json")
+        and (
+            path.suffix in {".py", ".sql", ".bicep", ".yaml", ".tf", ".hcl", ".sh"}
+            or path.name == "bicepconfig.json"
+        )
     }
 
 
 def acceptance_runner():
     spec = importlib.util.spec_from_file_location(
-        "layout_acceptance_runner", ROOT / "harness/test-e2e.py"
+        "layout_acceptance_runner", ROOT / "scripts/harness/test-e2e.py"
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -44,8 +47,36 @@ def test_image_copy_allowlists_match_the_actual_acceptance_provenance():
     assert api == set(runner.source_files("management-api"))
     assert api | image_sources("provisioner") == set(runner.source_files("provisioner"))
     assert not any("providers/" in path or "provisioner.py" in path for path in api)
-    assert not any(path.startswith(("operations/", "harness/")) for path in api)
+    assert not any(path.startswith("scripts/") for path in api)
     assert "src/plane_demo/management/provisioning.py" not in api
+
+
+def test_local_image_copy_allowlist_matches_acceptance_provenance():
+    runner = acceptance_runner()
+    expected = image_sources("api") | image_sources("local-provisioner")
+    assert expected | {"pyproject.toml", "uv.lock"} == set(
+        runner.local_source_hashes("provisioner")
+    )
+    assert {
+        "scripts/__init__.py",
+        "scripts/operations/config.py",
+        "scripts/operations/demo.py",
+    } <= expected
+    assert {
+        "scripts/recipes/local/cluster/node-address.sh",
+        "scripts/recipes/local/cluster/load-images.sh",
+    } <= expected
+
+
+def test_operator_groups_exist_only_under_scripts():
+    assert not (ROOT / "operations").exists()
+    assert not (ROOT / "harness").exists()
+    assert not (ROOT / "demo").exists()
+    assert (ROOT / "scripts/__init__.py").is_file()
+    assert {path.name for path in (ROOT / "scripts").iterdir() if path.is_dir()} - {
+        "__pycache__"
+    } == {"operations", "harness", "recipes", "lib"}
+    assert not list((ROOT / "infra/radius/recipes").rglob("*.sh"))
 
 
 def test_public_image_subset_imports_new_entrypoints_without_administrative_code(tmp_path):
@@ -113,8 +144,8 @@ def test_old_runtime_modules_are_removed_without_compatibility_entrypoints():
 
 def test_harness_api_import_and_wrapper_resolve_from_another_directory(tmp_path):
     for command in (
-        [sys.executable, str(ROOT / "harness/api.py"), "--help"],
-        ["bash", str(ROOT / "harness/api.sh"), "--help"],
+        [sys.executable, str(ROOT / "scripts/harness/api.py"), "--help"],
+        ["bash", str(ROOT / "scripts/harness/api.sh"), "--help"],
     ):
         result = subprocess.run(
             command,

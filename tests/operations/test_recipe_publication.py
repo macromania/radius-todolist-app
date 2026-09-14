@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-SCRIPTS = Path(__file__).parents[2] / "operations"
+SCRIPTS = Path(__file__).parents[2] / "scripts/operations"
 sys.path.insert(0, str(SCRIPTS))
 SPEC = importlib.util.spec_from_file_location("publication", SCRIPTS / "publish-artifacts.py")
 publication = importlib.util.module_from_spec(SPEC)

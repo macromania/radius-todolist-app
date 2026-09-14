@@ -1223,7 +1223,7 @@ def test_certificate_uses_parent_wrapper_with_exact_operator_arguments(provider)
     calls = [call.args[0] for call in provider.commands.run.call_args_list]
     assert calls[1] == [
         sys.executable,
-        str(provider.root / "operations/run-certificate-job.py"),
+        str(provider.root / "scripts/operations/run-certificate-job.py"),
         "--slot",
         "shared-control",
         "--context",
@@ -1251,12 +1251,15 @@ def test_certificate_uses_portable_container_default(provider):
     provider.certificate("shared-control", "control.centralus.cloudapp.azure.com")
     assert provider.commands.run.call_args.args[0][:2] == [
         "python",
-        "/app/operations/run-certificate-job.py",
+        "/app/scripts/operations/run-certificate-job.py",
     ]
 
 
 def test_certificate_command_override_is_an_immutable_argument_vector(provider, raw_config):
-    raw_config["certificateCommand"] = ["custom-python", "/app/operations/run-certificate-job.py"]
+    raw_config["certificateCommand"] = [
+        "custom-python",
+        "/app/scripts/operations/run-certificate-job.py",
+    ]
     provider.config = OperatorConfig.from_dict(raw_config)
     issuer = certificate_wrapper(
         "https://demo-vault.vault.azure.net/secrets/gateway-shared-control"
@@ -1264,7 +1267,7 @@ def test_certificate_command_override_is_an_immutable_argument_vector(provider, 
     provider.commands.run.side_effect = issuer.run
     provider.certificate("shared-control", "control.centralus.cloudapp.azure.com")
     assert provider.commands.run.call_args.args[0][:2] == raw_config["certificateCommand"]
-    raw_config["certificateCommand"] = "python operations/run-certificate-job.py"
+    raw_config["certificateCommand"] = "python scripts/operations/run-certificate-job.py"
     with pytest.raises(ValueError, match="argument vector"):
         OperatorConfig.from_dict(raw_config)
 
@@ -1482,7 +1485,7 @@ def test_management_deploy_preserves_coordinator_identity_and_certificate_comman
     runtime_config = json.loads(settings["data"]["provisioning.json"])
     assert runtime_config["certificateCommand"] == [
         "python",
-        "/app/operations/run-certificate-job.py",
+        "/app/scripts/operations/run-certificate-job.py",
     ]
     assert provider.config.certificate_command == ()
     provisioner_account = next(
@@ -2016,7 +2019,7 @@ def test_entrypoints_are_cloud_free_for_help():
     root = Path(__file__).resolve().parents[2]
     for script in ("deploy-plane.py", "register-radius.py", "run-certificate-job.py"):
         result = subprocess.run(
-            [sys.executable, str(root / "operations" / script), "--help"],
+            [sys.executable, str(root / "scripts/operations" / script), "--help"],
             text=True,
             capture_output=True,
             check=False,

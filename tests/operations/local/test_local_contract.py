@@ -270,21 +270,18 @@ def test_static_module_server_checks_bytes_and_serves_exact_hash(tmp_path):
     instance.send_response.assert_called_once_with(200)
 
 
-def test_management_and_executor_mount_only_the_socket_and_protected_encryption_file():
-    config = bootstrap.management_config("/project/.state/local/key", "/var/run/docker.sock")
+def test_management_and_executor_mount_only_the_socket_not_checkout_files():
+    config = bootstrap.management_config("/var/run/docker.sock")
     mounts = config["nodes"][0]["extraMounts"]
     assert {m["hostPath"] for m in mounts} == {
         "/var/run/docker.sock",
-        "/project/.state/local/key",
     }
     assert config["networking"] == {"apiServerAddress": "127.0.0.1", "apiServerPort": 35495}
     assert config["nodes"][0]["extraPortMappings"][0]["hostPort"] == 35490
-    patch = yaml.safe_load(config["nodes"][0]["kubeadmConfigPatches"][0])
-    assert patch["apiVersion"] == "kubeadm.k8s.io/v1beta3"
-    assert patch["apiServer"]["extraArgs"] == {
-        "encryption-provider-config": "/etc/kubernetes/radplanes/encryption.yaml"
-    }
-    overlay = yaml.safe_load((ROOT / "operations/local/dynamic-rp-overlay.yaml").read_text())
+    assert "kubeadmConfigPatches" not in config["nodes"][0]
+    overlay = yaml.safe_load(
+        (ROOT / "scripts/operations/local/dynamic-rp-overlay.yaml").read_text()
+    )
     assert overlay["metadata"] == {"name": "dynamic-rp", "namespace": "radius-system"}
     spec = overlay["spec"]["template"]["spec"]
     assert spec["volumes"] == [
@@ -301,7 +298,7 @@ def test_management_and_executor_mount_only_the_socket_and_protected_encryption_
     assert spec["securityContext"]["fsGroup"] == 65532
     assert {m["name"] for m in spec["initContainers"][0]["volumeMounts"]} == {"terraform"}
     with pytest.raises(common.LocalError):
-        bootstrap.management_config("/safe", "/Users/operator/.docker")
+        bootstrap.management_config("/Users/operator/.docker")
 
 
 def test_reserve_all_ten_ports_before_bootstrap_without_binding_in_this_test(monkeypatch):
@@ -447,7 +444,7 @@ def test_postgres_and_bootstrap_fixtures_do_not_mount_docker_or_publish_postgres
 
 
 def test_new_sources_do_not_change_plane_declarations_or_supply_azure_operations():
-    for path in (ROOT / "operations/local").glob("*.py"):
+    for path in (ROOT / "scripts/operations/local").glob("*.py"):
         text = path.read_text()
         assert '["az",' not in text
         assert '"--insecure-skip-tls-verify"' not in text
@@ -456,4 +453,4 @@ def test_new_sources_do_not_change_plane_declarations_or_supply_azure_operations
     assert "kind_cluster.child.kubeconfig" not in (recipe / "outputs.tf").read_text()
     assert "local.pod_access" not in (recipe / "outputs.tf").read_text()
     assert "shared-control" in (recipe / "variables.tf").read_text()
-    assert "TF_VAR_" not in (ROOT / "operations/local/prepare.py").read_text()
+    assert "TF_VAR_" not in (ROOT / "scripts/operations/local/prepare.py").read_text()

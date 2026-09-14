@@ -126,6 +126,12 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F091 | 7 | Medium documentation | `docs/local-provider.md` | Docker host scope | Generic Docker Desktop wording hides the deliberately account-specific socket endpoint | State the exact verified-host socket and non-portable-host scope; no global defaults or runtime endpoint behavior changed |
 | F092 | State removal | Medium correctness | `src/plane_demo/setup/bootstrap.py` | Schema contract fingerprint | A definition-only fingerprint could miss disabled triggers or invalid/not-ready indexes | Include trigger enabled state and index validity/readiness; actual disabled-trigger, replaced-index, and failed-concurrent-index cases reject initialization; both fix reviews pass |
 | F093 | State removal | Medium correctness | `src/plane_demo/management/providers/secret_store.py` | Demo-key validation | Generic password validation admitted API keys that HTTP serialization/authentication cannot use | Validate supplied and stored demo keys as visible ASCII, while retaining PostgreSQL password character support; 386 offline tests and both fix reviews pass before caller integration |
+| F094 | State removal | High correctness | `scripts/lib/discovery.sh` | AKS access endpoint | Exact URL comparison rejected valid AKS kubeconfigs containing explicit HTTPS port 443 | Accept omitted or explicit 443 only for the discovered Azure hostname; local ports remain exact; producer-shaped regression and both fix reviews pass |
+| F095 | State removal | Medium security | `scripts/operations/api.sh` | Implicit curl configuration | An operator's `.curlrc` could enable redirects and forward the demo key to an undiscovered host | Pass `-q` as curl's first argument; real curl with a redirecting Unix-socket fixture and implicit `location` verifies one request and HTTP 302 refusal |
+| F096 | Script layout | Medium correctness | `scripts/recipes/local/cluster/load-images.sh` | Watchdog startup | Fast input rejection could race watchdog startup and leave a sleep process holding output pipes | Validate before starting the watchdog; startup-safe cancellation and reaping passed 54 Linux/dash tests and 600 stress probes |
+| F097 | Local bootstrap | Medium correctness | `scripts/operations/local/encryption.sh` | Deadlines and cleanup | Host-only timeout did not bound node mutation; failed verification left synthetic probes | Bound both node mutations, terminate owned host process groups, and clean probes with UID-preconditioned DELETE while preserving the original error; fix reviews pass |
+| F098 | Local bootstrap | High correctness | `scripts/operations/local/encryption.sh` | Static Pod conversion | Dropping container ports broke kind's named `probe-port` startup/readiness probes | Preserve ports with probe definitions; actual helper install, reuse, node restart, ciphertext/decryption, and probe removal pass on kind 1.35 |
+| F099 | Local bootstrap | High correctness | `scripts/operations/local/bootstrap.py` | Scoped command environment | Encryption helper could not find Docker Desktop's context inside the operator's isolated HOME | Forward the already-resolved Docker socket explicitly; caller and empty-HOME helper regressions and both fix reviews pass |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -1727,3 +1733,56 @@ These are library primitives, not completed provider integration. Filesystem
 credential consumers still need to be rewired before claiming an empty-worker
 or fresh-checkout deployment passes. No Azure secret or deployed Kubernetes
 Secret was created by these tests.
+
+### Native shell operator helpers, 2026-09-14
+
+Shell initialization now writes literal JSON-quoted `.env` values using Bash
+and jq, with no execution of the configuration file. It validates the selected
+environment and names, replaces the private file atomically, and removes
+environment-specific settings when switching targets. Twenty-two tests cover
+local initialization without Azure calls, credential character handling,
+invalid-input preservation, atomic replacement failure, and compatibility with
+the typed configuration reader. The step's rubber-duck/security reviews passed.
+
+New shell discovery and API helpers use native Azure/kind/Kubernetes commands
+and temporary access profiles instead of endpoint inventory files. API keys
+come from the explicitly supplied `.env` key or the selected runtime Secret's
+`DEMO_KEY` field; curl receives them through a private temporary config, not
+command arguments. Twenty-five tests cover fresh lookup, owner mismatches,
+unavailable resources, changing live endpoints, and actual curl behavior.
+Rubber-duck review found F094/F095; both corrections and their security review
+passed. These helpers still need final Make/provider integration and live
+deployment verification; no new complete scenario is claimed.
+
+### Laptop script integration and local key lifecycle, 2026-09-14
+
+Operational and harness files now live under `scripts/`, with Recipe shell
+helpers under `scripts/recipes/` and shared shell code under `scripts/lib/`.
+The root Makefile invokes Bash initialization and live endpoint/API helpers.
+Check-only `TMPDIR` is no longer imposed on ordinary operator targets, so these
+commands do not need a `.state/check` directory. Application code remains in
+`src/`; API images still exclude administrative code. Image source inspection
+includes copied nested shell helpers. Script moves preserve Recipe archive
+contents except for the separately reviewed F096 watchdog correction.
+
+The local bootstrap no longer generates or mounts a checkout encryption-key
+file. Its actual create path invokes the node-owned encryption helper after
+kind readiness and requires the matching node identity and ciphertext result
+before reporting successful bootstrap. F097-F099 were corrected during
+review and live integration. Failed prototype runs were removed and are not
+passing evidence.
+
+The exact corrected helper passed on disposable kind 1.35 cluster
+`radplanes-key-final-11144994`: new key installation, read-only reuse of the same
+key, node stop/start with the same cluster UID, actual etcd ciphertext,
+decryption, and removal of generated test Secrets. No checkout or operator
+scratch file was mounted. The prototype was deleted through kind after exact
+ownership checks, and unrelated containers were preserved.
+
+The integrated laptop check passed 1,449 tests and 264 subtests, 50 explicit
+dependency skips, all Bicep compiles, 24 Terraform mock-provider checks, Ruff,
+and recursive ShellCheck. The subsequent scoped-HOME caller correction passed
+its targeted tests and both reviews. These are local verification results;
+GitHub Actions is not a delivery gate for this POC. Full `.env` deployment
+integration, service-owned credential wiring, and fresh Azure/local scenario
+proof remain in progress.

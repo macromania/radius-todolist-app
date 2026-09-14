@@ -777,7 +777,7 @@ def test_local_main_enters_existing_singleton_loop_and_marks_interrupted_once(
 
 def load_operator(name):
     spec = importlib.util.spec_from_file_location(
-        name.replace("-", "_"), ROOT / f"operations/local/{name}.py"
+        name.replace("-", "_"), ROOT / f"scripts/operations/local/{name}.py"
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -1108,7 +1108,7 @@ def test_source_only_recipe_bundle_matches_runtime_verification_and_child_public
     provider, raw_local, monkeypatch
 ):
     result = subprocess.run(
-        [sys.executable, str(ROOT / "operations/local/recipe-bundle.py")],
+        [sys.executable, str(ROOT / "scripts/operations/local/recipe-bundle.py")],
         cwd=ROOT,
         capture_output=True,
         text=True,

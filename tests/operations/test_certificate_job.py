@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 SPEC = importlib.util.spec_from_file_location(
-    "certificate_job", Path(__file__).parents[2] / "operations/run-certificate-job.py"
+    "certificate_job", Path(__file__).parents[2] / "scripts/operations/run-certificate-job.py"
 )
 issuer = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(issuer)

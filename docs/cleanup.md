@@ -7,13 +7,13 @@ cleanup has run.
 
 ```sh
 # Read-only cloud/Radius inventory and ordered plan:
-uv run python operations/clean-azure.py
+uv run python scripts/operations/clean-azure.py
 
 # Destructive execution requires both switches of intent:
-CONFIRM_AZURE=yes uv run python operations/clean-azure.py --execute
+CONFIRM_AZURE=yes uv run python scripts/operations/clean-azure.py --execute
 
 # Independent, read-only Azure verification:
-uv run python operations/verify-clean.py
+uv run python scripts/operations/verify-clean.py
 ```
 
 `--environment` accepts only `azure`. No tool changes the selected Azure
@@ -38,9 +38,9 @@ dictionary-form allocation map for the bootstrap output.
 Before execution, run the harness exporter while the clusters remain reachable:
 
 ```sh
-uv run python harness/export-state.py --once
+uv run python scripts/harness/export-state.py --once
 # Or keep exporting as onboarding creates children:
-uv run python harness/export-state.py --watch --timeout 7200
+uv run python scripts/harness/export-state.py --watch --timeout 7200
 ```
 
 No provisioner PVC files, credentials store, or manually authored JSON are
@@ -192,8 +192,8 @@ bootstrap foundation instead of rebuilding the registry, network, identities,
 and management cluster:
 
 ```sh
-uv run python operations/clean-azure.py --radius-only
-CONFIRM_AZURE=yes uv run python operations/clean-azure.py --radius-only --execute
+uv run python scripts/operations/clean-azure.py --radius-only
+CONFIRM_AZURE=yes uv run python scripts/operations/clean-azure.py --radius-only --execute
 ```
 
 This follows normal deletion steps 1-4 above: child applications and their
@@ -236,8 +236,8 @@ and run read-only verification before deciding how to resume.
 If Radius is unavailable, first inspect the ownership plan:
 
 ```sh
-uv run python operations/clean-azure.py --provider-only
-CONFIRM_AZURE=yes uv run python operations/clean-azure.py --provider-only --execute
+uv run python scripts/operations/clean-azure.py --provider-only
+CONFIRM_AZURE=yes uv run python scripts/operations/clean-azure.py --provider-only --execute
 ```
 
 This is an explicit ownership-path bypass, **not** an ownership-check bypass.
@@ -285,7 +285,7 @@ Optional credential removal happens only after execution **and successful
 verification**, for individually named top-level files:
 
 ```sh
-CONFIRM_AZURE=yes uv run python operations/clean-azure.py --execute \
+CONFIRM_AZURE=yes uv run python scripts/operations/clean-azure.py --execute \
   --credential-file credentials.json \
   --credential-file management.kubeconfig \
   --credential-file shared-control.kubeconfig \
@@ -306,8 +306,8 @@ Run only mocked tests during ordinary development:
 mkdir -p .state/check/tmp
 TMPDIR="$PWD/.state/check/tmp" PYTHONDONTWRITEBYTECODE=1 \
   uv run --no-sync pytest tests/operations/test_cleanup.py tests/harness -q
-uv run --no-sync ruff check operations/clean-azure.py operations/verify-clean.py \
-  harness/export-state.py tests/operations/test_cleanup.py \
+uv run --no-sync ruff check scripts/operations/clean-azure.py scripts/operations/verify-clean.py \
+  scripts/harness/export-state.py tests/operations/test_cleanup.py \
   tests/harness/test_export_state.py tests/harness/test_cleanup_export.py
 ```
 

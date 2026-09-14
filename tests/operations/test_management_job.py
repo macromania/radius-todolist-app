@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-SCRIPTS = Path(__file__).parents[2] / "operations"
+SCRIPTS = Path(__file__).parents[2] / "scripts/operations"
 sys.path.insert(0, str(SCRIPTS))
 SPEC = importlib.util.spec_from_file_location("management_job", SCRIPTS / "run-management-job.py")
 operator = importlib.util.module_from_spec(SPEC)

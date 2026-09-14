@@ -455,7 +455,7 @@ class ProvenanceFixTests(base.StateCase):
             "src/plane_demo/management/providers/azure.py",
             "src/plane_demo/management/providers/commands.py",
             "src/plane_demo/management/providers/credentials.py",
-            "operations/run-certificate-job.py",
+            "scripts/operations/run-certificate-job.py",
             "infra/radius/modules/child-cluster.bicep",
         ):
             self.assertIn(name, files)

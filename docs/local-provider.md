@@ -45,7 +45,7 @@ make local-install-radius CONFIRM_LOCAL=yes
 make local-runtime-load CONFIRM_LOCAL=yes
 make local-setup CONFIRM_LOCAL=yes
 make local-deploy-management CONFIRM_LOCAL=yes
-uv run --no-sync python harness/local/export-state.py --watch --timeout 7200
+uv run --no-sync python scripts/harness/local/export-state.py --watch --timeout 7200
 ```
 
 Keep the exporter in a separate terminal or attached background process. Once
@@ -259,11 +259,11 @@ After parent-reviewed native image inspection/loading and the existing
 management bootstrap, preview or execute these **separate** stages:
 
 ```sh
-uv run python operations/local/setup-demo.py
-uv run python operations/local/deploy-demo.py
+uv run python scripts/operations/local/setup-demo.py
+uv run python scripts/operations/local/deploy-demo.py
 
-uv run python operations/local/setup-demo.py --execute
-uv run python operations/local/deploy-demo.py --execute
+uv run python scripts/operations/local/setup-demo.py --execute
+uv run python scripts/operations/local/deploy-demo.py --execute
 ```
 
 Setup obtains the source-only bundle from `recipe-bundle.py`, builds the exact

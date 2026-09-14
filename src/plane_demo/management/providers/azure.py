@@ -36,7 +36,7 @@ TYPES = {
     "redis": ("Applications.Datastores/redisCaches", None),
 }
 logger = logging.getLogger(__name__)
-CONTAINER_CERTIFICATE_COMMAND = ("python", "/app/operations/run-certificate-job.py")
+CONTAINER_CERTIFICATE_COMMAND = ("python", "/app/scripts/operations/run-certificate-job.py")
 
 
 class AzureProvider:
@@ -644,7 +644,7 @@ class AzureProvider:
         self.commands.run(
             [
                 sys.executable,
-                str(self.root / "operations/install-radius.py"),
+                str(self.root / "scripts/operations/install-radius.py"),
                 "--context",
                 cluster.context,
                 "--kubeconfig",
@@ -894,7 +894,7 @@ class AzureProvider:
         default = (
             CONTAINER_CERTIFICATE_COMMAND
             if self.root == Path("/app")
-            else (sys.executable, str(self.root / "operations/run-certificate-job.py"))
+            else (sys.executable, str(self.root / "scripts/operations/run-certificate-job.py"))
         )
         output = self.commands.run(
             [
