@@ -342,12 +342,26 @@ within the mount work; symlinks escaping it do not.
 ## Operator output
 
 Human-facing Make output must be grouped into clearly named sections, with
-aligned command descriptions, whitespace between workflows, and actionable
-examples or next steps. `make` and `make help` list all public targets.
+visible separator rules, generous whitespace before and after sections, and
+single-spaced aligned command entries without blank lines between rows.
+Use bold headings and commands, restrained color, and actionable examples or
+next steps. Supporting guidance such as "Start here", "Walkthroughs", and
+"Read next" uses compact, indented `[info]` blocks without command-section rules
+or blue accents. Their body text and document paths use normal weight rather
+than command styling.
+`make` and `make help` list all public targets.
 `make help GROUP=azure` selects one group; `setup`, `checks`, and `local`
 are also available. Keep help dependency-free and safe to run before
 configuration. Put confirmation requirements beside live operations
 and keep preview, execution, and verification distinct.
+
+`COLOR=auto` enables bold text and blue accents only when the relevant output
+stream is a terminal and `TERM` is nonempty and not `dumb`. `COLOR=always` forces
+styling, including in captured output; `COLOR=never` disables it. A nonempty
+`NO_COLOR` disables styling even when `COLOR=always` is set. Separators, spacing,
+and alignment remain in plain output. Help checks stdout; stage headings check
+stderr, so redirecting JSON stdout does not disable styling on a terminal's
+stderr. Color is never the only way to convey meaning.
 
 Each command run prints its stage heading to stderr. Routine recipe echo is
 hidden, but tool stdout, errors, exit codes, and full image build/push logs

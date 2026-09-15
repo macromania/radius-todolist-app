@@ -69,6 +69,7 @@ Do not replace those abstractions with direct cluster creation in Python.
 ## Validation
 
 Keep Make output sectioned, tidy, and actionable, never a flat wall of text.
+Use visible separators, generous spacing, bold text, and terminal-aware color.
 Follow the [operator output contract](docs/contracts.md#operator-output).
 Use `make help` and `make check`; neither claims a deployment succeeded.
 Install project dependencies with `uv sync --locked` when required.

@@ -31,6 +31,16 @@ current APIs. No saved endpoint inventory or workstation credential bundle is
 required. The state-removal refactor still needs fresh live proof; see
 [FINDINGS.md](FINDINGS.md) for the verified revision scopes.
 
+Run `make` or `make help` for commands grouped by workflow, usage examples, and
+safety requirements. Use `make help GROUP=azure`, `GROUP=local`, `GROUP=checks`,
+or `GROUP=setup` to focus on one area. Help and stage headings use separators,
+generous section spacing, single-spaced command rows, bold text, and blue accents.
+Supporting guidance and document references appear in separate `[info]` blocks.
+Styling is automatic on supported terminals. Use
+`COLOR=always` to force styling, or `COLOR=never` or `NO_COLOR=1` to disable it.
+Redirected output stays plain by default. Command runs preserve tool diagnostics
+and machine-readable stdout.
+
 ## Repository map
 
 | Location | Purpose |
@@ -45,6 +55,16 @@ For the design, read [architecture](docs/architecture.md) and
 [application contracts](docs/contracts.md). [DECISIONS.md](DECISIONS.md) records
 choices; [FINDINGS.md](FINDINGS.md) records results and their source revisions.
 [Limitations](docs/limitations.md) describe the POC's scope.
+
+The [provisioning walkthrough](HOW_PROVISIONING_WORKS.md) explains current Radius
+and Azure deployment ownership. [Provisioning durability](PROVISIONING_DURABILITY.md)
+records the proposed management-local and Azure-managed scheduler direction,
+including the unverified local backend requirements.
+
+The [recovery design direction](RECOVERY.md) captures the external Radius
+PostgreSQL preference, availability-first recovery model, and unresolved
+execution and recovery questions. It is design exploration, not implemented
+recovery behavior.
 
 The [state-removal ExecPlan](docs/plans/remove-state-dependency.md) describes the
 `.env` configuration, live discovery, service-owned credentials and progress,

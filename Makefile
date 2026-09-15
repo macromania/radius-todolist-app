@@ -4,14 +4,35 @@ SHELL := /bin/bash
 ENV ?= azure
 ARGS ?=
 GROUP ?= all
+COLOR ?= auto
 BICEP ?= $(HOME)/.rad/bin/bicep
 RUN := uv run --no-sync
 STAGE := bash scripts/operations/stage.sh
-SECTION = @printf '\n== %s ==\n' '$@' >&2
+SEPARATOR := ------------------------------------------------------------------------------
 export CONFIRM_AZURE CONFIRM_LOCAL
 export PYTHONDONTWRITEBYTECODE := 1
 CHECK_TMP := $(CURDIR)/.state/check/tmp
 check lint test check-bicep check-terraform: export TMPDIR := $(CHECK_TMP)
+
+define TERMINAL_STYLE
+case "$(COLOR)" in \
+  auto|always|never) ;; \
+  *) printf 'Invalid COLOR. Use COLOR=auto, always, or never.\n' >&2; exit 2 ;; \
+esac; \
+bold=; accent=; reset=; \
+if [ -z "$${NO_COLOR:-}" ] && { [ "$(COLOR)" = always ] || \
+  { [ "$(COLOR)" = auto ] && [ -t $(1) ] && [ "$${TERM:-dumb}" != dumb ]; }; }; then \
+  bold=$$(printf '\033[1m'); \
+  accent=$$(printf '\033[34m'); \
+  reset=$$(printf '\033[0m'); \
+fi;
+endef
+
+define SECTION
+@$(call TERMINAL_STYLE,2) \
+printf '\n\n%s== %s ==%s\n%s%s%s\n\n' \
+  "$$bold$$accent" '$@' "$$reset" "$$accent" "$(SEPARATOR)" "$$reset" >&2
+endef
 
 .PHONY: help init show-config endpoints api kube fault check lint test test-integration check-bicep check-shell check-terraform check-work \
         require-azure confirm-azure build inspect-build bootstrap deploy-management \
@@ -23,43 +44,60 @@ check lint test check-bicep check-terraform: export TMPDIR := $(CHECK_TMP)
 ##@ setup Setup and API
 ##! Choose ENV when initializing .env; pass only nonsecret options through ARGS.
 help: ## Show grouped commands; use GROUP=setup, checks, local, or azure
-	@awk -v group="$(GROUP)" '\
+	@$(call TERMINAL_STYLE,1) \
+	awk -v group="$(GROUP)" -v bold="$$bold" -v accent="$$accent" -v reset="$$reset" \
+	  -v rule="$(SEPARATOR)" '\
+	  function heading(title) { \
+	    printf "\n\n%s%s%s\n%s%s%s\n\n", bold accent, title, reset, accent, rule, reset; \
+	  } \
+	  function example(label, command) { \
+	    printf "  %-16s  %s%s%s\n", label, bold, command, reset; \
+	  } \
+	  function info_heading(title) { \
+	    printf "\n\n  %s[info] %s%s\n\n", bold, title, reset; \
+	  } \
+	  function info_row(label, text) { \
+	    printf "    %-16s  %s\n", label, text; \
+	  } \
 	  BEGIN { \
 	    if (group !~ /^(all|setup|checks|local|azure)$$/) { \
 	      print "Unknown help group. Use GROUP=all, setup, checks, local, or azure." > "/dev/stderr"; \
 	      exit 2; \
 	    } \
-	    print "Radius three-plane demo"; \
-	    print "Usage: make <target> [NAME=value]"; \
-	    print "Focus: make help GROUP=azure  (groups: setup, checks, local, azure, all)"; \
+	    heading("Radius three-plane demo"); \
+	    example("Usage:", "make <target> [NAME=value]"); \
+	    example("Focus:", "make help GROUP=azure"); \
+	    print "\n  Groups: setup, checks, local, azure, all (default)"; \
+	    print "  Style:  COLOR=auto (default), always, never; NO_COLOR=1 disables styling"; \
 	  } \
 	  /^##@ / { \
 	    show = (group == "all" || group == $$2); \
-	    if (show) { sub(/^##@ [^ ]+ /, ""); printf "\n%s\n", $$0; } \
+	    if (show) { sub(/^##@ [^ ]+ /, ""); heading($$0); } \
 	    next; \
 	  } \
 	  /^##! / && show { printf "  %s\n\n", substr($$0, 5); next; } \
 	  /^[a-zA-Z0-9_-]+:.*## / && show { \
 	    split($$0, entry, ":.*## "); \
-	    printf "  %-28s  %s\n", entry[1], entry[2]; \
+	    printf "  %s%-28s%s  %s\n", bold, entry[1], reset, entry[2]; \
 	  } \
 	  END { \
 	    if (group ~ /^(all|setup|checks|local|azure)$$/) { \
-	      print "\nStart here"; \
-	      print "  Check source:     make check"; \
+	      info_heading("Start here"); \
+	      info_row("Check source:", "make check"); \
 	      if (group != "checks") { \
-	        if (group != "local") print "  Configure Azure:  make init ENV=azure"; \
-	        if (group != "azure") print "  Configure local:  make init ENV=local"; \
-	        print "  Find endpoints:   make endpoints ARGS=all"; \
-	        print "  Call the API:     make api ARGS='\''management GET /tenants/alpha'\''"; \
-	        print "\nWalkthroughs"; \
-	        if (group != "local") print "  Azure: RUN_AZURE_SCENARIOS.md"; \
-	        if (group != "azure") print "  Local: RUN_LOCAL_SCENARIOS.md"; \
-	        print "  Follow the selected guide for prerequisites and manual scenarios."; \
+	        if (group != "local") info_row("Configure Azure:", "make init ENV=azure"); \
+	        if (group != "azure") info_row("Configure local:", "make init ENV=local"); \
+	        info_row("Find endpoints:", "make endpoints ARGS=all"); \
+	        info_row("Call the API:", "make api ARGS='\''management GET /tenants/alpha'\''"); \
+	        info_heading("Walkthroughs"); \
+	        if (group != "local") info_row("Azure:", "RUN_AZURE_SCENARIOS.md"); \
+	        if (group != "azure") info_row("Local:", "RUN_LOCAL_SCENARIOS.md"); \
+	        print "\n    Follow the selected guide for prerequisites and manual scenarios."; \
 	      } else { \
-	        print "\nRead next"; \
-	        print "  Dependency setup: docs/contracts.md#validation"; \
+	        info_heading("Read next"); \
+	        info_row("Dependency setup:", "docs/contracts.md#validation"); \
 	      } \
+	      print ""; \
 	    } \
 	  }' $(MAKEFILE_LIST)
 
