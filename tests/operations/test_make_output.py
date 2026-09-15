@@ -138,7 +138,7 @@ def test_help_can_focus_on_one_workflow(tmp_path, group):
         assert f"RUN_{other.upper()}_SCENARIOS.md" not in result.stdout
     elif group == "checks":
         assert "make init" not in result.stdout
-        assert "docs/contracts.md#validation" in result.stdout
+        assert "README.md#checks" in result.stdout
 
 
 def test_help_contains_examples_guards_and_real_walkthroughs(tmp_path):

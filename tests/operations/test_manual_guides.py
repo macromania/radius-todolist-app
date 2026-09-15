@@ -11,6 +11,18 @@ ROOT = Path(__file__).resolve().parents[2]
 SURVIVORS = ("README.md", "RUN_AZURE_SCENARIOS.md", "RUN_LOCAL_SCENARIOS.md", "AGENTS.md")
 
 
+def test_tracked_documentation_is_demo_only():
+    result = subprocess.run(
+        ["git", "ls-files", "-z", "--", "*.md"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+    )
+    assert set(filter(None, result.stdout.split("\0"))) == set(SURVIVORS)
+
+
 def prose(text):
     return re.sub(r"```.*?```", "", text, flags=re.DOTALL)
 

@@ -95,7 +95,7 @@ help: ## Show grouped commands; use GROUP=setup, checks, local, or azure
 	        print "\n    Follow the selected guide for prerequisites and manual scenarios."; \
 	      } else { \
 	        info_heading("Read next"); \
-	        info_row("Dependency setup:", "docs/contracts.md#validation"); \
+	        info_row("Dependency setup:", "README.md#checks"); \
 	      } \
 	      print ""; \
 	    } \
