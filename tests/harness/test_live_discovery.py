@@ -335,7 +335,7 @@ def test_live_workload_checks_running_code_without_saved_image_review(
     subject.record["source"] = SOURCE
     target = config.target("management")
     reference = (
-        f"localhost/radplanes-plane-api:{REVISION}"
+        f"localhost/{config.config.stem}-api:{REVISION}"
         if config.environment == "local"
         else config.config.registry_name + ".azurecr.io/plane-api@" + IMAGE_ID
     )
@@ -553,11 +553,18 @@ def test_live_fault_entrypoint_refuses_invalid_parent_discovery_before_mutation(
     assert not any("create" in argv or "replace" in argv for argv, _ in commands.calls)
 
 
-def test_live_workload_rejects_an_unselected_image_before_code_probe(live):
+@pytest.mark.parametrize("selection", ["foreign", "legacy", "wrong-revision", "mutable"])
+def test_live_workload_rejects_an_unselected_image_before_code_probe(live, selection):
     config, _ = live
     subject = runner.Runner(config, "scenario")
     subject.record["source"] = SOURCE
     target = config.target("management")
+    local_image = {
+        "foreign": f"localhost/other-team-local-api:{REVISION}",
+        "legacy": f"localhost/radplanes-plane-api:{REVISION}",
+        "wrong-revision": f"localhost/{config.config.stem}-api:" + "c" * 40,
+        "mutable": f"localhost/{config.config.stem}-api:latest",
+    }[selection]
     pod = {
         "metadata": {"uid": uid("pod")},
         "spec": {
@@ -566,7 +573,7 @@ def test_live_workload_rejects_an_unselected_image_before_code_probe(live):
                     "name": "management-api",
                     "image": "foreign.azurecr.io/api@" + IMAGE_ID
                     if config.environment == "azure"
-                    else "localhost/radplanes-plane-api:latest",
+                    else local_image,
                 }
             ]
         },

@@ -1891,3 +1891,15 @@ checks passed. These were synthetic/offline tests, not live outage acceptance.
 
 Deployment/operator conversion, image trust fixes, cleanup integration and
 fresh Azure/local end-to-end proof remain separate unfinished work.
+
+### Selected local harness image names
+
+The live harness now expects `localhost/<stem>-<role>:<revision>`, matching the
+selected local build contract. It refuses legacy, foreign-deployment, mutable
+and wrong-revision references before probing workload code. Existing image-ID
+mapping, source-byte comparisons and post-probe Pod UID checks remain intact.
+The identity-free offline fixtures retain their historical image names.
+
+Both bounded reviews covered this change. The focused live-discovery and local
+harness run passed 115 tests and 18 subtests. No local image was built and no
+cluster or live scenario was run for this correction.

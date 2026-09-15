@@ -1071,7 +1071,7 @@ class Runner:
                 expected_image = self.images[role]
             else:
                 revision = self.record["source"]["commit"]
-                expected_image = f"localhost/radplanes-plane-{role}:{revision}"
+                expected_image = f"localhost/{self.configuration.config.stem}-{role}:{revision}"
         else:
             expected_image = self.configuration.current().get("images", {}).get(role)
         if not self.configuration.live and self.configuration.environment == "azure":
