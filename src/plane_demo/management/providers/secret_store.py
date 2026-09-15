@@ -18,6 +18,7 @@ import hashlib
 import json
 import re
 import secrets
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, get_args
 
@@ -144,6 +145,8 @@ def _credential_value(value: str, role: str) -> CredentialValue:
 
 
 class CredentialStore(Protocol):
+    scope: CredentialScope
+
     def get(self, slot: str, role: str) -> CredentialValue: ...
 
     def get_or_create(
@@ -160,6 +163,7 @@ class KeyVaultClient(Protocol):
     def get_secret(self, name: str, **kwargs: Any) -> Any: ...
 
     def set_secret(self, name: str, value: str, **kwargs: Any) -> Any: ...
+    def close(self) -> None: ...
 
 
 class KubernetesClient(Protocol):
@@ -253,6 +257,7 @@ class AzureKeyVaultCredentialStore(_OwnedStore):
         *,
         request_errors: tuple[type[Exception], ...],
         singleton_writer: bool = False,
+        singleton_guard: Callable[[], None] | None = None,
     ):
         if scope.environment != "azure":
             raise StoreError("invalid_credential_scope")
@@ -260,10 +265,16 @@ class AzureKeyVaultCredentialStore(_OwnedStore):
         self._client = client
         self._request_errors = request_errors
         self._singleton_writer = singleton_writer
+        self._singleton_guard = singleton_guard
 
     def _allow_create(self) -> None:
         if self._singleton_writer is not True:
             raise StoreError("credential_store_singleton_required")
+        if self._singleton_guard is not None:
+            self._singleton_guard()
+
+    def close(self) -> None:
+        self._client.close()
 
     def _read(self, slot: str, role: str) -> CredentialValue | None:
         name = self.scope.secret_name(slot, role)
@@ -310,7 +321,14 @@ class KubernetesCredentialStore(_OwnedStore):
     receive this store's namespace/Secret permissions.
     """
 
-    def __init__(self, scope: CredentialScope, namespace: str, client: KubernetesClient):
+    def __init__(
+        self,
+        scope: CredentialScope,
+        namespace: str,
+        client: KubernetesClient,
+        *,
+        singleton_guard: Callable[[], None] | None = None,
+    ):
         if (
             scope.environment != "local"
             or not isinstance(namespace, str)
@@ -320,6 +338,7 @@ class KubernetesCredentialStore(_OwnedStore):
         self.scope = scope
         self.namespace = namespace
         self._client = client
+        self._singleton_guard = singleton_guard
 
     def _verify_namespace(self) -> None:
         try:
@@ -381,6 +400,8 @@ class KubernetesCredentialStore(_OwnedStore):
             immutable=True,
             data={SECRET_FIELD: base64.b64encode(value.value.encode("utf-8")).decode("ascii")},
         )
+        if self._singleton_guard is not None:
+            self._singleton_guard()
         try:
             self._client.create_namespaced_secret(self.namespace, body, _request_timeout=(5, 15))
         except ApiException as error:
@@ -398,6 +419,7 @@ def azure_key_vault_store(
     *,
     credential: Any = None,
     singleton_writer: bool = False,
+    singleton_guard: Callable[[], None] | None = None,
 ) -> AzureKeyVaultCredentialStore:
     """Azure-only factory. The caller supplies the live-discovered vault URL.
 
@@ -428,5 +450,9 @@ def azure_key_vault_store(
     except AzureError as error:
         raise _request_error(getattr(error, "status_code", None)) from None
     return AzureKeyVaultCredentialStore(
-        scope, client, request_errors=(AzureError,), singleton_writer=singleton_writer
+        scope,
+        client,
+        request_errors=(AzureError,),
+        singleton_writer=singleton_writer,
+        singleton_guard=singleton_guard,
     )

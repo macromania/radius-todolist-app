@@ -2,6 +2,9 @@ param application string
 param environment string
 param image string
 param provisionerImage string
+param ownershipLabels object = {
+  'plane-demo/project': 'radplanes'
+}
 param provisionerWorkloadIdentity bool = false
 param provisionerClientId string = ''
 param gatewayPhase string = 'challenge'
@@ -14,6 +17,7 @@ module api '../modules/workload.bicep' = {
     environment: environment
     name: 'management-api'
     image: image
+    ownershipLabels: ownershipLabels
     entrypoint: 'plane_demo.management.api'
     serviceAccount: 'management-api'
     runtimeSecretName: 'management-api-runtime'
@@ -28,38 +32,15 @@ module provisioner '../modules/workload.bicep' = {
     environment: environment
     name: 'provisioner'
     image: provisionerImage
+    ownershipLabels: ownershipLabels
     entrypoint: 'plane_demo.management.provisioner'
     serviceAccount: 'provisioner'
     runtimeSecretName: 'provisioner-runtime'
+    runtimeConfigMapName: 'provisioning-settings'
     workloadIdentity: provisionerWorkloadIdentity
     automountToken: true
     recreate: true
     identityClientId: provisionerClientId
-    volumes: [
-      {
-        name: 'provisioning'
-        configMap: {
-          name: 'provisioning-settings'
-        }
-      }
-      {
-        name: 'state'
-        persistentVolumeClaim: {
-          claimName: 'provisioner-state'
-        }
-      }
-    ]
-    mounts: [
-      {
-        name: 'provisioning'
-        mountPath: '/etc/plane-demo'
-        readOnly: true
-      }
-      {
-        name: 'state'
-        mountPath: '/app/.state'
-      }
-    ]
   }
 }
 
@@ -69,6 +50,7 @@ module challenge '../modules/challenge.bicep' = {
     application: application
     environment: environment
     image: image
+    ownershipLabels: ownershipLabels
   }
 }
 

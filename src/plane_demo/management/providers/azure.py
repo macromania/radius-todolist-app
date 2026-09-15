@@ -10,6 +10,7 @@ import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
+from uuid import UUID
 
 import yaml
 
@@ -19,7 +20,8 @@ from plane_demo.management.providers.commands import (
     write_json,
     write_private,
 )
-from plane_demo.management.providers.credentials import Credentials
+from plane_demo.management.providers.credentials import CredentialSource
+from plane_demo.management.providers.identity import provisioning_namespace
 from plane_demo.management.providers.redis_nic_tags import BASE_TAGS, ERRORS, Target, same_id
 from plane_demo.management.provisioning import (
     Cluster,
@@ -40,6 +42,44 @@ logger = logging.getLogger(__name__)
 CONTAINER_CERTIFICATE_COMMAND = ("python", "/app/scripts/operations/run-certificate-job.py")
 
 
+def login_workload_identity(
+    commands: Commands, workspace: Path, client_id: str, tenant_id: str
+) -> None:
+    if (
+        os.environ.get("AZURE_CLIENT_ID") != client_id
+        or os.environ.get("AZURE_TENANT_ID") != tenant_id
+    ):
+        raise ProvisioningError("workload_identity_mismatch")
+    token_path = os.environ.get("AZURE_FEDERATED_TOKEN_FILE")
+    if not token_path:
+        raise ProvisioningError("workload_identity_required")
+    token = Path(token_path).read_text().strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", token):
+        raise ProvisioningError("invalid_federated_token")
+    commands.protect(token)
+    directory = workspace / "az"
+    directory.mkdir(mode=0o700, exist_ok=True)
+    commands.environment["AZURE_CONFIG_DIR"] = str(directory)
+    commands.run(
+        [
+            "az",
+            "login",
+            "--service-principal",
+            "--username",
+            client_id,
+            "--tenant",
+            tenant_id,
+            "--federated-token",
+            token,
+            "--allow-no-subscriptions",
+            "--output",
+            "none",
+            "--only-show-errors",
+        ],
+        timeout=120,
+    )
+
+
 class AzureProvider:
     radius_scope = "/planes/radius/local/resourceGroups/radplanes"
 
@@ -47,7 +87,7 @@ class AzureProvider:
         self,
         config: OperatorConfig,
         root: Path,
-        credentials: Credentials,
+        credentials: CredentialSource,
         commands: Commands | None = None,
         *,
         workspace: Path | None = None,
@@ -69,7 +109,11 @@ class AzureProvider:
         self.radius_config = self.state / "radius.yaml"
         self.config_path = self.state / "provisioning.json"
         write_json(self.config_path, config.to_dict())
-        self.commands.protect(credentials._data)
+        credentials.bind(
+            lambda slot: workloads.read_database(self, slot),
+            self.commands.protect,
+            lambda: self.commands.guard(),
+        )
         self._verified = False
 
     def expected_cluster_id(self, slot: str) -> str:
@@ -113,39 +157,12 @@ class AzureProvider:
             raise ProvisioningError("azure_account_mismatch")
 
     def login_workload(self) -> None:
-        token_path = os.environ.get("AZURE_FEDERATED_TOKEN_FILE")
-        if token_path:
-            identity = self.config.coordinator_identity["clientId"]
-            tenant = self.config.foundation["tenantId"]
-            if (
-                os.environ.get("AZURE_CLIENT_ID") != identity
-                or os.environ.get("AZURE_TENANT_ID") != tenant
-            ):
-                raise ProvisioningError("workload_identity_mismatch")
-            token = Path(token_path).read_text().strip()
-            if not re.fullmatch(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", token):
-                raise ProvisioningError("invalid_federated_token")
-            self.commands.protect(token)
-            az_config = self.state / "az"
-            az_config.mkdir(mode=0o700, exist_ok=True)
-            self.commands.environment["AZURE_CONFIG_DIR"] = str(az_config)
-            self.commands.run(
-                [
-                    "az",
-                    "login",
-                    "--service-principal",
-                    "--username",
-                    identity,
-                    "--tenant",
-                    tenant,
-                    "--federated-token",
-                    token,
-                    "--allow-no-subscriptions",
-                    "--output",
-                    "none",
-                    "--only-show-errors",
-                ],
-                timeout=120,
+        if os.environ.get("AZURE_FEDERATED_TOKEN_FILE"):
+            login_workload_identity(
+                self.commands,
+                self.state,
+                self.config.coordinator_identity["clientId"],
+                self.config.foundation["tenantId"],
             )
 
     def rad(self, slot: str, *args: str, workspace: bool = True, timeout: int | None = None):
@@ -227,7 +244,20 @@ class AzureProvider:
         )
 
     def verify_recipes(self) -> None:
-        for recipe in self.config.recipes.values():
+        if self.config.identity:
+            self.verify_registry_policy()
+        for kind, recipe in self.config.recipes.items():
+            if self.config.identity and (
+                recipe.get("immutability") != "acr-abac-arm-import-v1"
+                or not re.fullmatch(
+                    re.escape(
+                        f"{self.config.foundation['registryLoginServer']}/radius-recipes/{kind}:src-"
+                    )
+                    + r"[a-f0-9]{64}",
+                    recipe["reference"],
+                )
+            ):
+                raise ProvisioningError("recipe_publication_policy_mismatch")
             image = recipe["reference"].split("/", 1)[1]
             actual = self.az(
                 "acr",
@@ -238,14 +268,75 @@ class AzureProvider:
                 "--image",
                 image,
             )
-            attributes = actual["changeableAttributes"]
-            if (
-                actual["digest"] != recipe["digest"]
-                or attributes["writeEnabled"] is not False
-                or attributes["deleteEnabled"] is not False
+            attributes = actual.get("changeableAttributes", {})
+            if actual["digest"] != recipe["digest"] or (
+                not self.config.identity
+                and (
+                    attributes.get("writeEnabled") is not False
+                    or attributes.get("deleteEnabled") is not False
+                )
             ):
                 raise ProvisioningError("recipe_digest_or_lock_mismatch")
         self._verified = True
+
+    def verify_registry_policy(self) -> None:
+        identity = self.config.identity
+        if identity is None:
+            raise ProvisioningError("bootstrap_identity_required")
+        registry = self.az("acr", "show", "--name", identity.registry_name)
+        expected = (
+            f"/subscriptions/{identity.subscription}/resourceGroups/rg-{identity.stem}-platform"
+            f"/providers/Microsoft.ContainerRegistry/registries/{identity.registry_name}"
+        )
+        if (
+            not same_id(registry.get("id"), expected)
+            or registry.get("roleAssignmentMode") != "AbacRepositoryPermissions"
+            or registry.get("adminUserEnabled") is not False
+            or registry.get("anonymousPullEnabled") is True
+            or registry.get("loginServer") != f"{identity.registry_name}.azurecr.io"
+            or registry.get("tags", {}).get("project") != identity.project
+            or registry.get("tags", {}).get("deployment") != identity.deployment
+        ):
+            raise ProvisioningError("registry_publication_policy_mismatch")
+        assignments = self.az(
+            "role",
+            "assignment",
+            "list",
+            "--scope",
+            expected,
+            "--include-inherited",
+            "--fill-principal-name",
+            "false",
+            "--fill-role-definition-name",
+            "false",
+        )
+        try:
+            role_ids = sorted({item["roleDefinitionId"].rsplit("/", 1)[-1] for item in assignments})
+            definitions = []
+            for role_id in role_ids:
+                UUID(role_id)
+                values = self.az(
+                    "role", "definition", "list", "--scope", expected, "--name", role_id
+                )
+                if len(values) != 1 or values[0]["name"].casefold() != role_id.casefold():
+                    raise ValueError
+                definitions += values
+        except (ValueError, KeyError, TypeError):
+            raise ProvisioningError("registry_permission_records_invalid") from None
+        assignment_path = self.state / "registry-assignments.json"
+        definition_path = self.state / "registry-definitions.json"
+        write_json(assignment_path, assignments)
+        write_json(definition_path, definitions)
+        self.commands.run(
+            [
+                sys.executable,
+                str(self.root / "scripts/operations/azure/registry_policy.py"),
+                "--assignments",
+                str(assignment_path),
+                "--definitions",
+                str(definition_path),
+            ]
+        )
 
     def get_access(self, slot: str) -> Cluster:
         allocation = self.config.allocation(slot)
@@ -420,6 +511,27 @@ class AzureProvider:
             },
         }
         names = ["gateway", "redis" if slot.endswith("-data") else "postgresql"]
+        if slot == "management" and self.config.identity:
+            names = ["gateway", "postgresql", "redis", "cluster"]
+            parameters["cluster"] = {
+                "allocations": {
+                    name: plain(value)
+                    for name, value in self.config.allocations.items()
+                    if name != "management"
+                },
+                "location": foundation["location"],
+                "tenantId": foundation["tenantId"],
+                "tags": plain(foundation["tags"]),
+                **{
+                    key: plain(foundation[key])
+                    for key in (
+                        "kubernetesVersion",
+                        "nodeVmSize",
+                        "nodeCount",
+                        "authorizedIpRanges",
+                    )
+                },
+            }
         return {
             TYPES[name][0]: {
                 "default": {
@@ -441,7 +553,11 @@ class AzureProvider:
         name = f"provision-{slot}"
         parameters = {
             "environmentName": name,
-            "namespace": f"{self.config.resource_prefix}-p-{slot}",
+            "namespace": (
+                provisioning_namespace(self.config.resource_prefix, slot)
+                if self.config.identity
+                else f"radplanes-p-{slot}"
+            ),
             "azureSubscriptionId": foundation["subscriptionId"],
             "azureResourceGroup": allocation["clusterResourceGroup"],
             "registryHost": foundation["registryLoginServer"],
@@ -709,17 +825,7 @@ class AzureProvider:
                 "kind": "Namespace",
                 "metadata": {
                     "name": namespace,
-                    "labels": {
-                        "plane-demo/project": self.config.project_name,
-                        **(
-                            {
-                                "plane-demo/deployment": self.config.identity.deployment,
-                                "plane-demo/environment": "azure",
-                            }
-                            if self.config.identity
-                            else {}
-                        ),
-                    },
+                    "labels": workloads.ownership_labels(self.config),
                 },
             },
         )
@@ -772,6 +878,7 @@ class AzureProvider:
                 )
         if role == "management":
             resources += self.management_permissions(namespace)
+            resources += workloads.management_discovery_permissions(namespace)
             runtime_config = self.config.to_dict()
             runtime_config["certificateCommand"] = list(
                 self.config.certificate_command or CONTAINER_CERTIFICATE_COMMAND
@@ -782,31 +889,11 @@ class AzureProvider:
                     "kind": "ConfigMap",
                     "metadata": {"name": "provisioning-settings", "namespace": namespace},
                     "immutable": True,
-                    "data": {"provisioning.json": json.dumps(runtime_config)},
-                },
-                {
-                    "apiVersion": "storage.k8s.io/v1",
-                    "kind": "StorageClass",
-                    "metadata": {"name": "radplanes-provisioner"},
-                    "provisioner": "disk.csi.azure.com",
-                    "reclaimPolicy": "Delete",
-                    "volumeBindingMode": "WaitForFirstConsumer",
-                    "allowVolumeExpansion": True,
-                    "parameters": {
-                        "skuName": "StandardSSD_LRS",
-                        "tags": f"SecurityControl=Ignore,project={self.config.project_name},"
-                        "managedBy=radius-todolist-app",
-                    },
-                },
-                {
-                    "apiVersion": "v1",
-                    "kind": "PersistentVolumeClaim",
-                    "metadata": {"name": "provisioner-state", "namespace": namespace},
-                    "spec": {
-                        "accessModes": ["ReadWriteOnce"],
-                        "storageClassName": "radplanes-provisioner",
-                        "resources": {"requests": {"storage": "8Gi"}},
-                    },
+                    "data": (
+                        self.config.bootstrap_settings
+                        if self.config.identity
+                        else {"provisioning.json": json.dumps(runtime_config)}
+                    ),
                 },
             ]
         self.apply(slot, resources)
@@ -845,7 +932,19 @@ class AzureProvider:
                         "resources": ["planes/local"],
                         "resourceNames": ["radius"],
                         "verbs": ["get", "list", "create", "update", "delete"],
-                    }
+                    },
+                    *(
+                        [
+                            {
+                                "apiGroups": [""],
+                                "resources": ["namespaces"],
+                                "resourceNames": [namespace],
+                                "verbs": ["get"],
+                            }
+                        ]
+                        if self.config.identity
+                        else []
+                    ),
                 ],
             },
             {
@@ -870,11 +969,14 @@ class AzureProvider:
         workloads.initialize_database(self, slot)
 
     def database_resource_exists(self, slot: str) -> bool:
+        return self.resource_exists(slot, "postgresql", "postgres")
+
+    def resource_exists(self, slot: str, kind: str, name: str) -> bool:
         output = self.rad(
             slot,
             "resource",
             "list",
-            TYPES["postgresql"][0],
+            TYPES[kind][0],
             "--group",
             self.config.radius_group,
             "--output",
@@ -891,7 +993,7 @@ class AzureProvider:
                 raise ValueError
         except (ValueError, KeyError, TypeError):
             raise ProvisioningError("invalid_radius_output") from None
-        return any(resource["name"].casefold() == "postgres" for resource in resources)
+        return any(resource["name"].casefold() == name.casefold() for resource in resources)
 
     def cleanup_initialization(self, slot: str, namespace: str, setup_name: str | None) -> None:
         resources = ["job/database-init", "secret/database-init"]
@@ -1154,28 +1256,53 @@ class AzureProvider:
         )
         return result
 
+    def current_certificate(self, slot: str) -> str | None:
+        if not self.resource_exists(slot, "gateway", "gateway"):
+            return None
+        role, _ = self.names(slot)
+        properties = self.resource(slot, "gateway", "gateway", role)
+        owners = f"{self.radius_scope}/providers/Applications.Core"
+        if (
+            properties.get("provisioningState") != "Succeeded"
+            or not same_id(properties.get("application"), f"{owners}/applications/{role}")
+            or not same_id(properties.get("environment"), f"{owners}/environments/{slot}")
+        ):
+            raise ProvisioningError("gateway_owner_mismatch")
+        uri = properties.get("certificateSecretUri")
+        url = endpoint(properties["url"], https=bool(uri))
+        if url != f"{'https' if uri else 'http'}://{properties.get('host')}":
+            raise ProvisioningError("invalid_gateway_output")
+        if not uri:
+            return None
+        expected = (
+            f"https://{self.config.foundation['vaultName']}.vault.azure.net/secrets/"
+            f"{self.config.allocation(slot)['certificateName']}"
+        )
+        if uri != expected:
+            raise ProvisioningError("gateway_certificate_mismatch")
+        return uri
+
     def deploy_plane(self, slot: str, observe: Callable[[str], None] = lambda _: None) -> str:
         self.config.allocation(slot)
         role, namespace = self.names(slot)
+        previous = self.current_certificate(slot)
         observe(f"{role}-database" if role != "data" else "data-credentials")
         self.prerequisites(slot)
         if role != "data":
             self.initialize_database(slot)
         self.runtime_secrets(slot)
-        values = {"image": self.config.images["api"]}
+        values = {
+            "image": self.config.images["api"],
+            "ownershipLabels": workloads.ownership_labels(self.config),
+        }
         if role == "management":
             values.update(
                 provisionerImage=self.config.images["provisioner"],
                 provisionerWorkloadIdentity=True,
                 provisionerClientId=self.config.coordinator_identity["clientId"],
             )
-        existing = self.state / f"{slot}-certificate.json"
-        # A healthy reapply keeps HTTPS; never downgrade a live gateway to challenge mode.
-        previous = json.loads(existing.read_text()) if existing.exists() else None
         if previous:
-            values.update(
-                gatewayPhase="https", certificateSecretUri=previous["certificateSecretUri"]
-            )
+            values.update(gatewayPhase="https", certificateSecretUri=previous)
         observe(f"{role}-application")
         self.deploy(slot, role, role, values)
         if role == "data":
@@ -1197,7 +1324,6 @@ class AzureProvider:
         endpoint(properties["url"], https=bool(previous))
         observe(f"{role}-certificate")
         uri = self.certificate(slot, host)
-        write_json(existing, {"certificateSecretUri": uri})
         values.update(gatewayPhase="https", certificateSecretUri=uri)
         self.deploy(slot, role, role, values)
         if role == "data":
@@ -1232,7 +1358,7 @@ class AzureProvider:
             },
         )
         key_file = f"{slot}.key"
-        write_private(self.state / key_file, self.credentials.plane(slot)["demoKey"] + "\n")
+        write_private(self.state / key_file, self.credentials.demo_key(slot) + "\n")
         path = self.state / "endpoints.json"
         inventory = json.loads(path.read_text()) if path.exists() else {"pairs": {}}
         selected = {"url": url, "key_file": key_file}

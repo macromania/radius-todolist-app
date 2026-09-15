@@ -1,0 +1,18 @@
+{
+  "version": "acr-abac-arm-import-v1",
+  "roleAssignmentMode": "AbacRepositoryPermissions",
+  "canonicalRecipePrefix": "radius-recipes/",
+  "stagingRecipePrefix": "radius-recipe-staging/",
+  "imageRepositories": ["plane-api", "plane-provisioner"],
+  "repositoryReaderRoleId": "b93aa761-3e63-49ed-ac28-beffa264f7ac",
+  "repositoryWriterRoleId": "2a1e307c-b015-4ebd-883e-5b7698a07328",
+  "dataImporterRoleId": "577a9874-89fd-4f24-9dbd-b5034d0ad23a",
+  "conditionVersion": "2.0",
+  "writerCondition": "((ActionMatches{'Microsoft.ContainerRegistry/registries/repositories/content/read'} OR ActionMatches{'Microsoft.ContainerRegistry/registries/repositories/metadata/read'} OR ActionMatches{'Microsoft.ContainerRegistry/registries/repositories/content/write'} OR ActionMatches{'Microsoft.ContainerRegistry/registries/repositories/metadata/write'}) AND (@Request[Microsoft.ContainerRegistry/registries/repositories:name] StringEqualsIgnoreCase 'plane-api' OR @Request[Microsoft.ContainerRegistry/registries/repositories:name] StringEqualsIgnoreCase 'plane-provisioner' OR @Request[Microsoft.ContainerRegistry/registries/repositories:name] StringStartsWithIgnoreCase 'radius-recipe-staging/'))",
+  "sources": [
+    "https://learn.microsoft.com/en-us/azure/container-registry/container-registry-rbac-abac-repository-permissions",
+    "https://learn.microsoft.com/en-us/azure/container-registry/container-registry-rbac-built-in-roles-directory-reference",
+    "https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles/containers",
+    "https://learn.microsoft.com/en-us/azure/templates/microsoft.containerregistry/2025-11-01/registries"
+  ]
+}

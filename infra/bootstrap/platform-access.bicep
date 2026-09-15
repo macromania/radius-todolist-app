@@ -2,13 +2,10 @@ param foundation object
 param allocations array
 param coordinatorPrincipalId string
 param operatorObjectId string
-param certificateIssuerRoleId string
-param acmeStateRoleId string
 
 var networkContributor = '4d97b98b-1d4f-4787-a291-c67834d212e7'
 var dnsContributor = 'b12aa53e-6015-4669-85d0-8515ebb3ae7f'
-var acrPull = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
-var secretsUser = '4633458b-17de-408a-b874-0445c86b69e6'
+var registryPolicy = loadJsonContent('../../scripts/operations/azure/registry-policy.json')
 var reader = 'acdd72a7-3385-48ef-bd42-f606fba81ae7'
 
 resource vnet 'Microsoft.Network/virtualNetworks@2024-07-01' existing = {
@@ -30,7 +27,7 @@ resource postgresSubnets 'Microsoft.Network/virtualNetworks/subnets@2024-07-01' 
   parent: vnet
   name: 'snet-${allocation.slot}-postgresql'
 }]
-resource registry 'Microsoft.ContainerRegistry/registries@2023-07-01' existing = {
+resource registry 'Microsoft.ContainerRegistry/registries@2025-11-01' existing = {
   name: foundation.registryName
 }
 resource postgresDns 'Microsoft.Network/privateDnsZones@2024-06-01' existing = {
@@ -127,55 +124,44 @@ var imageReaders = concat(
   map(allocations, allocation => allocation.identities.kubelet.principalId),
   map(allocations, allocation => allocation.identities.radius.principalId)
 )
+resource coordinatorRegistryRead 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: registry
+  name: guid(registry.id, coordinatorPrincipalId, reader)
+  properties: {
+    principalId: coordinatorPrincipalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', reader)
+    description: 'Read registry ARM properties and authorization metadata through this registry scope; no writes or delegation.'
+  }
+}
 resource registryPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = [for principal in imageReaders: {
   scope: registry
-  name: guid(registry.id, principal, acrPull)
+  name: guid(registry.id, principal, registryPolicy.repositoryReaderRoleId)
   properties: {
     principalId: principal
     principalType: 'ServicePrincipal'
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', acrPull)
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', registryPolicy.repositoryReaderRoleId)
   }
 }]
 resource registryPublish 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   scope: registry
-  name: guid(registry.id, operatorObjectId, '8311e382-0749-4cb8-b61a-304f252e45ec')
+  name: guid(registry.id, operatorObjectId, registryPolicy.repositoryWriterRoleId)
   properties: {
     principalId: operatorObjectId
     principalType: 'User'
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '8311e382-0749-4cb8-b61a-304f252e45ec')
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', registryPolicy.repositoryWriterRoleId)
+    conditionVersion: registryPolicy.conditionVersion
+    condition: registryPolicy.writerCondition
+    description: 'Data-plane writes are limited to image repositories and Recipe staging, never canonical Recipes.'
   }
 }
-// ARM accepts explicit data-plane object scopes without inventing a certificate ARM resource type.
-// These assignments do not create, retrieve, or replace any secret or certificate.
-module gatewaySecrets './vault-object-access.json' = [for allocation in allocations: {
-  name: 'gateway-secret-access-${allocation.slot}'
-  params: {
-    objectScope: resourceId('Microsoft.KeyVault/vaults/secrets', foundation.vaultName, allocation.certificateName)
-    principalId: allocation.identities.gateway.principalId
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', secretsUser)
+resource registryImport 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: registry
+  name: guid(registry.id, operatorObjectId, registryPolicy.dataImporterRoleId)
+  properties: {
+    principalId: operatorObjectId
+    principalType: 'User'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', registryPolicy.dataImporterRoleId)
+    description: 'Trusted operator ARM import plus repository/catalog reads; no data-plane content or metadata writes.'
   }
-}]
-module issuerCertificates './vault-object-access.json' = [for allocation in allocations: {
-  name: 'issuer-certificate-access-${allocation.slot}'
-  params: {
-    objectScope: resourceId('Microsoft.KeyVault/vaults/certificates', foundation.vaultName, allocation.certificateName)
-    principalId: allocation.identities.certificateIssuer.principalId
-    roleDefinitionId: certificateIssuerRoleId
-  }
-}]
-module issuerCertificateSecrets './vault-object-access.json' = [for allocation in allocations: {
-  name: 'issuer-certificate-secret-access-${allocation.slot}'
-  params: {
-    objectScope: resourceId('Microsoft.KeyVault/vaults/secrets', foundation.vaultName, allocation.certificateName)
-    principalId: allocation.identities.certificateIssuer.principalId
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', secretsUser)
-  }
-}]
-module issuerStateSecrets './vault-object-access.json' = [for allocation in allocations: {
-  name: 'issuer-state-secret-access-${allocation.slot}'
-  params: {
-    objectScope: resourceId('Microsoft.KeyVault/vaults/secrets', foundation.vaultName, allocation.acmeStateSecretName)
-    principalId: allocation.identities.certificateIssuer.principalId
-    roleDefinitionId: acmeStateRoleId
-  }
-}]
+}

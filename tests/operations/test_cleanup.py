@@ -567,7 +567,7 @@ class CleanupTests(unittest.TestCase):
             ),
             redirect_stdout(io.StringIO()),
         ):
-            self.assertEqual(cleanup.main(), 1)
+            self.assertEqual(cleanup.legacy_main(), 1)
         self.assertFalse(self.commands.calls)
 
     def test_azure_failure_names_the_operation_and_owned_target(self):
@@ -948,7 +948,7 @@ class CleanupTests(unittest.TestCase):
             patch.object(sys, "argv", argv),
             redirect_stdout(io.StringIO()),
         ):
-            self.assertEqual(cleanup.main(), 0)
+            self.assertEqual(cleanup.legacy_main(), 0)
         self.assertFalse(credential.exists())
         self.assertTrue(evidence.exists())
         self.assertTrue((state / "bootstrap.outputs.json").exists())
@@ -975,7 +975,7 @@ class CleanupTests(unittest.TestCase):
             ),
             redirect_stdout(io.StringIO()),
         ):
-            self.assertEqual(cleanup.main(), 1)
+            self.assertEqual(cleanup.legacy_main(), 1)
         self.assertTrue(credential.exists())
 
     def test_interrupt_during_provider_delete_reports_incomplete_and_retains_credentials(self):
@@ -1008,7 +1008,7 @@ class CleanupTests(unittest.TestCase):
             redirect_stdout(output),
             redirect_stderr(error),
         ):
-            self.assertEqual(cleanup.main(), 130)
+            self.assertEqual(cleanup.legacy_main(), 130)
         self.assertIn("Cleanup incomplete: interrupted", error.getvalue())
         self.assertIn("Azure operation may still be running", error.getvalue())
         self.assertIn("resources may remain", error.getvalue())
@@ -1058,7 +1058,7 @@ class CleanupTests(unittest.TestCase):
             redirect_stdout(output),
             redirect_stderr(error),
         ):
-            self.assertEqual(cleanup.main(), 130)
+            self.assertEqual(cleanup.legacy_main(), 130)
         self.assertEqual(events, ["verified", "removed"])
         self.assertFalse(first.exists())
         self.assertTrue(second.exists())
@@ -1085,7 +1085,7 @@ class CleanupTests(unittest.TestCase):
             ),
             redirect_stdout(io.StringIO()),
         ):
-            self.assertEqual(cleanup.main(), 1)
+            self.assertEqual(cleanup.legacy_main(), 1)
         self.assertEqual(self.mutations(), [])
 
     def test_verify_entrypoint_delegates_only_read_only_mode(self):

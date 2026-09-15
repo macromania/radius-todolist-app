@@ -6,7 +6,9 @@ mock_provider "random" {
 }
 
 variables {
-  node_address = "172.18.0.2"
+  resource_prefix = "radplanes-local"
+  radius_group    = "radplanes-local"
+  node_address    = "172.18.0.2"
   context = {
     application = { name = "management" }
     environment = { name = "management" }

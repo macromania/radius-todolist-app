@@ -14,6 +14,10 @@ Secret access is corrected and proved in final fresh run `8f76f612...`, includin
 after API restart. No implementation finding remains open within the approved
 demo scope. Accepted limitations below remain limitations, not production claims.
 
+The state-removal refactor is a separate, not-yet-live-proven revision. Its
+source checks and review corrections are recorded below. Earlier deployments
+and cleanup results do not validate the current refactor.
+
 ## Phase 0 - Foundations
 
 Baseline: commit `79f4cc4`; clean worktree before implementation.
@@ -140,6 +144,36 @@ created by this phase. Both final F001 fix reviews reported no findings.
 | F105 | Selected identity | Medium correctness | `src/plane_demo/management/providers/redis_nic_tags.py` | Provider region observation | The old `Central US` exception rejected a valid new display region and accepted the wrong region for a selected deployment | Compare normalized actual region to the selected code; real tagging-path tests cover both cases |
 | F106 | Image source provenance | Medium correctness | Provisioner Dockerfiles and `scripts/harness/test-e2e.py` | Source allowlists | The native installer was missing from one image COPY list and the corresponding acceptance source list | Align both images and source provenance; exact source-layout checks pass |
 | F107 | Selected identity | Medium correctness | `src/plane_demo/management/providers/workloads.py` | Runtime project binding | New namespaces alone left the data runtime's project identifier fixed to the previous project | Bind the selected project into runtime Secrets and administrative metadata; provider-path regression passes |
+| F108 | Service credential integration | High correctness | `src/plane_demo/management/provisioner.py` and canonical deployment callers | Worker activation | A selected worker expects service credentials, but the existing deployment/setup callers still populate files | Both normal callers now use service credentials; public API-discovered worker startup and native Make routes are wired. Component checks pass; final review and live proof remain pending |
+| F109 | Disposable worker workspace | High correctness | `src/plane_demo/management/providers/azure.py` | Gateway reapply | A fresh workspace lost the certificate marker that previously prevented HTTPS downgrade | Read the current owned Radius gateway binding before the first deployment; fresh-workspace and later issuance-failure regressions pass |
+| F110 | Runtime credential projection | Medium correctness | `src/plane_demo/management/providers/workloads.py` | Kubernetes Secret update | Omitting a write-only `stringData` key did not prove removal of the old stored credential bundle | Remove only known obsolete keys with UID/resourceVersion tests, then verify stored metadata without exporting values; merge-semantics regression passes |
+| F111 | Kubernetes credential creation | Medium correctness | `src/plane_demo/management/providers/secret_store.py` | Singleton guard | Loss during the preliminary read could still permit a later Secret create | Check the current guard immediately before create, after namespace reads; creation is refused on lost session |
+| F112 | Harness journal recovery | Medium correctness | `scripts/harness/fault-parent-link.py` | Create/seal interruption | An interruption after ConfigMap creation but before UID sealing blocked both restoration and a new fault despite no applied mutation | Resolved with ownership-checked pre-mutation cancellation and independent artifact checks; regressions and both fix reviews pass |
+| F113 | Azure image verification | High security | `scripts/operations/azure/image_inspection.py` | Executable content exemptions | An unchanged source tree could mask forged application bytecode or a replaced interpreter and still pass the image reuse gate | Source corrected with ACR-run/ARM-owned provenance, full filesystem fingerprints and bytecode checks; offline regressions pass. Fresh image build and live acceptance remain pending |
+| F114 | External vault compatibility | High correctness | `scripts/operations/azure/azure.shlib` | Vault network validation | External vault validation allowed `bypass=None`, which conflicts with the proven Application Gateway certificate requirement in D016 | Compatible AzureServices bypass is required without changing the external vault; native contract tests pass, live external-vault proof pending |
+| F115 | Selected Azure project | High correctness | Azure Recipes and bootstrap ownership checks | Resource tags | Radius-created resources retained a fixed `radplanes` project tag, causing selected-project bootstrap reruns to reject their own resources | Selected project tags now flow through bootstrap and Recipes; compiled/native regressions pass, live rerun pending |
+| F116 | Azure image verification | Medium correctness | `scripts/operations/azure/image_inspection.py` | Tool verification | Pinned kubelogin and executable permissions were not checked | Source checks cover pinned tools and executable modes; synthetic filesystem regressions pass, actual rebuilt-image proof pending |
+| F117 | Recipe publication | Medium correctness | `scripts/operations/azure/build.sh` | Canonical tag publication | A check-then-publish race could overwrite a concurrently created canonical Recipe tag | Verified staging content is promoted by non-forced ARM import under ABAC isolation; native command contracts pass, live publication pending |
+| F118 | Harness journal recovery | High correctness | `scripts/harness/fault-parent-link.py` | Unsealed cancellation | A replaced unsealed journal could include an applied fault in its baseline and falsely report physical restoration | Resolved by independently checking live artifacts regardless of journal baseline/run/UID; both backend regressions and fix reviews pass |
+| F119 | Harness journal recovery | Medium correctness | `scripts/harness/local/fault-parent-link.py` | Replaced Pod before mutation | A safe pre-mutation journal remained blocked after reconciler Pod replacement | Resolved with read-only current ownership/absence checks; stored sandbox is not rewritten and applied-fault restoration stays strict |
+| F120 | Canonical bootstrap | High correctness | `scripts/operations/management_job.py` | Writer termination guard | Desired replicas zero did not prove that a running provisioner had stopped writing credentials | Require current observed generation/counts and independent Pod absence, excluding only this exact bootstrap Job; regressions and fix reviews pass |
+| F121 | Canonical bootstrap | Medium correctness | `scripts/operations/run-management-job.py` | Reused Job key handoff | Changed supplied keys or adding keys after a no-key suspended Job could be ignored on resume/success | Validate critical immutable Pod-template fields and owned immutable input contents for every reentry state; regressions and fix reviews pass |
+| F122 | Recipe consumption | High security | Azure Recipe publication and provider registration | Verified tag versus downloaded bytes | Radius consumes a mutable tag after separate digest verification, allowing a registry publisher to replace the Recipe before download | ABAC canonical-repository isolation is implemented and checked by native publication and the real provider consumer. Offline policy tests pass; live enforcement remains unproved |
+| F123 | Image runtime access | High correctness | `scripts/operations/azure/build.sh` | Source archive extraction | Extraction under umask 077 made root-owned application sources unreadable to runtime UID 10001 | Source archive modes are preserved inside a private workspace and runtime read/traverse permissions checked; offline regressions pass, rebuilt-image proof pending |
+| F124 | Live local cleanup | High correctness | `scripts/operations/local/cleanup.py` | Terraform backend ownership | New cleanup checked backend names/UIDs without validating the state payload that controls destruction | Normal entrypoints now validate payloads and recheck immediately before deletion, including same-UID changes; tests and fix reviews pass |
+| F125 | Live Azure cleanup | Medium correctness | `scripts/operations/clean-azure.py` | Radius-only completion | Radius-only cleanup could report completion before verifying absence of management app-group backend resources | Management backend absence is now required before success; tests and fix reviews pass |
+| F126 | Prepared local images | High correctness | Local build and bootstrap-assets Dockerfile | Source/generated permissions | Private build modes could make copied code/assets unreadable to runtime UIDs | Source modes and only nonsecret prepared-artifact modes are preserved/normalized; actual synthetic filesystem checks pass, rebuilt-image proof pending |
+| F127 | First local child | High correctness | `infra/radius/recipes/local/cluster/main.tf` | Node address dependency | The node-address data source lost its dependency on child creation and could run during first-child planning | Dependency restored; compiled graph and mock contracts cover first-create ordering. Real cold-child proof pending |
+| F128 | Prepared Terraform reentry | Medium correctness | `scripts/operations/local/terraform-init.py` | Ownership marker | The CHOWN-only initializer touched a UID-65532-owned private marker before reclaiming ownership | Reclaim the verified marker before touching it, then restore its private owner/mode; constrained repeated-init checks pass |
+| F129 | Radius namespace composition | High correctness | Local environment producers/parsers and selected provisioning namespaces | Environment versus application namespace | Applications.Core appends the app name to the environment namespace; full app namespaces produced double suffixes, and long provisioning prefixes could exceed 63 characters | Both local producers/parsers and Azure provisioning prefixes are corrected; actual API-discovery, all-slot and maximum-length regressions pass |
+| F130 | Public local operator factory | High correctness | `src/plane_demo/management/providers/local.py` | Prepared-assets input | Public constructor path was stored while verification/bootstrap still used the image-only global path | Both consumers now use the public path; actual provider tests no longer patch the global and pass |
+| F131 | Local operator credential cleanup | Medium correctness | `scripts/operations/local/operator_provider.py` | Kubernetes SDK decoded files | SDK config loading cached decoded certificates/private keys outside the owned workspace until process exit | Use explicit SDK configuration with private owned certificate files; repeated real-client cleanup tests pass |
+| F132 | Local operator error contract | Medium correctness | Local operator factory and artifact parsers | Malformed data | Missing/null/list API or package shapes escaped as raw Python errors | Add object guards and normalize expected failures to ProvisioningError; malformed-shape regressions pass |
+| F133 | API-only worker activation | High correctness | `src/plane_demo/management/providers/azure.py`, `scripts/operations/azure/azure.shlib` | Effective registry grants | Azure CLI 2.83.0 rejects the combined `--scope` and `--all` flags, blocking selected Recipe verification before startup | Provider and native helper retain exact scope and inherited grants without `--all`; command-contract regressions pass, including pinned CLI validation with offline client doubles |
+| F134 | API-only local configuration | Medium correctness | `src/plane_demo/management/providers/discovery.py` | Selected revision | Consistent deployment and Recipe bindings from another revision bypassed an explicit `DEMO_REVISION` pin | Runtime discovery now rejects the mismatched optional pin; real discovery regression passes |
+| F135 | Canonical local deployment | High correctness | `scripts/operations/local/deploy-demo.py` | Fresh checkout | Native build generated extensions only in its disposable source tree; the host provider later compiled checkout templates after creating database initialization inputs | Caller regenerates all three ignored extensions atomically before entering the credential/deployment factory; actual fresh-tree extension generation and database-template compilation pass |
+| F136 | Canonical local deployment | Medium correctness | `scripts/operations/local/deploy-demo.py` | Setup timeout | `subprocess.run(timeout=600)` terminated only the immediate setup shell, leaving nested tools running | Caller uses the shared owned process-group supervisor; a real nested-process timeout test verifies descendant termination and process absence |
+| F137 | Live workload ownership | High correctness | `infra/radius/modules/workload.bicep` and provider deployment parameters | Pod labels | Namespace ownership was selected correctly, but workloads still used only project=radplanes and omitted deployment/environment, so live harness owner checks rejected them | Both providers now pass the same ownership map to namespaces and every workload/challenge across all three apps; real provider and compiled-template regressions pass without relaxing harness checks |
 
 Cleanup review F037 (claimed unsupported `resource delete --application`) was
 not reproduced. The installed CLI declares the flag, and an offline invocation
@@ -1868,6 +1902,72 @@ No new Azure/local deployment or image build was performed for this step.
 Native stage integration, service-owned credential wiring, and fresh scenario
 proof remain unfinished.
 
+### Service-credential runtime branch, not yet accepted
+
+The uncommitted selected-worker branch now reads Key Vault or Kubernetes
+credentials in a disposable workspace and does not load the file seed. Its
+credential source checks deployment ownership, reads database properties from
+provider APIs, and registers retrieved values for redaction. Runtime consumers
+keep their existing role split and refuse missing keys for existing data apps.
+
+The initial security review found no vulnerabilities. Rubber-duck review found
+F108-F111. Fixes for F109-F111 pass component and worker-path checks; the final
+focused run passed 665 tests. The normal operator conversion in F108 remains
+unfinished. The full `PROVISIONING_CONFIG` handoff and other legacy inputs also
+remain. This branch is not a working deployment handoff yet.
+
+Acceptance must run through the documented Make/script entrypoints. If those
+entrypoints still require unavailable file state, that is a failed acceptance
+result. An ad hoc management Job or helper that skips their prerequisites is not
+an acceptable substitute. The owning wrapper or an approved reusable operation
+must be fixed, then the same normal path rerun.
+
+### Native-stage and harness review gates
+
+The parent reran 101 Azure native-stage tests and five Make routing tests.
+Despite those passing cases, reviews found F113-F117. The image inspector's
+`content_verified` result is not accepted as deployment proof while F113 is
+open. No affected images were built, reused, or deployed in a live run.
+Corrections must establish a trust boundary beyond publisher-controlled image
+content, not simply change the reported verification flag.
+
+The parent also reran 367 harness/layout tests and 230 subtests. Review found
+F112 before live acceptance. That journal recovery fix and loaded-environment
+checks are pending integration. Make routing and documentation are being
+updated to use `.env` and live reports rather than exported acceptance files.
+
+Owned cluster access is now separate from application namespace validation so
+the normal bootstrap can initialize management Radius before applications
+exist. API commands still require the namespace ownership check. Thirty-four
+focused discovery/Make routing tests passed; this is not a bootstrap deployment.
+
+### Canonical Azure management caller conversion
+
+The normal management wrapper now reads `.env`, invokes the canonical read-only
+artifact inspector, queries ARM outputs and owned cluster access, and constructs
+one suspended management Job without an operator-state PVC. Immutable
+configuration and supplied-key inputs are staged under the Job's UID before
+resume. The selected `deploy-plane.py` path uses the service credential source,
+persists supplied per-slot keys, and keeps the existing provider sequence.
+Bootstrap guards use live Job ownership and observed provisioner termination,
+not a workstation marker.
+
+Review found F120-F121. Their corrections and both fix reviews passed. The final
+targeted run passed 217 tests covering canonical input/Job construction, stop-on-
+prerequisite-failure behavior, bootstrap ownership/write guards, service
+credential paths, and image source layout. These are mocked/component results,
+not a completed management deployment.
+
+The actual normal preview command was attempted. It first failed because `.env`
+was absent. The normal `make init` command then created the private, ignored
+Azure selection using the current enabled subscription, `radplanes/learning`,
+and Central US. Retrying the same preview stopped at its uncommitted deployment
+input guard before cloud deployment. No prerequisite was bypassed.
+
+F108 is not closed for the complete request: local caller integration, removal
+of the remaining full worker configuration handoff, image trust fixes, and
+fresh live acceptance still remain.
+
 ### Live harness and resource-owned recovery integration
 
 Public harness entrypoints now read the checkout `.env` and discover access,
@@ -1892,6 +1992,104 @@ checks passed. These were synthetic/offline tests, not live outage acceptance.
 Deployment/operator conversion, image trust fixes, cleanup integration and
 fresh Azure/local end-to-end proof remain separate unfinished work.
 
+### Pinned Radius Recipe reference limitation
+
+The final Azure-stage review found F122-F123. The original interpreter/bytecode
+image-verification issue now has a trusted build/filesystem proof implementation,
+but image and Recipe acceptance remain blocked by these additional findings.
+
+The pinned Radius 0.60.2
+[`parsePath` implementation](https://github.com/radius-project/radius/blob/v0.60.2/pkg/rp/util/registry.go)
+explicitly rejects digest-only Recipe references. A tag plus digest does not
+bind the download either: the parser extracts the tag and the registry
+resolver uses it. Appending a digest or adding another tag check is therefore
+not a valid fix.
+
+The selected correction is repository permission isolation: canonical Recipe
+repositories must not grant data-plane publisher writes, while the trusted
+operator can promote verified staging content through the ARM import path.
+ACR ABAC mode and scoped publisher/read roles are being implemented and must be
+verified before any live Recipe execution. This does not add a new artifact
+proxy, change the pinned Radius version, or claim that reversible tag locks
+provide this boundary.
+
+### Canonical local operator factory and preparation reviews
+
+The reusable `local_operator_provider` context is now implemented under
+`scripts/operations/local/`. It uses discovered static access, live management
+and consumed Recipe/image ownership, an explicitly supplied prepared-assets
+path, the service credential source, and a namespace-owned bootstrap Lease.
+It does not take over an active or interrupted lease. Normal release checks
+the owner and uses UID/resourceVersion deletion preconditions.
+
+The factory exposes prepared data through a public constructor parameter, not
+private provider mutations. It owns decoded CA/certificate/key files and
+removes them when its context exits. Both actual provider consumers and
+repeated real SDK client construction are covered. Reviews found F130-F132;
+the final focused factory/consumer/guard run passed 31 tests after those fixes.
+This is component proof; the normal local deploy caller is still being wired.
+
+Local preparation and cleanup reviews separately found F124-F129. In
+particular, the pinned Radius 0.60.2
+[`CreateAppScopedNamespace` implementation](https://github.com/radius-project/radius/blob/v0.60.2/pkg/corerp/frontend/controller/applications/updatefilter.go)
+uses `environment-namespace` plus `application-name` for Applications.Core.
+Environment namespaces and final application namespaces must remain distinct.
+The selected Azure child-provisioning namespace now uses a short slot index
+and is tested at the maximum allowed deployment-prefix length.
+
+No local image build, cluster creation, cleanup, or fresh end-to-end acceptance
+was performed for these corrections.
+
+### Cleanup integration and host prerequisite blocker
+
+Normal Azure/local cleanup and independent verification now use `.env` and
+live APIs. The restored Terraform payload checks and management app-group
+absence checks passed both fix reviews. Local cleanup also refuses an extant
+bootstrap Lease rather than racing or taking it over. The parent run passed
+185 direct cleanup tests and 15 subtests.
+
+The combined Make-routing validation then encountered a new external host
+failure: `/usr/bin/make` exits 69 because the installed Xcode license has not
+been accepted. A direct `make --version` reproduced the failure outside pytest;
+the source was not responsible. Homebrew Git still works. No license was
+accepted, no privileged command was run, and no alternate deployment path was
+used to bypass this prerequisite. Make and live workflow proof remain blocked
+until the user resolves the toolchain prerequisite.
+
+### Public-identity worker configuration
+
+Selected workers now obtain starting identity through `provisioning-settings`
+environment injection. The immutable ConfigMap contains public settings only.
+Current Kubernetes, Radius and Azure APIs supply runtime configuration, instead
+of the former full `provisioning.json` projection. Both real `main()` paths are
+covered with a deliberately nonexistent `PROVISIONING_CONFIG`, service-owned
+credentials, disposable workspaces and the existing singleton polling loop.
+Separate API-boundary tests cover actual discovery and refuse mismatched
+namespace owners, Radius namespaces, workload images, workload identity,
+foundation readiness and Recipe bindings. Local discovery never calls Azure.
+
+The selected Azure Recipe consumer invokes the same ABAC policy checker as
+the native build path. It reads inherited assignments and role definitions at
+the exact registry scope before tag verification. Bootstrap adds coordinator
+Reader grants at that registry and the exact subscription deployment resource,
+not at the subscription. Live authorization for these grants is not yet proved.
+
+Security review found no vulnerabilities in this bounded integration.
+Rubber-duck review found F133 and F134. Both provider fixes have regression
+coverage. The native F133 correction also passed six focused tests, Ruff and
+ShellCheck; its command-contract tests exercise the pinned Azure CLI 2.83.0
+validation with offline client doubles. The focused provider integration run
+passed 427 tests, including the actual policy
+checker process and compiled management ConfigMap injection. Ruff passed for
+all Python source, scripts and tests. These are offline/component results.
+Legacy startup/PVC retirement, canonical local caller integration and fresh
+end-to-end proof remain open.
+
+After both F133 call sites were corrected, the combined provider, local runtime
+discovery, Azure policy and native Azure stage regression run passed 365 tests
+in 751.63 seconds. This run used the in-progress worktree based on `16ed22f`;
+it is not acceptance evidence for a rebuilt image or deployed environment.
+
 ### Selected local harness image names
 
 The live harness now expects `localhost/<stem>-<role>:<revision>`, matching the
@@ -1903,3 +2101,82 @@ The identity-free offline fixtures retain their historical image names.
 Both bounded reviews covered this change. The focused live-discovery and local
 harness run passed 115 tests and 18 subtests. No local image was built and no
 cluster or live scenario was run for this correction.
+
+### Canonical local deployment caller
+
+The normal `scripts/operations/local/deploy-demo.py` caller now reads `.env`,
+observes canonical `setup.sh inspect`, and obtains fresh Docker Desktop/kind
+access. It preserves explicitly supplied keys while merging the discovered
+public identity, enters `local_operator_provider`, seeds service-owned keys
+under that factory's guard, and invokes the normal management deployment.
+The command does not read legacy credential, provisioning or attempt files.
+Success is printed only after deployment and factory cleanup finish.
+
+The local privileged-image source proof now also checks the copied Azure policy
+helper and its adjacent policy JSON. Missing or changed bytes fail inspection;
+these files remain absent from the public API image. Copying them does not
+introduce Azure calls into the local execution path.
+
+The bounded security review found no vulnerabilities. Rubber-duck review found
+F135 and F136. Their corrections passed 225 focused tests in 156.33 seconds,
+including actual pinned Radius extension generation, Bicep compilation from a
+source tree with no generated extensions, real descendant termination, normal
+caller sequencing, prepared-provider consumers and synthetic image byte/mode
+inspection. Ruff passed across Python source, scripts and tests. Direct-main
+tests restore their process umask so they do not alter later permission tests.
+
+These results are component proof against the uncommitted worktree, not an image
+build, deployment or cold-child run. Native Make routing, final legacy runtime
+state removal, guide updates and fresh Azure/local acceptance remain unfinished.
+
+### Native frontdoors and runtime-state retirement
+
+The common `build`, `bootstrap`, `deploy-management`, cleanup and fault targets
+now dispatch from `.env`. Explicit local aliases validate that selection.
+Azure bootstrap includes management Radius; local build prepares dependencies
+before bootstrap. Local management deployment runs canonical setup before the
+guarded caller. `make kube` uses fresh scoped access and deletes its private
+kubeconfig afterward. Both manual guides now use current API discovery,
+Kubernetes-owned fault journals and optional temporary response comparisons.
+Neither guide requires an endpoint inventory or cleanup record.
+
+The worker's legacy file-configuration and credential-seed startup branch is
+removed. Working-state/configuration mounts, provisioner PVC prerequisites and
+`/app/.state` image directories are removed. Public identity is injected through
+the ConfigMap; credentials come from their service owners. The Azure Job's
+internal command now rejects legacy file credentials and child deployment and
+prints success only after its guard/provider contexts finish.
+
+Initial bounded security and rubber-duck reviews found no new issues in this
+step. Subsequent producer/consumer tracing found F137: live harness ownership
+requires all three selected labels on the workload, not only its namespace.
+The producer correction is covered for both providers, all three planes,
+both Azure deployment phases, and all nine compiled workload/challenge modules.
+The owner checks themselves are unchanged.
+Both bounded follow-up reviews found no remaining issues in that correction.
+
+The broad offline run recorded 96 failures. Of these, 72 involved the unavailable
+host Make command or missing outputs caused by its Xcode-license exit 69.
+The other 24 exposed test fixtures and compiled contracts that still assumed
+old image names, old grant locations or a permissive process umask. Those were
+corrected without weakening image, ownership, or role checks. The follow-up
+run passed 1,012 tests and 19 subtests, including every unit test, real harness
+algorithms with command doubles, image-content checks and compiled infrastructure
+contracts. Restrictive-umask image checks separately passed 45 tests.
+
+The Recipe validator also no longer uses the old gate's `.state/local` or Docker
+context merely to run mock tests. It uses a disposable workspace, the shared
+process-group supervisor, a private HOME and a PATH guard denying live platform
+tools. Its archive/command tests passed 56 cases. The offline-cache attempt
+stopped explicitly at the missing PostgreSQL provider cache. The normal validator
+then restored only lockfile-pinned providers and passed all 26 real Terraform
+mock contracts: 11 cluster, 6 PostgreSQL, 4 Redis and 5 gateway. Lockfiles were
+not changed. No cluster, image build/push, datastore or live deployment was
+created by these checks.
+Both follow-up reviews also found no issues in the validator's isolated
+environment, process supervision, archive handling or temporary cleanup.
+
+All 24 Bicep files compiled with the pinned Radius compiler, and the complete
+shell and Ruff checks passed. Make-based checks remain unverified on this host
+until its Xcode prerequisite is resolved. Fresh Azure/local deployment,
+outage/recovery, cold-child and cleanup proof remain required.

@@ -1,6 +1,9 @@
 param application string
 param environment string
 param image string
+param ownershipLabels object = {
+  'plane-demo/project': 'radplanes'
+}
 param gatewayPhase string = 'challenge'
 param certificateSecretUri string = ''
 
@@ -11,6 +14,7 @@ module api '../modules/workload.bicep' = {
     environment: environment
     name: 'control-api'
     image: image
+    ownershipLabels: ownershipLabels
     entrypoint: 'plane_demo.control.api'
     serviceAccount: 'control-api'
     runtimeSecretName: 'control-api-runtime'
@@ -25,6 +29,7 @@ module reconciler '../modules/workload.bicep' = {
     environment: environment
     name: 'control-reconciler'
     image: image
+    ownershipLabels: ownershipLabels
     entrypoint: 'plane_demo.control.reconciler'
     serviceAccount: 'control-reconciler'
     runtimeSecretName: 'control-reconciler-runtime'
@@ -37,6 +42,7 @@ module challenge '../modules/challenge.bicep' = {
     application: application
     environment: environment
     image: image
+    ownershipLabels: ownershipLabels
   }
 }
 

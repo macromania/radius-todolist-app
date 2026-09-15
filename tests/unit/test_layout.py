@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import re
 import shlex
@@ -27,7 +28,7 @@ def image_sources(component):
         if path.is_file()
         and (
             path.suffix in {".py", ".sql", ".bicep", ".yaml", ".tf", ".hcl", ".sh"}
-            or path.name == "bicepconfig.json"
+            or path.name in {"bicepconfig.json", "registry-policy.json"}
         )
     }
 
@@ -123,6 +124,44 @@ def test_radius_application_group_contains_only_the_three_planes():
         "gateway.bicep",
         "workload.bicep",
     }
+
+
+def test_compiled_management_worker_consumes_public_configmap_settings():
+    result = subprocess.run(
+        [
+            str(Path.home() / ".rad/bin/bicep"),
+            "build",
+            str(ROOT / "infra/radius/apps/management.bicep"),
+            "--stdout",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=120,
+    )
+    modules = {item["name"]: item["properties"] for item in json.loads(result.stdout)["resources"]}
+    worker = modules["management-provisioner"]
+    assert worker["parameters"]["runtimeConfigMapName"] == {"value": "provisioning-settings"}
+    assert worker["parameters"]["entrypoint"] == {"value": "plane_demo.management.provisioner"}
+    assert "volumes" not in worker["parameters"] and "mounts" not in worker["parameters"]
+    assert worker["template"]["parameters"]["volumes"]["defaultValue"] == []
+    assert worker["template"]["parameters"]["mounts"]["defaultValue"] == []
+    pod = worker["template"]["resources"]["workload"]["properties"]["properties"]["runtimes"][
+        "kubernetes"
+    ]["pod"]
+    assert pod["containers"][0]["envFrom"] == (
+        "[concat(if(empty(parameters('runtimeSecretName')), createArray(), "
+        "createArray(createObject('secretRef', createObject('name', "
+        "parameters('runtimeSecretName'))))), "
+        "if(empty(parameters('runtimeConfigMapName')), createArray(), "
+        "createArray(createObject('configMapRef', createObject('name', "
+        "parameters('runtimeConfigMapName'))))))]"
+    )
+    assert pod["securityContext"]["fsGroupChangePolicy"] == "OnRootMismatch"
+    assert "runtimeConfigMapName" not in modules["management-api"]["parameters"]
+    assert modules["management-api"]["template"]["parameters"]["runtimeConfigMapName"][
+        "defaultValue"
+    ] == ""
 
 
 def test_azure_redis_recipe_keeps_the_existing_ci_security_and_connection_guards():

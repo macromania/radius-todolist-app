@@ -86,6 +86,9 @@ elif tool=="kubectl":
     elif "secret" in args:
         name=args[args.index("secret")+1]
         print(name+"\n"+namespace+"\n"+base64.b64encode(spec["api_key"].encode()).decode())
+    elif "get" in args and "pods" in args:
+        if mode=="command-failed": raise SystemExit(23)
+        print(json.dumps({"items":[]}))
     else: raise SystemExit("unexpected Kubernetes command")
 elif tool=="curl":
     lines=Path(argument("--config")).read_text().splitlines()
@@ -107,6 +110,7 @@ def checkout(tmp_path):
         "scripts/lib/discovery.sh",
         "scripts/operations/endpoints.sh",
         "scripts/operations/api.sh",
+        "scripts/operations/kube.sh",
     ):
         destination = tmp_path / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -182,6 +186,66 @@ def discover(root, slot):
 
 
 @pytest.mark.parametrize("environment", ["azure", "local"])
+@pytest.mark.parametrize("failure", [False, True])
+def test_kube_entrypoint_uses_fresh_scoped_access_and_preserves_exit_status(
+    checkout, environment, failure
+):
+    spec = configure(checkout, environment, "shared-data", "command-failed" if failure else None)
+    result = subprocess.run(
+        [
+            "bash",
+            str(checkout / "scripts/operations/kube.sh"),
+            "shared-data",
+            "get",
+            "pods",
+            "-o",
+            "json",
+        ],
+        env={
+            **os.environ,
+            "PATH": str(checkout / "bin") + os.pathsep + os.environ["PATH"],
+            "TMPDIR": str(checkout / "work"),
+            "FAKE_SPEC": str(checkout / "spec.json"),
+            "FAKE_LOG": str(checkout / "calls.jsonl"),
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == (23 if failure else 0), result.stderr
+    records = [json.loads(line) for line in (checkout / "calls.jsonl").read_text().splitlines()]
+    command = records[-1]
+    assert command["tool"] == "kubectl"
+    arguments = command["args"]
+    assert arguments[arguments.index("--context") + 1] == spec["name"]
+    assert arguments[arguments.index("--namespace") + 1] == spec["namespace"]
+    assert list((checkout / "work").iterdir()) == []
+    assert not (checkout / ".state").exists()
+
+
+@pytest.mark.parametrize(
+    "override", ["--context=other", "--namespace=other", "-nother", "--server=x"]
+)
+def test_kube_entrypoint_refuses_connection_overrides_before_discovery(checkout, override):
+    configure(checkout, "local")
+    result = subprocess.run(
+        [
+            "bash",
+            str(checkout / "scripts/operations/kube.sh"),
+            "management",
+            "get",
+            "pods",
+            override,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode != 0 and "overrides are not supported" in result.stderr
+    assert not (checkout / "calls.jsonl").exists()
+
+
+@pytest.mark.parametrize("environment", ["azure", "local"])
 @pytest.mark.parametrize("slot", ["management", "shared-data", "isolated-1-control"])
 def test_native_discovery_has_no_state_dependency_and_cleans_profiles(checkout, environment, slot):
     spec = configure(checkout, environment, slot)
@@ -199,6 +263,41 @@ def test_native_discovery_has_no_state_dependency_and_cleans_profiles(checkout, 
                 assert "--subscription" in call["args"]
                 assert "--admin" not in call["args"]
     assert any("--raw" in call["args"] for call in calls)
+
+
+@pytest.mark.parametrize("environment", ["azure", "local"])
+def test_bootstrap_cluster_access_is_separate_from_application_namespace_access(
+    checkout, environment
+):
+    configure(checkout, environment, mode="denied")
+    env = {
+        **os.environ,
+        "PATH": str(checkout / "bin") + os.pathsep + os.environ["PATH"],
+        "TMPDIR": str(checkout / "work"),
+        "FAKE_SPEC": str(checkout / "spec.json"),
+        "FAKE_LOG": str(checkout / "calls.jsonl"),
+    }
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "set -e; source scripts/lib/env.sh; source scripts/lib/discovery.sh; "
+            "demo_load_env .env; demo_workspace; trap demo_remove_workspace EXIT; "
+            'demo_open_cluster management; printf "%s\\n" "$DEMO_CONTEXT"',
+        ],
+        cwd=checkout,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == f"radplanes-learning-{environment}-management"
+    calls = [json.loads(line) for line in (checkout / "calls.jsonl").read_text().splitlines()]
+    assert not any("namespace" in call["args"] for call in calls)
+    assert discover(checkout, "management").returncode != 0
+    assert not (checkout / ".state").exists()
+    assert list((checkout / "work").iterdir()) == []
 
 
 @pytest.mark.parametrize("environment", ["azure", "local"])

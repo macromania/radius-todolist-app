@@ -18,8 +18,16 @@ These module paths do not change the logical `Settings.from_env()` role IDs
 (`management_api`, `control_reconciler`, and so on), Kubernetes workload names,
 or environment-variable contracts.
 
+The separate privileged `management.provisioner` image requires `PROVIDER`,
+`MANAGEMENT_DSN`, and public deployment identity from `provisioning-settings`.
+It discovers runtime inputs through current APIs and reads stable credentials
+from Key Vault on Azure or Kubernetes locally. It has no file-seed startup or
+working-state PVC. See [provisioning](provisioning.md) for its guards and ownership.
+
 `DEMO_KEY` must have at least 32 characters; deployment generates independent,
-high-entropy keys. Keys belong in Kubernetes Secrets. All tenant, configuration,
+high-entropy keys. Stable Azure values belong in Key Vault; local values belong
+in Kubernetes Secrets. Each API receives only its own runtime Secret.
+All tenant, configuration,
 counter, and operation routes require `X-Demo-Key`. The only unauthenticated API
 routes are `GET /healthz` and `GET /livez`; both are process liveness, **not**
 database, Redis, child, or end-to-end readiness checks. API documentation is

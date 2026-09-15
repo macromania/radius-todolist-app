@@ -345,6 +345,9 @@ class PairResult:
 
 class ProvisioningConfig(Protocol):
     @property
+    def identity(self) -> DemoConfig | None: ...
+
+    @property
     def project_name(self) -> str: ...
 
     @property

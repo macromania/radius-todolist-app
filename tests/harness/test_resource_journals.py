@@ -65,7 +65,7 @@ class FaultCommands(NativeCommands):
     def pod(self, slot, component):
         role = "provisioner" if component == "provisioner" else "api"
         image = (
-            f"localhost/radplanes-plane-{role}:{REVISION}"
+            f"localhost/{self.config.stem}-{role}:{REVISION}"
             if self.config.environment == "local"
             else self.config.registry_name + f".azurecr.io/plane-{role}@" + IMAGE_ID
         )

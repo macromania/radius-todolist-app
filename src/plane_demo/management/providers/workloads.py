@@ -8,10 +8,15 @@ import logging
 import re
 from pathlib import Path
 from typing import Protocol
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from plane_demo.management.providers.commands import Commands
-from plane_demo.management.providers.credentials import Credentials, database_dsn
+from plane_demo.management.providers.credentials import (
+    Credentials,
+    CredentialSource,
+    credential_roles,
+    database_dsn,
+)
 from plane_demo.management.providers.local_config import same_radius_id
 from plane_demo.management.provisioning import (
     Cluster,
@@ -23,13 +28,25 @@ from plane_demo.management.provisioning import (
 logger = logging.getLogger(__name__)
 
 
+def ownership_labels(config: ProvisioningConfig) -> dict[str, str]:
+    labels = {"plane-demo/project": config.project_name}
+    if config.identity is not None:
+        labels.update(
+            {
+                "plane-demo/deployment": config.identity.deployment,
+                "plane-demo/environment": config.identity.environment,
+            }
+        )
+    return labels
+
+
 class PlaneRuntime(Protocol):
     @property
     def config(self) -> ProvisioningConfig: ...
 
     state: Path
     radius_scope: str
-    credentials: Credentials
+    credentials: CredentialSource
     commands: Commands
 
     def names(self, slot: str) -> tuple[str, str]: ...
@@ -84,15 +101,7 @@ def inspect_pair(provider: PlaneRuntime, pair_id: str, radius_scope: str) -> Pai
 def initialize_database(provider: PlaneRuntime, slot: str) -> None:
     provider.config.allocation(slot)
     role, namespace = provider.names(slot)
-    roles = (
-        {
-            "mgmt_api",
-            "mgmt_provisioner",
-            *(item["reporting_role"] for item in provider.config.pair_slots),
-        }
-        if role == "management"
-        else {"cp_api", "cp_reconciler", "dp_reconciler"}
-    )
+    roles = credential_roles(provider.config, slot)
     variables = {"BOOTSTRAP_KIND": role}
     if role == "management":
         variables["PAIR_SLOTS_JSON"] = json.dumps(provider.config.pair_slots)
@@ -218,7 +227,7 @@ def runtime_secrets(provider: PlaneRuntime, slot: str) -> None:
             "management-api-runtime",
             {
                 "MANAGEMENT_DSN": provider.credentials.dsn(slot, "mgmt_api"),
-                "DEMO_KEY": provider.credentials.plane(slot)["demoKey"],
+                "DEMO_KEY": provider.credentials.demo_key(slot),
             },
         )
         provider.secret(
@@ -228,12 +237,10 @@ def runtime_secrets(provider: PlaneRuntime, slot: str) -> None:
             {
                 "MANAGEMENT_DSN": provider.credentials.dsn(slot, "mgmt_provisioner"),
                 "PROVIDER": provider.credentials.environment,
-                "PROVISIONING_CONFIG": "/etc/plane-demo/provisioning.json",
-                "PROVISIONING_CREDENTIALS_JSON": json.dumps(
-                    provider.credentials.runtime_seed(provider.config)
-                ),
             },
         )
+        if not isinstance(provider.credentials, Credentials):
+            remove_credential_seed(provider, slot, namespace)
     elif role == "control":
         pair = slot.removesuffix("-control")
         reporting_role = next(
@@ -245,7 +252,7 @@ def runtime_secrets(provider: PlaneRuntime, slot: str) -> None:
             "control-api-runtime",
             {
                 "CONTROL_DSN": provider.credentials.dsn(slot, "cp_api"),
-                "DEMO_KEY": provider.credentials.plane(slot)["demoKey"],
+                "DEMO_KEY": provider.credentials.demo_key(slot),
             },
         )
         provider.secret(
@@ -260,7 +267,11 @@ def runtime_secrets(provider: PlaneRuntime, slot: str) -> None:
         )
     else:
         pair = slot.removesuffix("-data")
-        plane = provider.credentials.ensure(slot, set())
+        existing = bool(
+            provider.kube_get(slot, namespace, "secret", "data-api-runtime")
+            or provider.kube_get(slot, namespace, "deployment", "data-api")
+        )
+        plane = provider.credentials.ensure(slot, set(), require_existing=existing)
         common = {
             "PAIR_ID": pair,
             "PROJECT_ID": provider.config.project_name,
@@ -275,6 +286,86 @@ def runtime_secrets(provider: PlaneRuntime, slot: str) -> None:
             "data-reconciler-runtime",
             {**common, "CONTROL_DSN": provider.credentials.dsn(f"{pair}-control", "dp_reconciler")},
         )
+
+
+def remove_credential_seed(provider: PlaneRuntime, slot: str, namespace: str) -> None:
+    identity = provider.config.identity
+    if identity is None:
+        raise ProvisioningError("bootstrap_identity_required")
+    try:
+        owner = json.loads(provider.kubectl(slot, "get", "namespace", namespace, "-o", "json"))
+        metadata = owner["metadata"]
+        labels = metadata["labels"]
+        if (
+            metadata["name"] != namespace
+            or not isinstance(labels, dict)
+            or any(
+                labels.get(key) != value
+                for key, value in {
+                    "plane-demo/project": identity.project,
+                    "plane-demo/deployment": identity.deployment,
+                    "plane-demo/environment": identity.environment,
+                }.items()
+            )
+        ):
+            raise ValueError
+    except (ValueError, KeyError, TypeError):
+        raise ProvisioningError("credential_projection_owner_mismatch") from None
+    obsolete = {"PROVISIONING_CREDENTIALS_JSON", "PROVISIONING_CREDENTIALS", "PROVISIONING_CONFIG"}
+    template = (
+        '{{.metadata.uid}}{{"\\n"}}{{.metadata.resourceVersion}}{{"\\n"}}'
+        '{{.metadata.name}}{{"\\n"}}{{.metadata.namespace}}{{"\\n"}}{{.type}}{{"\\n"}}'
+        "{{range $key, $value := .data}}"
+        '{{if or (eq $key "PROVISIONING_CREDENTIALS_JSON") (eq $key "PROVISIONING_CREDENTIALS") '
+        '(eq $key "PROVISIONING_CONFIG")}}'
+        '{{$key}}{{"\\n"}}{{end}}{{end}}'
+    )
+
+    def read_metadata() -> tuple[str, str, set[str]]:
+        fields = provider.kubectl(
+            slot,
+            "-n",
+            namespace,
+            "get",
+            "secret",
+            "provisioner-runtime",
+            "-o",
+            "go-template=" + template,
+        ).splitlines()
+        try:
+            if (
+                len(fields) < 5
+                or not fields[1].isdecimal()
+                or fields[2:5] != ["provisioner-runtime", namespace, "Opaque"]
+                or set(fields[5:]) - obsolete
+            ):
+                raise ValueError
+            UUID(fields[0])
+        except ValueError:
+            raise ProvisioningError("credential_projection_owner_mismatch") from None
+        return fields[0], fields[1], set(fields[5:])
+
+    uid, version, keys = read_metadata()
+    if keys:
+        patch = [
+            {"op": "test", "path": "/metadata/uid", "value": uid},
+            {"op": "test", "path": "/metadata/resourceVersion", "value": version},
+            *({"op": "remove", "path": f"/data/{key}"} for key in sorted(keys)),
+        ]
+        provider.kubectl(
+            slot,
+            "-n",
+            namespace,
+            "patch",
+            "secret",
+            "provisioner-runtime",
+            "--type=json",
+            "-p",
+            json.dumps(patch),
+        )
+        observed_uid, _, remaining = read_metadata()
+        if observed_uid != uid or remaining:
+            raise ProvisioningError("credential_projection_not_updated")
 
 
 def role_binding(namespace, name, subject_namespace, subject_name, rules) -> list[dict]:
@@ -295,6 +386,39 @@ def role_binding(namespace, name, subject_namespace, subject_name, rules) -> lis
             ],
         },
     ]
+
+
+def management_discovery_permissions(namespace: str, *, local: bool = False) -> list[dict]:
+    values = role_binding(
+        namespace,
+        "management-discovery",
+        namespace,
+        "provisioner",
+        [
+            {
+                "apiGroups": ["apps"],
+                "resources": ["deployments"],
+                "resourceNames": ["management-api", "provisioner"],
+                "verbs": ["get"],
+            }
+        ],
+    )
+    if local:
+        values += role_binding(
+            "default",
+            "management-discovery",
+            namespace,
+            "provisioner",
+            [
+                {
+                    "apiGroups": [""],
+                    "resources": ["services"],
+                    "resourceNames": ["kubernetes"],
+                    "verbs": ["get"],
+                }
+            ],
+        )
+    return values
 
 
 def job(

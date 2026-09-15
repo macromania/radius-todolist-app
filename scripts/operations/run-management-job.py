@@ -4,26 +4,47 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
 import re
+import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
-from project import ROOT, SUBSCRIPTION, CommandError, az, require_confirmation, write_json
+from config import load_config
+from project import ROOT, CommandError, require_confirmation
 
 sys.path.insert(0, str(ROOT / "src"))
+from plane_demo.management.providers.identity import SECRET_KEYS, DemoConfig  # noqa: E402
 from plane_demo.management.provisioning import OperatorConfig  # noqa: E402
 
 
-def resources(config: dict, name: str) -> list[dict]:
-    namespace = "radplanes-management-management"
+def resources(config: dict, name: str, provided_keys: dict[str, str] | None = None) -> list[dict]:
+    selected = OperatorConfig.from_dict(config) if "bootstrapIdentity" in config else None
+    namespace = selected.namespace("management") if selected else "radplanes-management-management"
     identity = config["coordinatorIdentity"]
     labels = {"project": "radplanes", "plane-demo/operator": "management-deploy"}
-    return [
+    if selected:
+        if name != "deploy-management":
+            raise ValueError("Selected management deployment uses one fixed operator Job")
+        if selected.identity is None:
+            raise ValueError("Selected deployment identity is missing")
+        labels.update(
+            {
+                "project": selected.identity.project,
+                "plane-demo/project": selected.identity.project,
+                "plane-demo/deployment": selected.identity.deployment,
+                "plane-demo/environment": selected.identity.environment,
+            }
+        )
+    result = [
         {
             "apiVersion": "v1",
             "kind": "Namespace",
-            "metadata": {"name": namespace, "labels": {"project": "radplanes"}},
+            "metadata": {"name": namespace, "labels": labels},
         },
         {
             "apiVersion": "v1",
@@ -122,6 +143,98 @@ def resources(config: dict, name: str) -> list[dict]:
             },
         },
     ]
+    if selected:
+        keys = provided_keys or {}
+        if set(keys) - SECRET_KEYS.keys():
+            raise ValueError("Unsupported bootstrap credential input")
+        DemoConfig.from_values({**selected.bootstrap_settings, **keys})
+        result = [
+            value
+            for value in result
+            if value["kind"] not in {"StorageClass", "PersistentVolumeClaim"}
+        ]
+        job = result[-1]
+        job["metadata"]["annotations"] = {
+            "plane-demo/config-sha256": hashlib.sha256(
+                json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+        }
+        job["spec"].update(suspend=True, parallelism=1, completions=1)
+        pod = job["spec"]["template"]["spec"]
+        pod["automountServiceAccountToken"] = True
+        pod["volumes"] = [value for value in pod["volumes"] if value["name"] != "state"]
+        container = pod["containers"][0]
+        container["volumeMounts"] = [
+            value for value in container["volumeMounts"] if value["name"] != "state"
+        ]
+        container["env"] = [
+            {
+                "name": "OPERATOR_JOB_UID",
+                "valueFrom": {
+                    "fieldRef": {
+                        "apiVersion": "v1",
+                        "fieldPath": "metadata.labels['batch.kubernetes.io/controller-uid']",
+                    }
+                },
+            }
+        ]
+        if keys:
+            result.insert(
+                -1,
+                {
+                    "apiVersion": "v1",
+                    "kind": "Secret",
+                    "type": "Opaque",
+                    "immutable": True,
+                    "metadata": {"name": f"{name}-keys", "namespace": namespace, "labels": labels},
+                    "stringData": keys,
+                },
+            )
+            container["envFrom"] = [{"secretRef": {"name": f"{name}-keys"}}]
+        result[1:1] = [
+            {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "Role",
+                "metadata": {
+                    "name": "management-bootstrap-observer",
+                    "namespace": namespace,
+                    "labels": labels,
+                },
+                "rules": [
+                    {
+                        "apiGroups": ["batch"],
+                        "resources": ["jobs"],
+                        "resourceNames": [name],
+                        "verbs": ["get"],
+                    },
+                    {
+                        "apiGroups": ["apps"],
+                        "resources": ["deployments"],
+                        "resourceNames": ["provisioner"],
+                        "verbs": ["get"],
+                    },
+                    {"apiGroups": [""], "resources": ["pods"], "verbs": ["list"]},
+                ],
+            },
+            {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "RoleBinding",
+                "metadata": {
+                    "name": "management-bootstrap-observer",
+                    "namespace": namespace,
+                    "labels": labels,
+                },
+                "roleRef": {
+                    "apiGroup": "rbac.authorization.k8s.io",
+                    "kind": "Role",
+                    "name": "management-bootstrap-observer",
+                },
+                "subjects": [
+                    {"kind": "ServiceAccount", "name": "provisioner", "namespace": namespace}
+                ],
+            },
+        ]
+    return result
 
 
 def unfinished_operator(job: dict) -> bool:
@@ -133,74 +246,354 @@ def unfinished_operator(job: dict) -> bool:
     )
 
 
+def execute(arguments: list[str], *, value: dict | None = None, timeout: int = 120) -> str:
+    result = subprocess.run(
+        arguments,
+        cwd=ROOT,
+        text=True,
+        input=json.dumps(value) if value is not None else None,
+        stdout=subprocess.PIPE,
+        timeout=timeout,
+        check=False,
+    )
+    if result.returncode:
+        raise CommandError(
+            f"Management operation failed: {arguments[0]} (exit {result.returncode})"
+        )
+    return result.stdout.strip()
+
+
+def live_configuration(identity: DemoConfig) -> OperatorConfig:
+    if identity.environment != "azure" or identity.subscription is None:
+        raise ValueError("This entrypoint requires the Azure .env selection")
+    dirty = execute(
+        [
+            "git",
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--",
+            "src",
+            "sql",
+            "images",
+            "scripts",
+            "infra",
+            "pyproject.toml",
+            "uv.lock",
+            ".dockerignore",
+        ]
+    )
+    if dirty:
+        raise ValueError("Commit verified deployment inputs before management deployment")
+    checkout_revision = execute(["git", "rev-parse", "HEAD"])
+    revision = execute(["git", "rev-parse", identity.revision or "HEAD"])
+    if not re.fullmatch(r"[a-f0-9]{40}", revision) or revision != checkout_revision:
+        raise ValueError("Use a checkout matching the selected deployment revision")
+    artifacts = json.loads(
+        execute(
+            ["bash", str(ROOT / "scripts/operations/azure/build.sh"), "--inspect"],
+            timeout=3600,
+        )
+    )
+    if (
+        artifacts.get("source_revision") != revision
+        or artifacts.get("status") != "artifacts_verified"
+        or artifacts.get("content_verified") is not True
+    ):
+        raise ValueError("Canonical artifact inspection did not verify the selected source")
+    deployment = json.loads(
+        execute(
+            [
+                "az",
+                "deployment",
+                "sub",
+                "show",
+                "--subscription",
+                identity.subscription,
+                "--name",
+                f"{identity.stem}-bootstrap",
+                "--output",
+                "json",
+                "--only-show-errors",
+            ]
+        )
+    )
+    if deployment["properties"].get("provisioningState") != "Succeeded":
+        raise ValueError("The selected foundation is not complete")
+    outputs = {key: item["value"] for key, item in deployment["properties"]["outputs"].items()}
+    selected = DemoConfig.from_values(
+        {
+            **identity.values(include_secrets=True),
+            "DEMO_REVISION": revision,
+        }
+    )
+    value = {
+        "version": 1,
+        **outputs,
+        "allocations": {item["slot"]: item for item in outputs["allocations"]},
+        "recipes": artifacts["recipes"],
+        "images": artifacts["images"],
+        "bootstrapIdentity": selected.public_values(),
+    }
+    config = OperatorConfig.from_dict(value, identity=selected)
+    allocation = config.allocation("management")
+    expected_id = (
+        allocation["clusterResourceGroupId"]
+        + "/providers/Microsoft.ContainerService/managedClusters/"
+        + allocation["clusterName"]
+    )
+    if any(
+        config.management_cluster.get(key) != expected
+        for key, expected in {
+            "id": expected_id,
+            "name": allocation["clusterName"],
+            "resourceGroup": allocation["clusterResourceGroup"],
+        }.items()
+    ):
+        raise ValueError("Foundation management target does not match the selected allocation")
+    return config
+
+
+def management_access(identity: DemoConfig, workspace: Path) -> tuple[str, str]:
+    if identity.environment != "azure" or identity.subscription is None:
+        raise ValueError("Azure management access requires a selected subscription")
+    workspace = workspace.resolve()
+    script = (
+        'set -euo pipefail; source "$1/scripts/lib/env.sh"; '
+        'source "$1/scripts/lib/discovery.sh"; demo_load_env "$1/.env"; '
+        '[[ "$DEMO_ENV" == azure && "$DEMO_PROJECT" == "$3" && '
+        '"$DEMO_DEPLOYMENT" == "$4" && "$AZURE_SUBSCRIPTION_ID" == "$5" ]] || '
+        '{ demo_error "Configuration changed during deployment"; exit 1; }; '
+        'DEMO_WORKSPACE="$2"; demo_open_cluster management; '
+        'jq -n --arg context "$DEMO_CONTEXT" --arg kubeconfig "$DEMO_KUBECONFIG" '
+        "'{context:$context,kubeconfig:$kubeconfig}'"
+    )
+    access = json.loads(
+        execute(
+            [
+                "bash",
+                "-c",
+                script,
+                "management-access",
+                str(ROOT),
+                str(workspace),
+                identity.project,
+                identity.deployment,
+                identity.subscription,
+            ]
+        )
+    )
+    path = Path(access["kubeconfig"]).resolve()
+    if access["context"] != identity.slot_name("management") or not path.is_relative_to(workspace):
+        raise ValueError("Management access does not match the selected workspace")
+    return access["context"], str(path)
+
+
+def deploy_selected(config: OperatorConfig, context: str, kubeconfig: str) -> dict:
+    name, namespace = "deploy-management", config.namespace("management")
+    if config.identity is None:
+        raise ValueError("Selected deployment identity is required")
+    keys = {
+        key: config.identity.demo_keys[slot]
+        for key, slot in SECRET_KEYS.items()
+        if slot in config.identity.demo_keys
+    }
+    desired = resources(config.to_dict(), name, keys)
+    namespace_resource, job_resource = desired[0], desired[-1]
+    labels = job_resource["metadata"]["labels"]
+    base = ["kubectl", "--kubeconfig", kubeconfig, "--context", context, "--request-timeout=30s"]
+
+    def read(kind: str, resource_name: str, *, namespaced: bool = True) -> dict | None:
+        output = execute(
+            [
+                *base,
+                *(["-n", namespace] if namespaced else []),
+                "get",
+                kind,
+                resource_name,
+                "--ignore-not-found",
+                "-o",
+                "json",
+            ]
+        )
+        return json.loads(output) if output else None
+
+    existing_namespace = read("namespace", namespace, namespaced=False)
+    if existing_namespace is None:
+        execute([*base, "create", "-f", "-"], value=namespace_resource)
+    elif existing_namespace["metadata"]["name"] != namespace or any(
+        existing_namespace["metadata"].get("labels", {}).get(key) != expected
+        for key, expected in labels.items()
+        if key in {"plane-demo/project", "plane-demo/deployment", "plane-demo/environment"}
+    ):
+        raise ValueError("Management namespace ownership mismatch")
+    job = read("job", name)
+    if job is None:
+        job = json.loads(execute([*base, "create", "-f", "-", "-o", "json"], value=job_resource))
+    metadata = job["metadata"]
+    actual_containers = job["spec"]["template"]["spec"]["containers"]
+    expected_container = job_resource["spec"]["template"]["spec"]["containers"][0]
+    if (
+        metadata["name"] != name
+        or metadata["namespace"] != namespace
+        or any(metadata.get("labels", {}).get(key) != expected for key, expected in labels.items())
+        or metadata.get("annotations", {}).get("plane-demo/config-sha256")
+        != job_resource["metadata"]["annotations"]["plane-demo/config-sha256"]
+        or not metadata.get("uid")
+        or metadata.get("deletionTimestamp")
+        or len(actual_containers) != 1
+        or any(
+            actual_containers[0].get(field, [] if field in {"env", "envFrom"} else None)
+            != expected_container.get(field, [] if field in {"env", "envFrom"} else None)
+            for field in ("name", "image", "command", "env", "envFrom")
+        )
+    ):
+        raise ValueError("Existing operator Job does not match the selected deployment")
+    owner = {"apiVersion": "batch/v1", "kind": "Job", "name": name, "uid": metadata["uid"]}
+
+    def verify_input(resource: dict, current: dict) -> None:
+        if (
+            current["metadata"].get("ownerReferences") != [owner]
+            or current.get("immutable") is not True
+        ):
+            raise ValueError("Bootstrap input ownership mismatch")
+        if resource["kind"] == "ConfigMap":
+            if json.loads(current["data"]["provisioning.json"]) != config.to_dict():
+                raise ValueError("Bootstrap configuration changed")
+        else:
+            existing = {
+                key: base64.b64decode(value, validate=True).decode()
+                for key, value in current.get("data", {}).items()
+            }
+            if existing != keys:
+                raise ValueError("Supplied bootstrap keys changed")
+
+    for resource in desired[1:-1]:
+        if resource["kind"] in {"ConfigMap", "Secret"}:
+            current = read(resource["kind"], resource["metadata"]["name"])
+            if current is None:
+                if not job["spec"].get("suspend"):
+                    raise ValueError("The existing operator Job lost its immutable inputs")
+            else:
+                verify_input(resource, current)
+    if any(
+        item.get("type") == "Failed" and item.get("status") == "True"
+        for item in job.get("status", {}).get("conditions", [])
+    ):
+        raise ValueError("The canonical operator Job failed; inspect its logs and owned resources")
+    if job["spec"].get("suspend"):
+        for resource in desired[1:-1]:
+            if resource["kind"] not in {"ServiceAccount"}:
+                resource["metadata"]["ownerReferences"] = [owner]
+            current = read(resource["kind"], resource["metadata"]["name"])
+            if current is None:
+                execute([*base, "create", "-f", "-"], value=resource)
+            elif resource["kind"] in {"ConfigMap", "Secret"}:
+                verify_input(resource, current)
+            else:
+                if resource["kind"] != "ServiceAccount" and (
+                    current["metadata"].get("ownerReferences") != [owner]
+                ):
+                    raise ValueError("Bootstrap resource ownership mismatch")
+                if any(
+                    current["metadata"].get("annotations", {}).get(key) != expected
+                    for key, expected in resource["metadata"].get("annotations", {}).items()
+                ):
+                    raise ValueError("Bootstrap identity annotation mismatch")
+                for field in ("rules", "roleRef", "subjects"):
+                    if field in resource and current.get(field) != resource[field]:
+                        raise ValueError("Bootstrap permission mismatch")
+                if any(
+                    current["metadata"].get("labels", {}).get(key) != expected
+                    for key, expected in labels.items()
+                ):
+                    raise ValueError("Bootstrap resource ownership mismatch")
+        execute(
+            [
+                *base,
+                "-n",
+                namespace,
+                "patch",
+                "job",
+                name,
+                "--type=json",
+                "-p",
+                json.dumps(
+                    [
+                        {"op": "test", "path": "/metadata/uid", "value": metadata["uid"]},
+                        {"op": "replace", "path": "/spec/suspend", "value": False},
+                    ]
+                ),
+            ]
+        )
+    deadline = time.monotonic() + 3600
+    while True:
+        current = read("job", name)
+        if current is None or current["metadata"].get("uid") != metadata["uid"]:
+            raise ValueError("Operator Job ownership changed while waiting")
+        conditions = current.get("status", {}).get("conditions", [])
+        if any(
+            item.get("type") in {"Failed", "FailureTarget"} and item.get("status") == "True"
+            for item in conditions
+        ):
+            raise ValueError("The canonical operator Job failed; inspect its scoped logs")
+        if any(
+            item.get("type") == "Complete" and item.get("status") == "True" for item in conditions
+        ):
+            break
+        if time.monotonic() >= deadline:
+            raise ValueError("The canonical operator Job exceeded its completion deadline")
+        time.sleep(3)
+    for deployment in ("management-api", "provisioner"):
+        execute(
+            [
+                *base,
+                "-n",
+                namespace,
+                "rollout",
+                "status",
+                f"deployment/{deployment}",
+                "--timeout=300s",
+            ],
+            timeout=360,
+        )
+    return {
+        "stage": "management-deployed",
+        "namespace": namespace,
+        "job": name,
+        "job_uid": metadata["uid"],
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--name", default="deploy-management")
-    parser.add_argument("--config", type=Path, default=ROOT / ".state/azure/provisioning.json")
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--config", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
-    if not re.fullmatch(r"deploy-management(?:-[a-z0-9]{1,16})?", args.name):
-        raise ValueError("Operator Job name must be deploy-management or its bounded run suffix")
-    state = (ROOT / ".state/azure").resolve()
-    if not args.config.resolve().is_relative_to(state):
-        raise ValueError("Configuration must remain in project Azure state")
-    config = OperatorConfig.load(args.config).to_dict()
-    if config["foundation"]["subscriptionId"] != SUBSCRIPTION:
-        raise ValueError("Operator subscription does not match the approved project")
-    target = config["managementCluster"]
-    if (
-        target.get("name") != "aks-radplanes-management"
-        or target.get("resourceGroup") != "rg-radplanes-management-cluster"
-    ):
-        raise ValueError("Operator target is not this project's management cluster")
-    allocation = config["allocations"]["management"]
-    if (
-        allocation.get("clusterName") != target["name"]
-        or allocation.get("clusterResourceGroup") != target["resourceGroup"]
-        or allocation.get("appResourceGroup") != "rg-radplanes-management-app"
-    ):
-        raise ValueError("Management deployment allocation does not match the fixed project target")
-    manifest = state / f"{args.name}.json"
-    write_json(
-        manifest, {"apiVersion": "v1", "kind": "List", "items": resources(config, args.name)}
-    )
-    if not args.execute:
-        print(f"Prepared {manifest}; no cluster changes made.")
-        return 0
-    require_confirmation("azure")
-    status = az(
-        "aks",
-        "command",
-        "invoke",
-        "--name",
-        target["name"],
-        "--resource-group",
-        target["resourceGroup"],
-        "--command",
-        "kubectl get jobs -A -l project=radplanes,plane-demo/operator=management-deploy -o json",
-    )
-    if status.get("exitCode") != 0:
-        raise CommandError("Cannot verify whether a management operator is already running")
-    jobs = json.loads(status["logs"])
-    if any(unfinished_operator(job) for job in jobs["items"]):
-        raise CommandError("A management operator Job has not reached a terminal state")
-    result = az(
-        "aks",
-        "command",
-        "invoke",
-        "--name",
-        target["name"],
-        "--resource-group",
-        target["resourceGroup"],
-        "--command",
-        f"kubectl apply -f {manifest.name}",
-        "--file",
-        str(manifest),
-    )
-    if result.get("exitCode") != 0:
-        raise CommandError(f"Operator Job submission failed: {result.get('logs', '')[-2000:]}")
-    print(result.get("logs", ""))
-    print(f"Submitted {args.name}; Job completion and endpoint verification are still required.")
+    if args.config is not None:
+        raise ValueError("Configuration now comes from the checkout .env and live APIs")
+    identity = load_config(ROOT / ".env")
+    if identity.environment != "azure":
+        raise ValueError("This command requires the Azure .env selection")
+    if args.execute:
+        require_confirmation("azure")
+    config = live_configuration(identity)
+    with tempfile.TemporaryDirectory(prefix="plane-management-") as directory:
+        context, kubeconfig = management_access(identity, Path(directory))
+        if not args.execute:
+            print(
+                json.dumps(
+                    {
+                        "stage": "management-preview",
+                        "context": context,
+                        "namespace": config.namespace("management"),
+                        "source_revision": config.identity.revision,
+                        "provided_key_slots": sorted(config.identity.demo_keys),
+                    }
+                )
+            )
+            return 0
+        print(json.dumps(deploy_selected(config, context, kubeconfig)))
     return 0
 
 

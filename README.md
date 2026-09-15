@@ -26,8 +26,10 @@ manual API calls, checkpoints, outage/recovery experiments, and cleanup.
 
 Use individual operations and harness utilities as shown in the guides rather
 than running the all-in-one acceptance runner alongside your manual requests.
-Azure image inspection and provisioning-configuration assembly are documented
-as manual preparation handoffs.
+The normal commands inspect image contents and assemble deployment inputs from
+current APIs. No saved endpoint inventory or workstation credential bundle is
+required. The state-removal refactor still needs fresh live proof; see
+[FINDINGS.md](FINDINGS.md) for the verified revision scopes.
 
 ## Repository map
 
@@ -36,8 +38,8 @@ as manual preparation handoffs.
 | `src/plane_demo/` and `sql/` | APIs, provisioner, reconcilers, and database contracts |
 | `infra/radius/apps/` | Management, control, and data application declarations |
 | `infra/radius/types/`, `recipes/`, `environments/` | Resource APIs, provider implementations, and Recipe selection |
-| `operations/` | Infrastructure and deployment administration |
-| `harness/` and `tests/` | Individual demo utilities and automated checks |
+| `scripts/operations/` | Infrastructure and deployment administration |
+| `scripts/harness/` and `tests/` | Individual demo utilities and automated checks |
 
 For the design, read [architecture](docs/architecture.md) and
 [application contracts](docs/contracts.md). [DECISIONS.md](DECISIONS.md) records
@@ -45,7 +47,7 @@ choices; [FINDINGS.md](FINDINGS.md) records results and their source revisions.
 [Limitations](docs/limitations.md) describe the POC's scope.
 
 The [state-removal ExecPlan](docs/plans/remove-state-dependency.md) describes the
-planned `.env` configuration, live discovery, and service-owned credentials and
-progress. It is a reviewed plan, not yet the implemented command surface.
+`.env` configuration, live discovery, service-owned credentials and progress,
+and the remaining verification work.
 
 Use synthetic data and keep credentials separate from source.

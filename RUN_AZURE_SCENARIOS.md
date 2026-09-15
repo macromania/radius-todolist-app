@@ -6,6 +6,10 @@ Use the checkpoints as stopping points when learning or presenting to a team.
 The focus is Radius provisioning, the boundaries between planes, and their
 behavior during configuration changes and outages.
 
+The state-removal refactor still needs a fresh end-to-end run. The checkpoints
+below are requirements to verify, not claims that the current revision passed.
+See [FINDINGS.md](FINDINGS.md) for revision-specific results.
+
 Run this guide from the repository root. The order is:
 
 1. [Prepare the workspace](#1-prepare-the-workspace).
@@ -45,11 +49,8 @@ isolated tenants get a separate pair.
 
 ## 1. Prepare the workspace
 
-You prepare the tools and isolate this run's state before creating resources.
-
-Use one clean checkout per demo run. State contains credentials and cluster
-identities, so do not clear `.state` to bypass an earlier attempt. If you need
-a fresh checkout:
+You prepare the tools and choose the deployment identity before creating resources.
+Use committed source. A fresh checkout does not need a previous `.state` folder:
 
 ```bash
 git worktree add --detach ../plane-demo-azure HEAD &&
@@ -108,8 +109,10 @@ make init ENV=azure \
 keys. For demo keys, forward `--prompt-demo-key SLOT` or
 `--demo-key-from-env SLOT=VARIABLE`, never the key value itself.
 
-The deployment targets below still use their existing explicit configuration
-and `.state` records. Initializing `.env` does not yet retarget those commands.
+The commands below use this `.env`. `ENV` selects the environment only when
+initializing it; it does not override an existing selection. Azure credentials
+belong in the shared Key Vault. Access, endpoints and deployment outputs are
+queried from current APIs. Do not copy an old endpoint or credential inventory.
 
 Keep source unchanged during the demo. Image and export checks bind the
 deployment to the committed source.
@@ -118,96 +121,61 @@ deployment to the committed source.
 
 You create the platform that accepts tenant requests and provisions child planes.
 
-Azure has two manual preparation handoffs: **inspect built image contents** and
-**assemble the provisioning configuration**. There is no reusable Azure command
-that completes those handoffs. They connect the application code and deployment
-inputs to the infrastructure created below.
+The stages are foundation, build, then management deployment. Artifact inspection
+and deployment-input assembly are part of the normal commands, not manual file
+handoffs.
 
 ### Create the foundation
 
-You create management AKS and publish the Recipes and images that Radius
-will use to provision the child planes.
+You create management AKS, the Azure foundation and management Radius.
+Bootstrap checks the selected account and existing resource ownership.
 
 ```bash
-make preflight ENV=azure
-make bootstrap ENV=azure CONFIRM_AZURE=yes
-make install-radius ENV=azure CONFIRM_AZURE=yes
-make publish-recipes ENV=azure CONFIRM_AZURE=yes
-make build-publish ENV=azure CONFIRM_AZURE=yes
+make bootstrap CONFIRM_AZURE=yes
 ```
 
-Preflight establishes the Azure account, operator access, and service
-availability. Bootstrap compiles the Bicep, submits the deployment, and reports
-Azure's provisioning result.
+Checkpoint: bootstrap completed and management AKS and Radius exist. There are
+no tenant clusters or management application yet. Azure owns the deployment
+outputs; no `bootstrap.outputs.json` file is required on the workstation.
 
-Checkpoint: management AKS and Radius exist. The new files under `.state/azure`
-include `bootstrap.outputs.json`, `recipes.json`, and `images.json`.
-Image build output still records `content_verified: false`.
+### Build and inspect artifacts
 
-To inspect generated resources or troubleshoot an Azure template error, these
-diagnostics are available separately:
+You publish the Recipes and build the two runtime images. The normal build
+checks actual filesystem contents and trusted build provenance, not only tags.
 
 ```bash
-make bootstrap-preview ENV=azure
-make validate-azure ENV=azure
+make build CONFIRM_AZURE=yes
+make inspect-build
 ```
 
-They are optional technical tools, not prerequisites for deploying the demo.
-
-### Complete the two handoffs
-
-You connect the reviewed artifacts to the correct identities and infrastructure.
-This separates "an image was built" from "the intended code is ready to deploy."
-
-Inspect and record the actual contents of the digest-pinned API and provisioner
-images. The API image must exclude privileged provider code and deployment
-credentials. Follow the [image and deployment contracts](docs/provisioning.md).
-
-Assemble protected `.state/azure/provisioning.json` using fresh outputs:
-
-| Field | Value |
-|---|---|
-| `version` | `1` |
-| `foundation`, `coordinatorIdentity`, `managementCluster` | Complete corresponding bootstrap objects |
-| `allocations` | Bootstrap allocation array converted to an object keyed by `slot`, including all five slots |
-| `recipes` | Published references and digests |
-| `images.api`, `images.provisioner` | Inspected `@sha256:...` image references from the project ACR |
-
-Preserve identity, network, and certificate fields. Omit `certificateCommand`
-to use the in-container default. Do not include credentials or treat an
-abbreviated example as a deployable configuration. The full schema is in
-[operator configuration](docs/provisioning.md#non-secret-immutable-operator-configuration).
-Stop if either handoff is incomplete.
+Require successful artifact inspection. The API image excludes provider code,
+administrative tools and deployment credentials. The privileged provisioner is
+separate. Recipe publication verifies the registry's repository-permission
+boundary. See [provisioning](docs/provisioning.md) for these contracts.
 
 ### Deploy management and wait for completion
 
 You start management's API, database, and provisioner, then confirm the Job
 finished rather than treating submission as success.
 
-Prepare and review the Job manifest:
+Inspect the discovered inputs and proposed Job without submitting it:
 
 ```bash
-make deploy-management-preview ENV=azure
+make deploy-management-preview
 ```
 
-Review `.state/azure/deploy-management.json`, then:
+Then deploy:
 
 ```bash
-make deploy-management ENV=azure CONFIRM_AZURE=yes
-kubectl --kubeconfig .state/azure/management.kubeconfig \
-  --context radplanes-management -n radplanes-management-management \
-  get job/deploy-management --watch
+make deploy-management CONFIRM_AZURE=yes
+make kube ARGS='management get job/deploy-management'
+make kube ARGS='management logs job/deploy-management --all-containers=true'
 ```
 
-Stop the watch with Ctrl-C after the Job reaches a terminal condition.
-Require `Complete=True`; `Failed=True` is a deployment failure, not permission
-to resubmit the same Job. Inspect the logs:
-
-```bash
-kubectl --kubeconfig .state/azure/management.kubeconfig \
-  --context radplanes-management -n radplanes-management-management \
-  logs job/deploy-management --all-containers=true
-```
+The command waits for the Job and workloads. Require `Complete=True`;
+`Failed=True` is a deployment failure, not permission to resubmit blindly.
+The Job owns its temporary inputs; Key Vault and PostgreSQL own credentials
+and initialization progress.
 
 Checkpoint: management's API, PostgreSQL, and provisioner are ready.
 There are no tenant clusters yet. Deployment already registers management's
@@ -224,46 +192,41 @@ You obtain verified access and give each command an explicit plane and cluster.
 In your main terminal, from the demo checkout:
 
 ```bash
-export DEMO_ENV=azure
-export STATE=".state/$DEMO_ENV"
 set -o pipefail
 umask 077
-mkdir -p "$STATE/manual"
+NOTES=$(mktemp -d "${TMPDIR:-/tmp}/plane-manual.XXXXXX")
 
-api() { ./scripts/harness/api.sh "$DEMO_ENV" "$@"; }
+api() { bash scripts/operations/api.sh "$@"; }
+k() { bash scripts/operations/kube.sh "$@"; }
+endpoint() { bash scripts/operations/endpoints.sh "$1" | jq -er '.url'; }
 
-export_state() {
-  uv run --no-sync python scripts/harness/export-state.py --once
+report() {
+  uv run --no-sync python scripts/harness/export-state.py --environment azure --once
 }
 
-k() {
-  local slot="$1"
-  shift
-  local file context namespace
-  file=$(jq -er --arg s "$slot" '.targets[$s].kubeconfig' "$STATE/acceptance.json") || return
-  context=$(jq -er --arg s "$slot" '.targets[$s].context' "$STATE/acceptance.json") || return
-  namespace=$(jq -er --arg s "$slot" '.targets[$s].namespace' "$STATE/acceptance.json") || return
-  kubectl --kubeconfig "$STATE/$file" --context "$context" \
-    --namespace "$namespace" --request-timeout=30s "$@"
+journal() {
+  k "$1" get configmap "plane-demo-fault-$2" -o json | jq -er '.data["record.json"] | fromjson'
 }
 
-export_state
-jq '{ready_for_onboarding, published_slots, pending_slots}' "$STATE/export-status.json"
+report
+k management get pods,pvc
 k management logs deployment/provisioner --tail=20
+api management GET /healthz
 ```
 
 These shortcuts keep the commands below short:
 
 | Command | What it does |
 |---|---|
-| `api management GET ...` | Sends one HTTP request using the exported URL/key |
-| `k shared-data get ...` | Selects that slot's exported kubeconfig, context, and namespace |
-| `export_state` | Refreshes verified access files; creates no tenants |
+| `api management GET ...` | Discovers the endpoint/key and sends one HTTP request |
+| `k shared-data get ...` | Uses fresh scoped access, then discards its temporary kubeconfig |
+| `report` | Prints current topology and tenant status; creates no tenants or inventory file |
+| `journal SLOT COMPONENT` | Reads the fault record from its owning Kubernetes ConfigMap |
 
-Export exit **3** means expected child endpoints are incomplete. At this point,
-expect only management and `ready_for_onboarding: true`. Other errors are blockers.
-Run export again after a new pair finishes provisioning.
-Before the first tenant request, confirm `provisioner_ready` in the worker log.
+Initially the report contains only the management endpoint and no tenants.
+Require `provisioner_ready` and HTTP 200 before onboarding. Reports fail nonzero
+on observation errors. `$NOTES` holds only your optional response comparisons.
+No command discovers infrastructure or credentials from those notes.
 
 Every successful observation must show HTTP 200. The API helper prints HTTP
 status to stderr and JSON to stdout; non-2xx requests return nonzero.
@@ -289,8 +252,8 @@ Expect 200, then 404. Send the request once:
 ```bash
 api management POST /tenants \
   '{"tenant_id":"shared-a","isolation":"shared","initial_message":"alpha"}' \
-  > "$STATE/manual/shared-a-request.json"
-OP_A=$(jq -er '.operation_id' "$STATE/manual/shared-a-request.json")
+  > "$NOTES/shared-a-request.json"
+OP_A=$(jq -er '.operation_id' "$NOTES/shared-a-request.json")
 api management GET "/operations/$OP_A"
 ```
 
@@ -309,13 +272,13 @@ installs child Radius and deploys their applications. Require both
 Stop on `failed` or `interrupted`; do not reset state to force a retry.
 
 ```bash
-export_state
+report
 api control:shared GET /tenants/shared-a
 api data:shared GET /tenants/shared-a
 k shared-data get configmap tenant-shared-a -o json | jq .data
 ```
 
-Expect three exported slots. Control should become `applied`; data should
+Expect three discovered endpoints. Control should become `applied`; data should
 return `alpha`, version 1, and counter 0. Match the `onboarding_id` across
 the three APIs.
 
@@ -324,7 +287,10 @@ return endpoint URLs; endpoint and cluster discovery use provider APIs.
 
 ```bash
 api management GET /tenants/shared-a \
-  | jq '{pair_id}' > "$STATE/manual/shared-pair.json"
+  | jq '{pair_id}' > "$NOTES/shared-pair.json"
+for slot in shared-control shared-data; do
+  k "$slot" get namespace kube-system -o jsonpath='{.metadata.uid}{"\n"}'
+done > "$NOTES/shared-clusters-before.txt"
 ```
 
 #### Optional admission checks
@@ -386,10 +352,13 @@ Wait for `applied` and the `bravo` response, then compare placement:
 
 ```bash
 api management GET /tenants/shared-b \
-  | jq '{pair_id}' > "$STATE/manual/shared-b-pair.json"
-diff -u "$STATE/manual/shared-pair.json" "$STATE/manual/shared-b-pair.json"
-export_state
-jq '.targets | keys' "$STATE/acceptance.json"
+  | jq '{pair_id}' > "$NOTES/shared-b-pair.json"
+diff -u "$NOTES/shared-pair.json" "$NOTES/shared-b-pair.json"
+report | jq '.endpoints | keys'
+for slot in shared-control shared-data; do
+  k "$slot" get namespace kube-system -o jsonpath='{.metadata.uid}{"\n"}'
+done > "$NOTES/shared-clusters-after.txt"
+diff -u "$NOTES/shared-clusters-before.txt" "$NOTES/shared-clusters-after.txt"
 ```
 
 Expect no diff and still three slots. The new shared tenant added records,
@@ -410,11 +379,13 @@ k management logs deployment/provisioner --tail=20
 Wait for provisioning success and management readiness:
 
 ```bash
-export_state
+report
 api control:isolated-1 GET /tenants/isolated-c
 api data:isolated-1 GET /tenants/isolated-c
-jq -r '.targets | to_entries[] |
-  [.key, .value.cluster_id, .value.cluster_uid] | @tsv' "$STATE/acceptance.json"
+for slot in management shared-control shared-data isolated-1-control isolated-1-data; do
+  printf '%s ' "$slot"
+  k "$slot" get namespace kube-system -o jsonpath='{.metadata.uid}{"\n"}'
+done
 ```
 
 Expect five slots with five distinct cluster UIDs. The isolated tenant has
@@ -477,18 +448,18 @@ Capture a baseline after updates have applied:
 ```bash
 POLL_FROM=$(uv run --no-sync python -c \
   'from datetime import UTC, datetime; print(datetime.now(UTC).isoformat())')
-api management GET /tenants/shared-a > "$STATE/manual/m-before.json"
-api control:shared GET /tenants/shared-a > "$STATE/manual/c-before.json"
-api data:shared GET /tenants/shared-a > "$STATE/manual/d-before.json"
+api management GET /tenants/shared-a > "$NOTES/m-before.json"
+api control:shared GET /tenants/shared-a > "$NOTES/c-before.json"
+api data:shared GET /tenants/shared-a > "$NOTES/d-before.json"
 sleep 15
 k shared-control logs deployment/control-reconciler \
   --since-time="$POLL_FROM" --timestamps=true --tail=20
-api management GET /tenants/shared-a > "$STATE/manual/m-after.json"
-api control:shared GET /tenants/shared-a > "$STATE/manual/c-after.json"
-api data:shared GET /tenants/shared-a > "$STATE/manual/d-after.json"
-diff -u "$STATE/manual/m-before.json" "$STATE/manual/m-after.json"
-diff -u "$STATE/manual/c-before.json" "$STATE/manual/c-after.json"
-diff -u "$STATE/manual/d-before.json" "$STATE/manual/d-after.json"
+api management GET /tenants/shared-a > "$NOTES/m-after.json"
+api control:shared GET /tenants/shared-a > "$NOTES/c-after.json"
+api data:shared GET /tenants/shared-a > "$NOTES/d-after.json"
+diff -u "$NOTES/m-before.json" "$NOTES/m-after.json"
+diff -u "$NOTES/c-before.json" "$NOTES/c-after.json"
+diff -u "$NOTES/d-before.json" "$NOTES/d-after.json"
 ```
 
 Require a successful `control_poll` after `$POLL_FROM`, with `succeeded` greater
@@ -498,9 +469,9 @@ its updates while polling management. No successful poll means no proof yet.
 Read a timeline in small pages:
 
 ```bash
-api control:shared GET '/tenants/shared-a?limit=2' > "$STATE/manual/page.json"
-jq '{timeline, next_after_event_id}' "$STATE/manual/page.json"
-CURSOR=$(jq -r '.next_after_event_id' "$STATE/manual/page.json")
+api control:shared GET '/tenants/shared-a?limit=2' > "$NOTES/page.json"
+jq '{timeline, next_after_event_id}' "$NOTES/page.json"
+CURSOR=$(jq -r '.next_after_event_id' "$NOTES/page.json")
 if [ "$CURSOR" != null ]; then
   api control:shared GET "/tenants/shared-a?limit=2&after_event_id=$CURSOR"
 fi
@@ -513,10 +484,9 @@ configuration changes and data application.
 Check rejected requests:
 
 ```bash
-API_URL=$(jq -er '.management.url' "$STATE/endpoints.json")
-curl -sS -o /dev/null -w 'HTTP %{http_code}\n' "$API_URL/tenants/shared-a"
-curl -sS -o /dev/null -w 'HTTP %{http_code}\n' \
-  -H 'X-Demo-Key: wrong' "$API_URL/tenants/shared-a"
+curl -q -sS -o /dev/null -w 'HTTP %{http_code}\n' "$(endpoint management)/tenants/shared-a"
+curl -q -sS -o /dev/null -w 'HTTP %{http_code}\n' \
+  -H 'X-Demo-Key: wrong' "$(endpoint management)/tenants/shared-a"
 api management POST /tenants \
   '{"tenant_id":"Bad ID","isolation":"shared","initial_message":"invalid"}'
 api management POST /tenants \
@@ -527,7 +497,7 @@ Expect 401, 401, 422, and 409. The duplicate must not reset control's configurat
 or the counter. Repeat the curl checks for the child API URLs listed by:
 
 ```bash
-jq -r '.management.url, (.pairs[] | .control.url, .data.url)' "$STATE/endpoints.json"
+make endpoints ARGS=all
 ```
 
 Inspect the data API identity without displaying Secrets:
@@ -535,7 +505,7 @@ Inspect the data API identity without displaying Secrets:
 ```bash
 k shared-data get deployment data-api \
   -o jsonpath='{.spec.template.spec.serviceAccountName}{"\n"}'
-DATA_NS=$(jq -er '.targets["shared-data"].namespace' "$STATE/acceptance.json")
+DATA_NS=$(k shared-data get deployment data-api -o jsonpath='{.metadata.namespace}')
 API_ID="system:serviceaccount:$DATA_NS:data-api-runtime"
 k shared-data auth can-i get configmaps --as="$API_ID"
 k shared-data auth can-i get secret/data-reconciler-runtime --as="$API_ID"
@@ -552,8 +522,8 @@ The full in-Pod/named-permission check is available as
 You show that an existing control/data pair can keep changing configuration and
 serving requests without reaching management's database.
 
-Finish onboarding and export all five slots before faults. Open a second
-terminal in the same checkout and set the same `DEMO_ENV` and `STATE`.
+Finish onboarding and inspect all five endpoints before faults. Open a second
+terminal in the same checkout. It reads the same `.env`; no export is needed.
 Do not stop an API to simulate a database outage.
 The Azure fault helper uses Cilium policy to block the actual private parent
 database connection.
@@ -561,9 +531,8 @@ database connection.
 In the second terminal:
 
 ```bash
-uv run --no-sync python scripts/harness/fault-parent-link.py \
-  --config "$STATE/acceptance.json" \
-  --slot shared-control --component control-reconciler --duration 300 --execute
+make fault CONFIRM_AZURE=yes \
+  ARGS='--slot shared-control --component control-reconciler --duration 300'
 ```
 
 This blocks shared control's connection to management PostgreSQL, not the
@@ -573,21 +542,16 @@ fresh/existing database connections, holds the fault, and restores it.
 In the main terminal:
 
 ```bash
-ls -t "$STATE"/evidence/fault-*.json
-```
-
-Use the exact new filename:
-
-```bash
-FAULT_FILE="$STATE/evidence/fault-REPLACE_WITH_NEW_ID.json"
-jq '{slot, component, outcome, blocked_at, restored}' "$FAULT_FILE"
+FAULT_SLOT=shared-control
+FAULT_COMPONENT=control-reconciler
+journal "$FAULT_SLOT" "$FAULT_COMPONENT" | jq '{slot, component, outcome, blocked_at, restored}'
 ```
 
 Require `shared-control`, `control-reconciler`, and `blocked_verified` before
 continuing. While the helper holds the fault:
 
 ```bash
-api management GET /tenants/shared-a > "$STATE/manual/m-blocked-before.json"
+api management GET /tenants/shared-a > "$NOTES/m-blocked-before.json"
 api control:shared PUT /tenants/shared-a/configuration '{"message":"without-management"}'
 api data:shared GET /tenants/shared-a
 api data:shared POST /tenants/shared-a/counter
@@ -597,16 +561,17 @@ The new message should reach data through control's own database. Keep reading
 and incrementing for at least 60 seconds, then:
 
 ```bash
-api management GET /tenants/shared-a > "$STATE/manual/m-blocked-after.json"
-diff -u "$STATE/manual/m-blocked-before.json" "$STATE/manual/m-blocked-after.json"
+api management GET /tenants/shared-a > "$NOTES/m-blocked-after.json"
+diff -u "$NOTES/m-blocked-before.json" "$NOTES/m-blocked-after.json"
 ```
 
 Expect no new management reports during blockage. After the fault terminal
 finishes:
 
 ```bash
-jq '{outcome, restored, physical_restored, restoration_started_at, restored_at}' "$FAULT_FILE"
-RESTORE_FROM=$(jq -er '.restoration_started_at' "$FAULT_FILE")
+journal "$FAULT_SLOT" "$FAULT_COMPONENT" \
+  | jq '{outcome, restored, physical_restored, restoration_started_at, restored_at}'
+RESTORE_FROM=$(journal "$FAULT_SLOT" "$FAULT_COMPONENT" | jq -er '.restoration_started_at')
 k shared-control logs deployment/control-reconciler \
   --since-time="$RESTORE_FROM" --timestamps=true --tail=20
 ```
@@ -623,20 +588,27 @@ then catch up to the newest configuration when control becomes reachable.
 Start only after the preceding fault is restored. Save the current data response:
 
 ```bash
-api data:shared GET /tenants/shared-a > "$STATE/manual/outage-baseline.json"
-jq . "$STATE/manual/outage-baseline.json"
+api data:shared GET /tenants/shared-a > "$NOTES/outage-baseline.json"
+jq . "$NOTES/outage-baseline.json"
 ```
 
 In the fault terminal:
 
 ```bash
-uv run --no-sync python scripts/harness/fault-parent-link.py \
-  --config "$STATE/acceptance.json" \
-  --slot shared-data --component data-reconciler --duration 300 --execute
+make fault CONFIRM_AZURE=yes \
+  ARGS='--slot shared-data --component data-reconciler --duration 300'
 ```
 
-Select the new journal as `FAULT_FILE`. Require `shared-data`, `data-reconciler`,
-and `blocked_verified`. Now data cannot read control PostgreSQL.
+In the main terminal, select the owning journal:
+
+```bash
+FAULT_SLOT=shared-data
+FAULT_COMPONENT=data-reconciler
+journal "$FAULT_SLOT" "$FAULT_COMPONENT" | jq '{slot, component, outcome, blocked_at, restored}'
+```
+
+Require `shared-data`, `data-reconciler`, and `blocked_verified`. Now data cannot
+read control PostgreSQL.
 
 ```bash
 api control:shared PUT /tenants/shared-a/configuration '{"message":"queued-first"}'
@@ -668,7 +640,7 @@ Do not replace the data reconciler during the fault; the helper checks its Pod i
 After restoration:
 
 ```bash
-jq '{outcome, restored, physical_restored}' "$FAULT_FILE"
+journal "$FAULT_SLOT" "$FAULT_COMPONENT" | jq '{outcome, restored, physical_restored}'
 api control:shared GET /tenants/shared-a
 api data:shared GET /tenants/shared-a
 k shared-data get configmap tenant-shared-a -o json | jq .data
@@ -692,9 +664,9 @@ Prefer letting the timer finish. Ctrl-C requests restoration; still inspect
 the journal. If the process has stopped without confirmed restoration:
 
 ```bash
-uv run --no-sync python scripts/harness/fault-parent-link.py \
-  --config "$STATE/acceptance.json" --restore "$FAULT_FILE" --execute
-jq '{outcome, restored, physical_restored}' "$FAULT_FILE"
+make fault CONFIRM_AZURE=yes \
+  ARGS="--slot $FAULT_SLOT --component $FAULT_COMPONENT --restore"
+journal "$FAULT_SLOT" "$FAULT_COMPONENT" | jq '{outcome, restored, physical_restored}'
 ```
 
 Do not use `kill -9`, replace the faulted reconciler, or delete its cluster to
@@ -705,30 +677,31 @@ clear a fault. Do not proceed until the original link is confirmed restored.
 You prove the ownership model in reverse: children and their applications are
 removed before their management foundation.
 
-Save your observations under `$STATE/manual`. Restore paused workloads and all
+Save your observations under `$NOTES`. Restore paused workloads and all
 faults; no helper or provisioning operation may still be running.
 
 ```bash
-export_state
-make clean-plan ENV=azure
-make clean-azure ENV=azure CONFIRM_AZURE=yes
-make verify-clean ENV=azure
+make clean-plan
+make clean CONFIRM_AZURE=yes
+make verify-clean
 ```
 
-Review the plan before executing it. Cleanup uses the original ownership
-manifest and exported access for every existing cluster. It removes applications
-and child clusters through Radius before deleting the bootstrap foundation.
-Do not substitute direct AKS deletion. See [Azure cleanup](docs/cleanup.md).
+Review the plan before executing it. Cleanup reads current Azure, Radius and
+Kubernetes owners. It does not require an export, local cleanup record, or live
+management database. It removes applications and child clusters through Radius
+before deleting the foundation. Do not substitute direct AKS deletion.
+See [Azure cleanup](docs/cleanup.md).
 
 Keep soft-deleted vault retention and unrelated resources distinct from active
-deployment removal. Retain protected evidence and access records for review.
+deployment removal. An externally selected Key Vault and its retained objects
+are reported, not deleted or purged.
 
 ## References for the walkthrough
 
 | Topic | Source |
 |---|---|
 | How the planes connect | [Architecture](docs/architecture.md), [API/database contracts](docs/contracts.md) |
-| How Azure child clusters are provisioned | [Step-by-step Recipe walkthrough and deployment scopes](HOW_PROVISIONING_WORKS.md) |
+| How Azure child clusters are provisioned | [Provisioning run path](docs/provisioning.md), [Azure infrastructure](docs/azure-infrastructure.md) |
 | Runtime | `src/plane_demo/{management,control,data,shared,setup}`, `sql/` |
 | Infrastructure | `infra/radius/apps/` declares planes; `types/` defines APIs; `recipes/` implements them; `environments/` selects Recipes |
 | Administration | `scripts/operations/`, [Azure operations](docs/azure.md) |

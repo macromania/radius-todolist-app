@@ -1,6 +1,8 @@
 mock_provider "kubernetes" {}
 
 variables {
+  resource_prefix   = "radplanes-local"
+  radius_group      = "radplanes-local"
   gateway_host_port = 35492
   context = {
     application = { name = "data" }

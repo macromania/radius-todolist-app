@@ -1,4 +1,12 @@
+data "external" "prepared_images" {
+  program = concat(
+    ["sh", "${path.module}/check-images.sh", var.resource_prefix],
+    flatten([for image in local.prepared_images : [image.reference, image.image_id]])
+  )
+}
+
 resource "kind_cluster" "child" {
+  depends_on      = [data.external.prepared_images]
   name            = local.cluster_name
   node_image      = local.node_image
   kubeconfig_path = "${path.root}/child.kubeconfig"
@@ -16,7 +24,8 @@ resource "kind_cluster" "child" {
     node {
       role = "control-plane"
       labels = {
-        "radplanes.local/slot" = var.context.resource.properties.slot
+        "radplanes.local/slot"       = var.context.resource.properties.slot
+        "plane-demo/resource-prefix" = var.resource_prefix
       }
       kubeadm_config_patches = [yamlencode({
         apiVersion = "kubeadm.k8s.io/v1beta3"
@@ -32,27 +41,37 @@ resource "kind_cluster" "child" {
         listen_address = "127.0.0.1"
         protocol       = "TCP"
       }
+
+    }
+  }
+
+  lifecycle {
+    precondition {
+      condition     = contains([for image in var.dependency_images : image.reference], local.node_image)
+      error_message = "The pinned kind node image must be present in the inspected preparation set."
     }
   }
 }
 
 data "external" "child_address" {
-  program = ["sh", "${path.module}/node-address.sh", kind_cluster.child.name]
+  depends_on = [kind_cluster.child]
+  program    = ["sh", "${path.module}/node-address.sh", var.resource_prefix, var.context.resource.properties.slot]
 }
 
 resource "terraform_data" "images" {
-  count = length(var.images) == 0 ? 0 : 1
-
   triggers_replace = {
     cluster_id = kind_cluster.child.id
-    images     = var.images
+    images     = local.prepared_images
   }
 
   provisioner "local-exec" {
     command = "sh \"${path.module}/load-images.sh\""
     environment = {
-      LOCAL_CLUSTER = kind_cluster.child.name
-      LOCAL_IMAGES  = join("\n", var.images)
+      LOCAL_CLUSTER         = kind_cluster.child.name
+      LOCAL_RESOURCE_PREFIX = var.resource_prefix
+      LOCAL_SLOT            = var.context.resource.properties.slot
+      LOCAL_IMAGES          = join("\n", [for image in local.prepared_images : image.reference])
+      LOCAL_IMAGE_IDS       = join("\n", [for image in local.prepared_images : image.image_id])
     }
   }
 }
@@ -62,9 +81,10 @@ resource "kubernetes_secret_v1" "access" {
 
   metadata {
     name      = "${local.cluster_name}-access"
-    namespace = "radplanes-local-access"
+    namespace = var.access_namespace
     labels = {
-      "radplanes.local/slot" = var.context.resource.properties.slot
+      "radplanes.local/slot"       = var.context.resource.properties.slot
+      "plane-demo/resource-prefix" = var.resource_prefix
     }
     annotations = {
       "radplanes.local/radius-resource" = var.context.resource.id

@@ -4,22 +4,19 @@ SHELL := /bin/bash
 ENV ?= azure
 ARGS ?=
 GROUP ?= all
-CONFIG ?= .state/azure/provisioning.json
-SLOT ?= management
 BICEP ?= $(HOME)/.rad/bin/bicep
 RUN := uv run --no-sync
+STAGE := bash scripts/operations/stage.sh
 SECTION = @printf '\n== %s ==\n' '$@' >&2
 export CONFIRM_AZURE CONFIRM_LOCAL
 export PYTHONDONTWRITEBYTECODE := 1
 CHECK_TMP := $(CURDIR)/.state/check/tmp
 check lint test check-bicep check-terraform: export TMPDIR := $(CHECK_TMP)
 
-.PHONY: help init show-config endpoints api check lint test test-integration check-bicep check-shell check-terraform check-work \
-        require-azure confirm-azure preflight bootstrap-preview validate-azure bootstrap \
-        install-radius publish-recipes build-publish register-radius deploy-management \
-        deploy-management-preview export-state test-e2e test-outages clean-plan clean-azure verify-clean \
-        local-prepare local-executor-build local-executor-inspect local-bootstrap local-install-radius \
-        confirm-local local-runtime-build local-runtime-inspect local-runtime-load \
+.PHONY: help init show-config endpoints api kube fault check lint test test-integration check-bicep check-shell check-terraform check-work \
+        require-azure confirm-azure build inspect-build bootstrap deploy-management \
+        deploy-management-preview export-state test-e2e test-outages clean-plan clean clean-azure verify-clean \
+        confirm-local local-build local-inspect-build local-bootstrap \
         local-setup local-deploy-management local-export local-test local-clean-plan \
         local-clean local-verify
 
@@ -58,7 +55,7 @@ help: ## Show grouped commands; use GROUP=setup, checks, local, or azure
 	        print "\nWalkthroughs"; \
 	        if (group != "local") print "  Azure: RUN_AZURE_SCENARIOS.md"; \
 	        if (group != "azure") print "  Local: RUN_LOCAL_SCENARIOS.md"; \
-	        print "  Follow the selected guide for prerequisites and manual handoffs."; \
+	        print "  Follow the selected guide for prerequisites and manual scenarios."; \
 	      } else { \
 	        print "\nRead next"; \
 	        print "  Dependency setup: docs/contracts.md#validation"; \
@@ -81,6 +78,14 @@ endpoints: ## Discover live endpoints; ARGS=<slot> or ARGS=all
 api: ## Call ARGS='TARGET METHOD /path'; optional JSON on stdin
 	$(SECTION)
 	@bash scripts/operations/api.sh $(ARGS)
+
+kube: ## Run kubectl with fresh access; ARGS='SLOT get pods'
+	$(SECTION)
+	@bash scripts/operations/kube.sh $(ARGS)
+
+fault: ## Run or restore a parent-link fault; pass helper options through ARGS
+	$(SECTION)
+	@$(STAGE) fault $(ARGS)
 
 check-work:
 	@mkdir -p "$(CHECK_TMP)" .state/check infra/radius/types/.build
@@ -132,48 +137,28 @@ confirm-local:
 	@test "$(CONFIRM_LOCAL)" = yes || { echo "Set CONFIRM_LOCAL=yes for local Docker/Kubernetes mutations." >&2; exit 1; }
 
 ##@ local Local: preparation and images
-##! Use Docker Desktop. Image build/inspect commands need CONFIRM_LOCAL=yes.
-local-prepare: check-work ## Prepare Recipe bundles and manifests; creates no resources
+##! Use Docker Desktop. Build before bootstrap; .env selects the deployment.
+local-build: ## Build and inspect all local images and prepared dependencies
 	$(SECTION)
-	@$(RUN) python scripts/operations/local/prepare.py
+	@PLANE_DEMO_EXPECT_ENV=local $(STAGE) build
 
-local-executor-build: confirm-local ## Build Radius executor/operator images
+local-inspect-build: ## Reinspect local image bytes without building or pulling
 	$(SECTION)
-	@$(RUN) python scripts/operations/local/images.py build --execute
-
-local-executor-inspect: confirm-local ## Verify executor/operator image contents
-	$(SECTION)
-	@$(RUN) python scripts/operations/local/images.py inspect --execute
-
-local-runtime-build: confirm-local ## Build native API/provisioner images from committed inputs
-	$(SECTION)
-	@$(RUN) python scripts/operations/local/runtime-images.py build --execute
-
-local-runtime-inspect: confirm-local ## Verify runtime image contents and imports
-	$(SECTION)
-	@$(RUN) python scripts/operations/local/runtime-images.py inspect --execute
+	@PLANE_DEMO_EXPECT_ENV=local $(STAGE) inspect-build
 
 ##@ local Local: deployment and acceptance
 ##! Mutating commands require CONFIRM_LOCAL=yes. Run stages from the local guide.
-local-bootstrap: confirm-local ## Create management kind cluster; verify Secret encryption
+local-bootstrap: ## Create management kind, node-owned encryption and Radius
 	$(SECTION)
-	@$(RUN) python scripts/operations/local/bootstrap.py create --execute
+	@PLANE_DEMO_EXPECT_ENV=local $(STAGE) bootstrap
 
-local-install-radius: confirm-local ## Install management Radius and its executor
+local-setup: ## Register prepared Recipes separately for a manual checkpoint
 	$(SECTION)
-	@$(RUN) python scripts/operations/local/bootstrap.py install --execute
+	@PLANE_DEMO_EXPECT_ENV=local $(STAGE) setup
 
-local-runtime-load: confirm-local ## Load inspected images into the management cluster only
+local-deploy-management: ## Register Recipes and deploy management through Radius
 	$(SECTION)
-	@$(RUN) python scripts/operations/local/runtime-images.py load-management --execute
-
-local-setup: confirm-local ## Register demo Recipes and config in management
-	$(SECTION)
-	@$(RUN) python scripts/operations/local/setup-demo.py --execute
-
-local-deploy-management: confirm-local ## Deploy management through Radius; creates no child clusters
-	$(SECTION)
-	@$(RUN) python scripts/operations/local/deploy-demo.py --execute
+	@PLANE_DEMO_EXPECT_ENV=local $(STAGE) deploy-management
 
 local-export: ## Report live local topology/API access; no saved export is required
 	$(SECTION)
@@ -185,18 +170,17 @@ local-test: confirm-local ## Run live admissions, isolation checks, and parent o
 
 ##@ local Local: cleanup
 ##! Preview ownership first. Deletion requires CONFIRM_LOCAL=yes.
-local-clean-plan: check-work ## Preview verified ownership and ordered demo cleanup
+local-clean-plan: ## Preview live ownership and ordered local cleanup
 	$(SECTION)
-	@$(RUN) python scripts/operations/local/cleanup.py
+	@PLANE_DEMO_EXPECT_ENV=local $(STAGE) clean-plan
 
-local-clean: confirm-local ## Delete the verified local demo in Radius ownership order
+local-clean: ## Delete the verified local demo in Radius ownership order
 	$(SECTION)
-	@$(RUN) python scripts/operations/local/cleanup.py --execute
+	@PLANE_DEMO_EXPECT_ENV=local $(STAGE) clean
 
-local-verify: check-work ## Verify offline; set LOCAL_CLEANUP_RECORD=<record path>
+local-verify: ## Verify live local absence; no record path is required
 	$(SECTION)
-	@test -n "$(LOCAL_CLEANUP_RECORD)" || { echo "Set LOCAL_CLEANUP_RECORD to the exact cleanup record." >&2; exit 1; }
-	@$(RUN) python scripts/operations/local/cleanup.py --verify "$(LOCAL_CLEANUP_RECORD)"
+	@PLANE_DEMO_EXPECT_ENV=local $(STAGE) verify-clean
 
 require-azure:
 	@test "$(ENV)" = azure || { echo "This target is Azure-only; use the explicit local-* targets." >&2; exit 1; }
@@ -204,47 +188,27 @@ require-azure:
 confirm-azure: require-azure
 	@test "$(CONFIRM_AZURE)" = yes || { echo "Set CONFIRM_AZURE=yes for Azure mutations." >&2; exit 1; }
 
-##@ azure Azure: preparation and deployment
-##! Use ENV=azure (default). Mutating commands also need CONFIRM_AZURE=yes.
-preflight: require-azure ## Inspect prerequisites and write scoped local context
+##@ azure Azure-first workflow: selected environment stages
+##! .env selects Azure or local. Mutations need CONFIRM_AZURE=yes or CONFIRM_LOCAL=yes.
+build: ## Build and inspect selected images, Recipes and local dependencies
 	$(SECTION)
-	@$(RUN) python scripts/operations/project.py preflight --environment "$(ENV)"
+	@$(STAGE) build
 
-bootstrap-preview: require-azure ## Prepare foundation inputs and run Azure what-if
+inspect-build: ## Reinspect selected image contents and artifact ownership
 	$(SECTION)
-	@$(RUN) python scripts/operations/project.py bootstrap-preview --environment "$(ENV)"
+	@$(STAGE) inspect-build
 
-validate-azure: require-azure ## Record diagnostics; optionally run what-if/validation
+bootstrap: ## Deploy the selected foundation and install management Radius
 	$(SECTION)
-	@$(RUN) python scripts/operations/validate-bootstrap.py
+	@$(STAGE) bootstrap
 
-bootstrap: confirm-azure ## Compile and deploy the scoped Azure foundation
+deploy-management-preview: ## Inspect management deployment inputs without submission
 	$(SECTION)
-	@$(RUN) python scripts/operations/project.py bootstrap --environment "$(ENV)"
+	@$(STAGE) preview-management
 
-install-radius: confirm-azure ## Install management Radius after bootstrap
+deploy-management: ## Deploy management and wait for actual completion
 	$(SECTION)
-	@$(RUN) python scripts/operations/project.py install-radius --environment "$(ENV)"
-
-publish-recipes: confirm-azure ## Publish and verify immutable Recipe tags in project ACR
-	$(SECTION)
-	@$(RUN) python scripts/operations/publish-artifacts.py
-
-build-publish: confirm-azure ## Build/push committed images; inspect contents separately
-	$(SECTION)
-	@$(RUN) python scripts/operations/build-images.py
-
-register-radius: confirm-azure ## Register cluster types/environment; SLOT defaults to management
-	$(SECTION)
-	@$(RUN) python scripts/operations/register-radius.py --slot "$(SLOT)" --config "$(CONFIG)"
-
-deploy-management-preview: require-azure ## Prepare the management Job manifest; do not submit it
-	$(SECTION)
-	@$(RUN) python scripts/operations/run-management-job.py --config "$(CONFIG)"
-
-deploy-management: confirm-azure ## Submit management Job; verify completion separately
-	$(SECTION)
-	@$(RUN) python scripts/operations/run-management-job.py --config "$(CONFIG)" --execute
+	@$(STAGE) deploy-management
 
 ##@ azure Azure: acceptance
 ##! Live tests require CONFIRM_AZURE=yes and a matching deployed .env selection.
@@ -260,16 +224,20 @@ test-outages: confirm-azure ## Run opt-in live parent-link outages and restorati
 	$(SECTION)
 	@$(RUN) python scripts/harness/test-e2e.py --environment azure --mode outages --execute
 
-##@ azure Azure: cleanup
-##! Preview ownership first. Deletion requires ENV=azure CONFIRM_AZURE=yes.
-clean-plan: require-azure ## Read cloud ownership and preview ordered cleanup
+##@ azure Selected environment: cleanup
+##! Preview ownership first. Confirm deletion for the environment selected in .env.
+clean-plan: ## Read current ownership and preview ordered cleanup
 	$(SECTION)
-	@$(RUN) python scripts/operations/clean-azure.py
+	@$(STAGE) clean-plan
 
-clean-azure: confirm-azure ## Delete only verified project-owned Azure resources
+clean: ## Delete the selected demo in Radius ownership order
 	$(SECTION)
-	@$(RUN) python scripts/operations/clean-azure.py --execute
+	@$(STAGE) clean
 
-verify-clean: require-azure ## Verify Azure deletion and report retained recovery records
+clean-azure: ## Delete only the Azure deployment selected in .env
 	$(SECTION)
-	@$(RUN) python scripts/operations/verify-clean.py
+	@PLANE_DEMO_EXPECT_ENV=azure $(STAGE) clean
+
+verify-clean: ## Verify live absence; no saved cleanup record is required
+	$(SECTION)
+	@$(STAGE) verify-clean

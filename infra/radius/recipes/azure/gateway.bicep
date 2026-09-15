@@ -27,7 +27,6 @@ var preference = context.resource.properties.?hostname ?? ''
 var dnsLabel = empty(preference) ? 'radplanes-${suffix}' : preference
 var requiredTags = union(tags, {
   SecurityControl: 'Ignore'
-  project: 'radplanes'
   managedBy: 'radius-todolist-app'
   'radapp.io-environment': context.environment.id
   'radapp.io-application': context.application.id

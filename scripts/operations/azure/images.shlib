@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+
+azure_docker() {
+  env -u DOCKER_HOST -u DOCKER_CONTEXT docker --host "$DESKTOP_HOST" \
+    --config "$DOCKER_CONFIG" "$@"
+}
+
+azure_image_tools() {
+  [[ -x "$ROOT/.venv/bin/python" ]] || {
+    demo_error 'Image inspection requires the project Python 3.13 environment'; return 1;
+  }
+  "$ROOT/.venv/bin/python" -c 'import sys; sys.exit(0 if sys.version_info[:2] == (3,13) else 1)' || {
+    demo_error 'Image inspection requires Python 3.13'; return 1;
+  }
+  DESKTOP_HOST=$(env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_CONFIG \
+    docker context inspect desktop-linux --format '{{json .Endpoints.docker.Host}}' | jq -er .) || return
+  [[ "$DESKTOP_HOST" == unix:///* && "$DESKTOP_HOST" != *$'\n'* \
+    && "$DESKTOP_HOST" != *$'\r'* && "$DESKTOP_HOST" != */../* ]] || {
+    demo_error 'Image inspection requires a local Docker Desktop socket'; return 1;
+  }
+  azure_docker info --format '{{json .}}' > "$AZURE_WORKSPACE/docker-info.json" || return
+  jq -e '.OSType == "linux" and .OperatingSystem == "Docker Desktop"' \
+    "$AZURE_WORKSPACE/docker-info.json" >/dev/null || {
+    demo_error 'Image inspection requires running Linux containers in Docker Desktop'; return 1;
+  }
+}
+
+azure_check_inspection_container() {
+  [[ "${INSPECTION_CONTAINER:-}" =~ ^[a-f0-9]{64}$ ]] || {
+    demo_error 'Invalid inspection container identity; no container was removed'; return 1;
+  }
+  azure_docker container inspect "$INSPECTION_CONTAINER" \
+    > "$AZURE_WORKSPACE/container.json" || return
+  jq -e --arg id "$INSPECTION_CONTAINER" --arg name "/$INSPECTION_NAME" \
+    --arg image "$INSPECTION_IMAGE" --arg owner "${AZURE_WORKSPACE##*/}" '
+      length == 1 and .[0].Id == $id and .[0].Name == $name and .[0].Image == $image and
+      .[0].Config.Labels["plane-demo/inspection-run"] == $owner and
+      .[0].State.Running == false and .[0].HostConfig.NetworkMode == "none" and
+      .[0].HostConfig.ReadonlyRootfs == true and .[0].Mounts == []
+  ' "$AZURE_WORKSPACE/container.json" >/dev/null || {
+    printf 'ERROR: Inspection container ownership differs; retained %s\n' "$INSPECTION_CONTAINER" >&2
+    return 1
+  }
+}
+
+azure_remove_inspection_container() {
+  azure_check_inspection_container || return
+  azure_docker container rm "$INSPECTION_CONTAINER" >&2 || return
+  unset INSPECTION_CONTAINER
+}
+
+azure_inspect_image() {
+  local component="$1" reference="$2" api_base="$3" created="$4" staging="$5" module
+  local proof_args=(--reference "$reference" --revision "$REVISION" --api-base "$api_base" \
+    --run-info "$AZURE_WORKSPACE/run-$component.json")
+  if [[ "$created" == true ]]; then
+    proof_args+=(--queued-info "$AZURE_WORKSPACE/queued-$component.json" --staging "$staging")
+  else
+    proof_args+=(--registry-info "$AZURE_WORKSPACE/registry.json")
+  fi
+  if [[ "$component" == provisioner ]]; then
+    local archive_url
+    "$ROOT/.venv/bin/python" "$ROOT/scripts/operations/azure/image_inspection.py" \
+      --source "$SOURCE" --component provisioner --kubelogin-spec \
+      > "$AZURE_WORKSPACE/kubelogin-spec.json" || return
+    archive_url=$(jq -er '.url' "$AZURE_WORKSPACE/kubelogin-spec.json") || return
+    curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+      --max-time 300 --max-filesize 104857600 "$archive_url" \
+      --output "$AZURE_WORKSPACE/kubelogin.zip" || return
+    proof_args+=(--kubelogin-archive "$AZURE_WORKSPACE/kubelogin.zip")
+  fi
+  azure_docker pull --platform linux/amd64 "$reference" >&2 || return
+  azure_docker image inspect "$reference" > "$AZURE_WORKSPACE/image-local.json" || return
+  module=plane_demo.management.api
+  [[ "$component" != provisioner ]] || module=plane_demo.management.provisioner
+  jq -e --arg reference "$reference" --arg revision "$REVISION" --arg module "$module" '
+    length == 1 and .[0].Architecture == "amd64" and .[0].Os == "linux" and
+    (.[0].RepoDigests | index($reference) != null) and
+    (.[0].Id | test("^sha256:[a-f0-9]{64}$")) and
+    .[0].Config.User == "10001:10001" and .[0].Config.WorkingDir == "/app" and
+    (.[0].Config.Entrypoint == null or .[0].Config.Entrypoint == []) and
+    (.[0].Config.Volumes == null or .[0].Config.Volumes == {}) and
+    .[0].Config.Cmd == ["python", "-m", $module] and
+    ([.[0].Config.Env[] | select(startswith("PYTHONPATH="))] == ["PYTHONPATH=/app/src"]) and
+    .[0].Config.Labels["org.opencontainers.image.revision"] == $revision
+  ' "$AZURE_WORKSPACE/image-local.json" >/dev/null || {
+    demo_error 'Pulled image identity or runtime configuration differs'; return 1;
+  }
+  INSPECTION_IMAGE=$(jq -er '.[0].Id' "$AZURE_WORKSPACE/image-local.json") || return
+  INSPECTION_NAME="$STEM-$component-inspect-${AZURE_WORKSPACE##*.}"
+  INSPECTION_CONTAINER=$(azure_docker container create --pull never --network none --read-only \
+    --name "$INSPECTION_NAME" --label "plane-demo/inspection-run=${AZURE_WORKSPACE##*/}" \
+    --entrypoint /bin/true "$INSPECTION_IMAGE") || return
+  [[ "$INSPECTION_CONTAINER" =~ ^[a-f0-9]{64}$ ]] || {
+    demo_error 'Docker returned an invalid inspection container ID'; return 1;
+  }
+  azure_check_inspection_container || return
+  azure_docker container export --output "$AZURE_WORKSPACE/image.tar" "$INSPECTION_CONTAINER" || return
+  "$ROOT/.venv/bin/python" "$ROOT/scripts/operations/azure/image_inspection.py" \
+    --source "$SOURCE" --archive "$AZURE_WORKSPACE/image.tar" --component "$component" \
+    "${proof_args[@]}" \
+    > "$AZURE_WORKSPACE/inspection-$component.json" || return
+  azure_remove_inspection_container
+}

@@ -3,11 +3,18 @@
 set -eu
 umask 077
 
-case "${LOCAL_CLUSTER-}" in
-    radplanes-local-shared-control|radplanes-local-shared-data|radplanes-local-isolated-1-control|radplanes-local-isolated-1-data) ;;
+# shellcheck source=image-contract.sh
+. "$(dirname "$0")/image-contract.sh"
+check_prefix "${LOCAL_RESOURCE_PREFIX-}" || { echo "Invalid selected prefix" >&2; exit 1; }
+case "${LOCAL_SLOT-}" in
+    shared-control|shared-data|isolated-1-control|isolated-1-data) ;;
     *) echo "Only reserved local child nodes are permitted" >&2; exit 1 ;;
 esac
+[ "${LOCAL_CLUSTER-}" = "$LOCAL_RESOURCE_PREFIX-$LOCAL_SLOT" ] || {
+    echo "Child name differs from the selected slot" >&2; exit 1
+}
 [ -n "${LOCAL_IMAGES-}" ] || { echo "No application images supplied" >&2; exit 1; }
+[ -n "${LOCAL_IMAGE_IDS-}" ] || { echo "Prepared image IDs are required" >&2; exit 1; }
 
 node="$LOCAL_CLUSTER-control-plane"
 work=".radplanes-image-import-$$"
@@ -21,29 +28,25 @@ cleanup() {
         [ -z "$pid" ] || kill "$pid" 2>/dev/null || :
     done
     [ -z "$watchdog" ] || wait "$watchdog" 2>/dev/null || :
-    rm -f "$work/stream" "$work/images" "$work/label" "$work/role" "$work/loaded" "$work/cancelled"
+    rm -f "$work/stream" "$work/images" "$work/ids" "$work/image-id" \
+        "$work/label" "$work/role" "$work/loaded" "$work/cancelled"
     rmdir "$work"
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
 printf '%s\n' "$LOCAL_IMAGES" > "$work/images"
+printf '%s\n' "$LOCAL_IMAGE_IDS" > "$work/ids"
 count=0
 while IFS= read -r image; do
-    case "$image" in
-        localhost/radplanes-plane-api:*|localhost/radplanes-plane-provisioner:*) ;;
-        *) echo "Unapproved application image" >&2; exit 1 ;;
-    esac
-    tag=${image##*:}
-    case "$tag" in
-        ''|*[!0-9a-f]*) echo "Image tags must be lowercase source hashes" >&2; exit 1 ;;
-    esac
-    [ "${#tag}" -ge 40 ] && [ "${#tag}" -le 64 ] || {
-        echo "Image tag length is not a source hash" >&2; exit 1
+    check_image "$LOCAL_RESOURCE_PREFIX" "$image" || {
+        echo "Unapproved prepared image" >&2; exit 1
     }
     count=$((count + 1))
 done < "$work/images"
-[ "$count" -le 2 ] || { echo "At most two application images are permitted" >&2; exit 1; }
+[ "$count" -ge 4 ] && [ "$count" -le 64 ] || {
+    echo "Expected the complete prepared child image set" >&2; exit 1
+}
 
 # One deadline covers ownership checks, every import, and ctr verification.
 parent=$$
@@ -79,7 +82,15 @@ read -r role < "$work/role"
     echo "Docker child ownership labels mismatch" >&2; exit 1
 }
 mkfifo "$work/stream"
+exec 3< "$work/ids"
 while IFS= read -r image; do
+    IFS= read -r expected <&3 || { echo "Missing prepared image ID" >&2; exit 1; }
+    docker image inspect --format '{{.Id}}' "$image" > "$work/image-id" &
+    consumer=$!
+    wait "$consumer"
+    consumer=
+    IFS= read -r actual < "$work/image-id"
+    [ "$actual" = "$expected" ] || { echo "Prepared image changed before import" >&2; exit 1; }
     docker image save "$image" > "$work/stream" &
     producer=$!
     docker exec -i "$node" ctr --namespace k8s.io images import - < "$work/stream" &
@@ -101,3 +112,8 @@ while IFS= read -r image; do
         echo "Imported image reference is absent from the child" >&2; exit 1
     }
 done < "$work/images"
+if IFS= read -r _unexpected <&3; then
+    echo "Unexpected extra image IDs" >&2
+    exit 1
+fi
+exec 3<&-

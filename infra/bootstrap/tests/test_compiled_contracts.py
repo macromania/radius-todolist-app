@@ -155,9 +155,14 @@ class CompiledInfrastructureTests(unittest.TestCase):
             [
                 {
                     "name": "demo-harness",
-                    "subject": "system:serviceaccount:radplanes-management-management:harness",
+                    "subject": "[parameters('harnessServiceAccountSubject')]",
                 }
             ],
+        )
+        self.assertEqual(
+            self.bootstrap["parameters"]["harnessServiceAccountSubject"]["defaultValue"],
+            "[format('system:serviceaccount:{0}-{1}-{2}-management-management:harness', "
+            "parameters('projectName'), parameters('deploymentName'), parameters('environment'))]",
         )
         for name in ("appAccess", "harness-platform-read"):
             assignments = modules[name]["properties"]["parameters"]["assignments"]["value"]
@@ -268,11 +273,11 @@ class CompiledInfrastructureTests(unittest.TestCase):
         allocation = self.network["outputs"]["allocations"]["copy"]["input"]
         self.assertEqual(
             allocation["certificateName"],
-            "[format('gateway-{0}', parameters('slots')[copyIndex()])]",
+            "[format('gateway-{0}-{1}', parameters('prefix'), parameters('slots')[copyIndex()])]",
         )
         self.assertEqual(
             allocation["acmeStateSecretName"],
-            "[format('acme-{0}', parameters('slots')[copyIndex()])]",
+            "[format('acme-{0}-{1}', parameters('prefix'), parameters('slots')[copyIndex()])]",
         )
         self.assertIn(
             "outputs.allocations.value",
@@ -281,32 +286,38 @@ class CompiledInfrastructureTests(unittest.TestCase):
 
     def test_gateway_and_issuer_data_grants_target_only_their_slot_objects(self):
         expected = {
-            "gatewaySecrets": ("secrets", "certificateName", "gateway", "secretsUser"),
+            "gatewaySecrets": (
+                "secrets",
+                "certificateName",
+                "gateway",
+                "4633458b-17de-408a-b874-0445c86b69e6",
+            ),
             "issuerCertificates": (
                 "certificates",
                 "certificateName",
                 "certificateIssuer",
-                "certificateIssuerRoleId",
+                "certificate-importer",
             ),
             "issuerCertificateSecrets": (
                 "secrets",
                 "certificateName",
                 "certificateIssuer",
-                "secretsUser",
+                "4633458b-17de-408a-b874-0445c86b69e6",
             ),
             "issuerStateSecrets": (
                 "secrets",
                 "acmeStateSecretName",
                 "certificateIssuer",
-                "acmeStateRoleId",
+                "acme-state-writer",
             ),
         }
         modules = {
             item["copy"]["name"]: item
-            for item in resources(self.platform_access)
+            for item in resources(self.bootstrap)
             if item["type"] == "Microsoft.Resources/deployments"
+            and "objectScope" in item["properties"].get("parameters", {})
         }
-        self.assertEqual(set(modules), set(expected))
+        self.assertEqual(set(modules), {*expected, "applicationCredentials"})
         for direct_grant in resources(self.platform_access):
             if direct_grant["type"] == "Microsoft.Authorization/roleAssignments":
                 body = json.dumps(direct_grant)
@@ -316,15 +327,23 @@ class CompiledInfrastructureTests(unittest.TestCase):
             with self.subTest(grant=name):
                 module = modules[name]
                 parameters = module["properties"]["parameters"]
+                self.assertEqual(module["resourceGroup"], "[variables('vaultResourceGroup')]")
+                network = (
+                    "reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', "
+                    "subscription().subscriptionId, format('rg-{0}-platform', "
+                    "variables('prefix'))), "
+                    "'Microsoft.Resources/deployments', 'network'), '2025-04-01')"
+                )
                 self.assertEqual(
                     parameters["objectScope"]["value"],
-                    f"[resourceId('Microsoft.KeyVault/vaults/{kind}', "
-                    f"parameters('foundation').vaultName, "
-                    f"parameters('allocations')[copyIndex()].{object_name})]",
+                    f"[format('{{0}}/{kind}/{{1}}', variables('selectedVaultId'), "
+                    f"{network}.outputs.allocations.value[copyIndex()].{object_name})]",
                 )
                 self.assertIn(
-                    f".identities.{identity}.principalId", parameters["principalId"]["value"]
+                    f".outputs.identity.value.{identity}.principalId",
+                    parameters["principalId"]["value"],
                 )
+                self.assertIn("variables('slots')[copyIndex()]", parameters["principalId"]["value"])
                 self.assertIn(role, parameters["roleDefinitionId"]["value"])
                 assignment = module["properties"]["template"]["resources"][0]
                 self.assertEqual(assignment["scope"], "[parameters('objectScope')]")

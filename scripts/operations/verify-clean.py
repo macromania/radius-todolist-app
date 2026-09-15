@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only verification of the exact Azure ownership manifest."""
+"""Independent read-only Azure verification from the selected checkout's .env."""
 
 import importlib.util
 import sys

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import secrets
 import stat
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
@@ -12,9 +13,27 @@ from psycopg.conninfo import make_conninfo
 
 from plane_demo.management.providers.commands import write_json
 from plane_demo.management.providers.local_config import private_ipv4
+from plane_demo.management.providers.secret_store import (
+    CredentialScope,
+    CredentialStore,
+    StoreError,
+)
 from plane_demo.management.provisioning import ProvisioningConfig, ProvisioningError
 
 Environment = Literal["azure", "local"]
+
+
+def credential_roles(config: ProvisioningConfig, slot: str) -> set[str]:
+    config.allocation(slot)
+    if slot == "management":
+        return {
+            "mgmt_api",
+            "mgmt_provisioner",
+            *(item["reporting_role"] for item in config.pair_slots),
+        }
+    if slot.endswith("-control"):
+        return {"cp_api", "cp_reconciler", "dp_reconciler"}
+    return set()
 
 
 class Credentials:
@@ -53,9 +72,22 @@ class Credentials:
     def has_database(self, slot: str) -> bool:
         return bool(self._data["planes"].get(slot, {}).get("database"))
 
-    def ensure(self, slot: str, roles: set[str]) -> dict:
+    def bind(
+        self,
+        _reader: Callable[[str], dict],
+        protect: Callable[[object], None],
+        _guard: Callable[[], None],
+    ) -> None:
+        protect(self._data)
+
+    def demo_key(self, slot: str) -> str:
+        return self.plane(slot)["demoKey"]
+
+    def ensure(self, slot: str, roles: set[str], *, require_existing: bool = False) -> dict:
         existing = self._data["planes"].get(slot)
         if existing is None:
+            if require_existing:
+                raise ProvisioningError("plane_credentials_missing")
             existing = {
                 "demoKey": secrets.token_urlsafe(48),
                 "passwords": {role: secrets.token_urlsafe(48) for role in sorted(roles)},
@@ -108,6 +140,100 @@ class Credentials:
                 }
             },
         }
+
+
+class StoredCredentials:
+    """Read credentials from their service owner and connection properties from APIs."""
+
+    def __init__(self, config: ProvisioningConfig, store: CredentialStore):
+        identity = config.identity
+        if identity is None:
+            raise ProvisioningError("bootstrap_identity_required")
+        if store.scope != CredentialScope(
+            identity.project, identity.deployment, identity.environment
+        ):
+            raise ProvisioningError("credential_owner_mismatch")
+        self.environment = identity.environment
+        self.config = config
+        self.store = store
+        self._provided = identity.demo_keys
+        self._reader: Callable[[str], dict] | None = None
+        self._protect: Callable[[object], None] | None = None
+        self._guard: Callable[[], None] | None = None
+
+    def bind(
+        self,
+        reader: Callable[[str], dict],
+        protect: Callable[[object], None],
+        guard: Callable[[], None],
+    ) -> None:
+        self._reader, self._protect, self._guard = reader, protect, guard
+
+    def _value(
+        self, slot: str, role: str, *, create: bool = False, require_existing: bool = False
+    ) -> str:
+        self.config.allocation(slot)
+        if self._guard is None or self._protect is None:
+            raise ProvisioningError("credential_source_not_bound")
+        self._guard()
+        try:
+            value = (
+                self.store.get_or_create(
+                    slot,
+                    role,
+                    require_existing=require_existing,
+                    provided_value=self._provided.get(slot) if role == "demoKey" else None,
+                )
+                if create
+                else self.store.get(slot, role)
+            )
+        except StoreError as error:
+            raise ProvisioningError(error.code) from None
+        self._protect(value.value)
+        self._guard()
+        return value.value
+
+    def demo_key(self, slot: str) -> str:
+        return self._value(slot, "demoKey")
+
+    def seed_provided_keys(self) -> None:
+        for slot in self._provided:
+            self._value(slot, "demoKey", create=True)
+
+    def ensure(self, slot: str, roles: set[str], *, require_existing: bool = False) -> dict:
+        if roles != credential_roles(self.config, slot):
+            raise ProvisioningError("invalid_plane_credentials")
+        return {
+            "demoKey": self._value(slot, "demoKey", create=True, require_existing=require_existing),
+            "passwords": {
+                role: self._value(slot, role, create=True, require_existing=require_existing)
+                for role in sorted(roles)
+            },
+        }
+
+    def set_database(self, slot: str, properties: dict) -> None:
+        """Validate a live result without saving a connection inventory."""
+        self.config.allocation(slot)
+        database_dsn(properties, "plane_setup", "x" * 48, environment=self.environment)
+
+    def dsn(self, slot: str, role: str) -> str:
+        if role not in credential_roles(self.config, slot):
+            raise ProvisioningError("database_credentials_missing")
+        if self._reader is None or self._protect is None:
+            raise ProvisioningError("credential_source_not_bound")
+        value = database_dsn(
+            self._reader(slot), role, self._value(slot, role), environment=self.environment
+        )
+        self._protect(value)
+        return value
+
+    def assert_management(self, config: ProvisioningConfig) -> None:
+        for role in {"mgmt_provisioner", *(item["reporting_role"] for item in config.pair_slots)}:
+            self._value("management", role)
+        self.dsn("management", "mgmt_provisioner")
+
+
+type CredentialSource = Credentials | StoredCredentials
 
 
 def database_dsn(

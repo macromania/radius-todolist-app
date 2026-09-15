@@ -33,6 +33,8 @@ MODULE_FILES = (
     "outputs.tf",
     "node-address.sh",
     "load-images.sh",
+    "check-images.sh",
+    "image-contract.sh",
 )
 RECIPE_FILES = {
     "cluster": MODULE_FILES,

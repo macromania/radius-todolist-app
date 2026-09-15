@@ -9,11 +9,16 @@ prove the Azure integration gates or authorize a deployment.
 * `python -m plane_demo.management.provisioner` runs only in management. It holds
   `provisioner_session()` for its lifetime, marks old running operations
   interrupted once, and claims pending work every five seconds.
-* `uv run python scripts/operations/register-radius.py --slot SLOT --config FILE`
-  registers types, credentials, and the environment in an **existing** cluster.
-* `uv run python scripts/operations/deploy-plane.py --slot management --config FILE`
-  initializes management PostgreSQL and deploys management workloads/gateway.
-  Child slots are accepted for explicit administrative deployment, not creation.
+* `make bootstrap` completes the selected foundation and management Radius.
+* `make build` builds and inspects the selected artifacts. Azure runs bootstrap
+  first; local runs build first.
+* `make deploy-management` discovers inputs and deploys management. On Azure it
+  stages one owned, suspended Job and waits for completion. On local it registers
+  prepared Recipes and enters the namespace-owned operator Lease.
+* `deploy-plane.py --slot management --config FILE` is the Azure Job's internal
+  command. It accepts the Job's owned inputs, requires its guard and uses service
+  credentials. Child deployment and legacy workstation credential files are
+  not supported by this entrypoint.
 
 Bootstrap and integration gates run first. The operator has already installed
 management Radius, published reviewed Recipes and image digests, and created
@@ -54,16 +59,15 @@ writing configuration alone is not readiness evidence. No Helm Secret-list
 permission is granted. Workstation registration and child bootstrap retain
 their CLI workspace checks under their already-authorized Entra access.
 
-Every Radius call supplies `.state/azure/radius.yaml`, a workspace, and a
-slot-specific `KUBECONFIG`. It also sets `HOME` to
-`.state/azure/homes/radplanes-SLOT`, whose `.kube/config` symlinks to the exact
-slot kubeconfig and whose `.rad/bin/bicep` symlinks to the original bundled
-compiler. Register and deploy helpers use this same provider command path.
+Every Radius call supplies a configuration in its private temporary workspace,
+a slot-specific workspace name and `KUBECONFIG`. Its scoped `HOME` exposes the
+exact kubeconfig and original bundled Bicep compiler through checked symlinks.
+Register and deploy helpers use this same provider command path.
 No project contexts or files are written into the operator's global kubeconfig.
 An unexpected existing link, redirected home directory, missing kubeconfig, or
 missing/non-executable bundled compiler fails before the Radius command.
 Every kubectl call supplies its context and kubeconfig.
-Runtime Azure CLI state lives in `.state/azure/az`; workstation commands retain
+Runtime Azure CLI state lives in the disposable provider workspace; workstation commands retain
 the operator's existing CLI login without changing the selected subscription.
 Azure calls specify the configured subscription. Workload federation is
 refreshed from the projected token before Azure commands.
@@ -90,37 +94,25 @@ restricted-account workspace seeding (F031) remain in place. Offline environment
 tests check our command construction, not proof of the vendor CLI's internal
 dispatch or a deployed cluster's identity.
 
-## Non-secret immutable operator configuration
+## Public identity and discovered configuration
 
-`/etc/plane-demo/provisioning.json` is mounted from the immutable
-`provisioning-settings` ConfigMap. `PROVISIONING_CONFIG` can select another file.
-The file is loaded once, validated, and recursively frozen.
+The immutable `provisioning-settings` ConfigMap contains only public starting
+settings from `.env`. The worker consumes them as environment variables, not a
+mounted inventory file. `PROVISIONING_CONFIG` and credential-seed files cannot
+activate the worker.
 
-```json
-{
-  "version": 1,
-  "foundation": {},
-  "allocations": {},
-  "coordinatorIdentity": {},
-  "managementCluster": {},
-  "recipes": {},
-  "images": {
-    "api": "REGISTRY.azurecr.io/api@sha256:DIGEST",
-    "provisioner": "REGISTRY.azurecr.io/provisioner@sha256:DIGEST"
-  }
-}
-```
+Startup checks the actual namespace owner, Radius environment and deployed
+images. Azure reads the exact selected subscription deployment outputs and
+registry APIs using its preassigned identity. Local reads consumed Recipe
+bindings, image IDs, node address, Kubernetes Service and CA. The resulting
+`OperatorConfig` or `LocalConfig` is validated and frozen in memory. Any
+temporary parameter/configuration files are command inputs, not discovery or
+recovery authority.
 
-The empty objects and uppercase words above describe the schema, not deployable
-defaults. Populate `foundation`, `coordinatorIdentity`, and `managementCluster`
-with the corresponding **unwrapped** `.state/azure/bootstrap.outputs.json`
-objects. The project/region are `radplanes`/`centralus`. Keep all foundation
-fields documented in [azure-infrastructure.md](azure-infrastructure.md).
-Convert bootstrap's allocation array once:
-
-```python
-allocations = {allocation["slot"]: allocation for allocation in bootstrap["allocations"]}
-```
+The Azure bootstrap-output fields remain defined in
+[azure-infrastructure.md](azure-infrastructure.md). The caller converts the
+allocation array to a slot-keyed object; the operator does not assemble it by
+hand.
 
 Supply management, shared-control/shared-data, and isolated-1-control/data.
 Additional operator-allocated complete pairs are supported; no tenant limit is
@@ -133,8 +125,7 @@ Each allocation includes `certificateName=gateway-STEM-SLOT`,
 These names must match the operator's object-scoped vault role assignments and
 federated identity. A different subject or certificate/account name fails
 configuration validation before deployment.
-Legacy configuration without a selected identity retains its original names
-during the command migration.
+Selected configuration is required by the normal operator and worker entrypoints.
 
 The shared typed identity lives in
 `plane_demo.management.providers.identity`; `scripts/operations/config.py`
@@ -142,8 +133,8 @@ retains `.env` I/O and re-exports its public types. Selected identity is distinc
 from discovered configuration. Administrative DTOs may include public
 `bootstrapIdentity` settings, but must not include optional demo-key values.
 Providers derive Radius groups, contexts, namespaces, and project labels from
-that identity and accept an explicit temporary workspace. The worker's remaining
-file-backed startup/configuration path is still being replaced.
+that identity and use an explicit temporary workspace. The worker has no working
+PVC or durable workstation-directory dependency.
 
 Azure Radius installation uses the native CLI helper:
 
@@ -173,13 +164,15 @@ multiple operator IPs. Invalid, private, multicast, IPv6, or broader ranges fail
 before provisioning. These checks enforce the existing bootstrap address plan,
 not an additional tenant limit.
 
-`recipes` is the dictionary from `recipes.json`, with keys `cluster`,
+The discovered `recipes` dictionary has keys `cluster`,
 `postgresql`, `gateway`, and `redis`. Each requires `reference` (registry/path:tag,
 without `br:`) and `digest` (`sha256:` plus 64 lowercase hexadecimal digits).
-Extra publication metadata is harmless. Registration verifies the actual
-registry digest and both disabled tag attributes: write and delete. It never
-publishes, unlocks, or overwrites a tag. Images require digest references from
-the same project registry.
+Selected registration verifies the effective ACR ABAC repository-permission
+boundary before checking canonical Recipe tags and digests. Radius 0.60.2 does
+not support digest-only Recipe references. Canonical `radius-recipes/*` writes
+are restricted to trusted ARM import; publisher data writes are limited to
+runtime image and staging repositories. Reversible tag locks are not this
+boundary. Images require digest references from the same project registry.
 Image manifest entries may also be objects with a `reference` field; the loader
 validates that reference and normalizes it to the digest-pinned string.
 
@@ -191,11 +184,12 @@ Its Recipe map contains only `Demo.Platform/clusters`, with a **one-entry**
 allocation dictionary. Recipe registry authentication uses management's Radius
 identity, not the coordinator or the not-yet-installed child Radius identity.
 The child-cluster declaration is deployed as application `cluster-SLOT` in that
-environment; its namespace prefix is `radplanes-p-SLOT`. No child cluster is deployed
+environment; its namespace prefix is `STEM-p-INDEX`, where child indexes are 1-4.
+No child cluster is deployed
 in the management application resource group.
 
-The ordinary management/control/data Recipe maps contain only their required
-datastore and gateway Recipes. Each receives its slot's subnet, fixed IP,
+Management exposes all four Recipe bindings for worker discovery. Control and
+data expose their required datastore and gateway Recipes. Each receives its slot's subnet, fixed IP,
 identity, DNS, location, and tag parameters. PostgreSQL
 administrator passwords are **not** stored in environment Recipe parameters.
 Environment registration also passes `registryHost=foundation.registryLoginServer`,
@@ -204,7 +198,7 @@ Environment registration also passes `registryHost=foundation.registryLoginServe
 Recipe-specific OCI authentication through an `azureWorkloadIdentity` SecretStore
 at `radius-system/ENVIRONMENT-registry-auth`, referenced by
 `recipeConfig.bicep.authentication[registryHost].secret`.
-Azure provider credential registration and AcrPull alone do not configure that
+Azure provider credential registration alone does not configure that
 Recipe downloader. Use the slot's Radius identity, not the coordinator identity;
 do not copy Docker authentication or enable anonymous registry access.
 Workspaces are created first with context only and again after group/environment
@@ -221,65 +215,36 @@ Namespace examples:
 * `radplanes-shared-control-control`
 * `radplanes-shared-data-data`
 
-An operator-config change requires an explicit replacement of the immutable
+A public identity change requires explicit replacement of the immutable
 ConfigMap and a controlled provisioner restart when no operation is running.
-Do not remove its PVC or reset operation rows to simulate recovery.
+Do not reset operation rows to simulate recovery.
 
 ## Credential schema and initialization
 
-The operator file defaults to `.state/azure/credentials.json`, mode `0600`
-inside a `0700` directory. New role passwords and independent API keys are
-generated once with `secrets.token_urlsafe(48)`. They are written atomically
-before initialization and reused; missing retained credentials are an error,
-not a reason to reset database passwords.
+`StoredCredentials` reads Azure values from the selected Key Vault and local
+values from owned immutable Kubernetes Secrets. Keys and role passwords are
+created once under the administrative writer guard, then reused. Missing
+credentials for an existing plane fail rather than rotating an established
+database password. Optional `.env` demo keys are persisted into the real owner
+before public configuration is handed to the worker.
 
-```json
-{
-  "version": 1,
-  "planes": {
-    "management": {
-      "demoKey": "GENERATED_MANAGEMENT_KEY",
-      "passwords": {
-        "mgmt_api": "GENERATED_PASSWORD",
-        "mgmt_provisioner": "GENERATED_PASSWORD",
-        "cp_shared": "GENERATED_PASSWORD",
-        "cp_isolated_1": "GENERATED_PASSWORD"
-      },
-      "database": {
-        "host": "ACTUAL.postgres.database.azure.com",
-        "port": 5432,
-        "database": "management",
-        "serverId": "ACTUAL_ARM_RESOURCE_ID"
-      }
-    }
-  }
-}
-```
-
-Each control slot has its own `demoKey`, `database`, and password entries
-`cp_api`, `cp_reconciler`, `dp_reconciler`. Each data slot has an independent
-`demoKey` and an empty `passwords` object. The operator does not need to
-pre-generate this file: `deploy-plane.py` generates the management section and
-records the real database output. Child sections are generated by the provisioner
-on its PVC.
+Management retains `mgmt_api`, `mgmt_provisioner` and the allocated control
+reporting passwords. Each control slot retains `cp_api`, `cp_reconciler` and
+`dp_reconciler`; every API slot has an independent demo key. Database connection
+metadata is read through Radius when a DSN is needed, not stored alongside
+these credentials. Private kubeconfigs, decoded SDK certificates and CLI caches
+are removed with their command workspace.
 
 The runtime `provisioner-runtime` Secret contains:
 
-* `PROVIDER=azure`; `local` fails startup until the real local integration gate.
+* `PROVIDER=azure` or `PROVIDER=local`, matching the selected public identity.
 * `MANAGEMENT_DSN` for **mgmt_provisioner**, not the API or setup login.
-* `PROVISIONING_CONFIG=/etc/plane-demo/provisioning.json`.
-* `PROVISIONING_CREDENTIALS_JSON`: a restricted seed with management's database
-  object and only `mgmt_provisioner` plus the allocated child-reporting passwords.
-  It has neither the management API password nor its demo key.
 
-Instead of secret environment JSON, a manually installed runtime may mount the
-same restricted seed at `/etc/plane-demo/credentials.json` and set
-`PROVISIONING_CREDENTIALS` if needed. The entrypoint validates the management DSN
-against its generated keyword-form libpq DSN and requires the coordinator's
-matching workload-identity client ID, tenant ID, and projected federation token.
-The seed is copied into protected `.state/azure/credentials.json` only on first
-startup. Later starts require its management section to match; they preserve
-already generated child credentials. Never mount the full operator file in an API.
+It contains no credential replay seed or full provisioning inventory. Existing
+obsolete fields are removed with Secret UID/resourceVersion preconditions.
+Startup checks its injected DSN against the service-owned password and current
+database binding. Azure also requires the exact coordinator workload identity.
+An empty worker workspace is normal, not a password-recovery mechanism.
 
 All Azure DSNs use libpq escaping, `sslmode=verify-full`,
 `sslrootcert=/etc/ssl/certs/ca-certificates.crt`, and a bounded connect timeout.
@@ -288,7 +253,7 @@ Runtime Secrets contain only their process's roles:
 | Secret | Connections |
 | --- | --- |
 | `management-api-runtime` | management `mgmt_api`, management key |
-| `provisioner-runtime` | management `mgmt_provisioner`, restricted seed/config |
+| `provisioner-runtime` | management `mgmt_provisioner` and provider selection |
 | `control-api-runtime` | local `cp_api`, control key |
 | `control-reconciler-runtime` | local `cp_reconciler`, parent allocated reporting login |
 | `data-reconciler-runtime` | control `dp_reconciler`, pair/project/namespace |
@@ -298,7 +263,7 @@ Redis is injected through the lowercase Radius `redis` connection, not duplicate
 by this coordinator. Data API RBAC grants only ConfigMap `get`; data reconciler
 gets only `get/create/patch` in that data namespace. Public management/control
 accounts and the challenge account have no service-account token. The provisioner
-PVC uses a dedicated Azure Disk StorageClass with the required resource tags.
+does not use a working-state PVC.
 The application declaration must retain one replica and a non-overlapping
 `Recreate` strategy; the session lock is an additional safeguard, not a rollout
 strategy.
@@ -343,7 +308,7 @@ service accounts do not receive that identity.
    Observation Jobs use unique names and remove their temporary Job/Secret.
    Neither a ConfigMap nor an operator file is initialization authority.
 
-No setup password is retained in the credential file or a runtime Secret.
+No setup password is retained in the service credential store or a runtime Secret.
 An incomplete or unversioned database is not adopted. A matching committed
 database is observed, not initialized again. The provisioner still marks
 interrupted operations explicitly and never resumes them automatically.
@@ -440,17 +405,13 @@ Omit it or use `[]` for portable defaults:
 * On the operator machine: the current Python executable and the absolute
   project path to `scripts/operations/run-certificate-job.py`.
 
-When constructing management's ConfigMap, deployment fills an omitted/empty
-`certificateCommand` with the explicit container command shown above. The
-operator-side configuration remains unchanged.
+API-discovered runtime configuration uses the portable in-container default.
+The public identity ConfigMap contains no executable paths.
 
 An explicit override is trusted operator configuration, never a shell fragment
 or tenant input. Avoid putting a workstation-only executable path into the
-ConfigMap mounted inside the provisioner. The layout change does not rewrite
-saved operator configuration or live ConfigMaps: before deploying the new image,
-regenerate any override that still names `/app/scripts/run-certificate-job.py`
-to use `/app/scripts/operations/run-certificate-job.py`. Existing image evidence applies
-to the original layout, not the rebuilt image. The driver appends:
+runtime. Existing image evidence applies to its original source revision,
+not to a newly rebuilt image. The driver appends:
 
 ```text
 --slot SLOT --context STEM-SLOT --namespace APPLICATION_NAMESPACE

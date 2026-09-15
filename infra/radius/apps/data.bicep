@@ -3,6 +3,9 @@ extension radius
 param application string
 param environment string
 param image string
+param ownershipLabels object = {
+  'plane-demo/project': 'radplanes'
+}
 param gatewayPhase string = 'challenge'
 param certificateSecretUri string = ''
 
@@ -21,6 +24,7 @@ module api '../modules/workload.bicep' = {
     environment: environment
     name: 'data-api'
     image: image
+    ownershipLabels: ownershipLabels
     entrypoint: 'plane_demo.data.api'
     serviceAccount: 'data-api'
     runtimeServiceAccount: 'data-api-runtime'
@@ -42,6 +46,7 @@ module reconciler '../modules/workload.bicep' = {
     environment: environment
     name: 'data-reconciler'
     image: image
+    ownershipLabels: ownershipLabels
     entrypoint: 'plane_demo.data.reconciler'
     serviceAccount: 'data-reconciler'
     runtimeSecretName: 'data-reconciler-runtime'
@@ -55,6 +60,7 @@ module challenge '../modules/challenge.bicep' = {
     application: application
     environment: environment
     image: image
+    ownershipLabels: ownershipLabels
   }
 }
 

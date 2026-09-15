@@ -33,8 +33,8 @@ demo_kube() {
     --namespace "$DEMO_NAMESPACE" --request-timeout=30s "$@"
 }
 
-demo_open_slot() {
-  local cluster cluster_id node_ids node_json kube_json namespace_json expected_server host
+demo_open_cluster() {
+  local cluster cluster_id node_ids node_json kube_json expected_server host
   demo_slot "$1" || return
   mkdir -m 700 "$DEMO_WORKSPACE/$DEMO_SLOT"
   DEMO_KUBECONFIG="$DEMO_WORKSPACE/$DEMO_SLOT/kubeconfig"
@@ -105,6 +105,10 @@ demo_open_slot() {
     kubelogin convert-kubeconfig --kubeconfig "$DEMO_KUBECONFIG" \
       --context "$DEMO_CONTEXT" --login azurecli || return
   fi
+}
+
+demo_check_namespace() {
+  local namespace_json
   namespace_json=$(demo_kube get namespace "$DEMO_NAMESPACE" --output json) || return
   printf '%s' "$namespace_json" | jq -e --arg namespace "$DEMO_NAMESPACE" \
     --arg project "$DEMO_PROJECT" --arg deployment "$DEMO_DEPLOYMENT" --arg env "$DEMO_ENV" '
@@ -112,6 +116,11 @@ demo_open_slot() {
       .metadata.labels["plane-demo/deployment"]==$deployment and
       .metadata.labels["plane-demo/environment"]==$env
     ' >/dev/null || { demo_error 'Application namespace ownership differs'; return 1; }
+}
+
+demo_open_slot() {
+  demo_open_cluster "$1" || return
+  demo_check_namespace
 }
 
 demo_endpoint() {

@@ -4,6 +4,10 @@ Run the three-plane demo on Docker Desktop one step at a time. You will create
 tenants, inspect each plane, change configuration, disconnect parent databases,
 and restore the system. Each step explains what it demonstrates.
 
+The state-removal refactor still needs a fresh end-to-end run. The checkpoints
+below are requirements to verify, not claims that the current revision passed.
+See [FINDINGS.md](FINDINGS.md) for revision-specific results.
+
 Run this guide from the repository root. The order is:
 
 1. [Prepare the workspace](#1-prepare-the-workspace).
@@ -43,11 +47,8 @@ isolated tenants get a separate pair.
 
 ## 1. Prepare the workspace
 
-You prepare the tools and isolate this run's state before creating resources.
-
-Use one clean checkout per demo run. State contains credentials and cluster
-identities, so do not clear `.state` to bypass an earlier attempt. If you need
-a fresh checkout:
+You prepare the tools and choose the deployment identity before creating resources.
+Use committed source. A fresh checkout does not need a previous `.state` folder:
 
 ```bash
 git worktree add --detach ../plane-demo-local HEAD &&
@@ -97,16 +98,18 @@ contents and redacts demo keys. Optional nonsecret arguments are forwarded with
 For demo keys, forward `--prompt-demo-key SLOT` or
 `--demo-key-from-env SLOT=VARIABLE`, never the key value itself.
 
-The deployment targets below still use their existing explicit configuration
-and `.state` records. Initializing `.env` does not yet retarget those commands.
+The commands below use this `.env`. `ENV` selects the environment only when
+initializing it; it does not override an existing selection. Local credentials
+belong to Kubernetes. No Azure login, subscription, Key Vault or cloud registry
+is needed.
 
 Local commands resolve Docker Desktop's `desktop-linux` context and pin its
 local Unix socket. They do not change the global Docker context or use another
 container runtime. Keep source unchanged during the demo; image and export
 checks bind the deployment to the committed source.
 
-Never run two local deployments concurrently: they use the same cluster names
-and these loopback host ports:
+Never run two local deployments concurrently: deployment-specific names still
+use the same reserved loopback host ports:
 
 | Slot | Gateway | Kubernetes API |
 |---|---:|---:|
@@ -124,23 +127,19 @@ planes through local Recipes.
 ### Build and inspect the images
 
 ```bash
-make local-prepare
-make local-executor-build CONFIRM_LOCAL=yes
-make local-executor-inspect CONFIRM_LOCAL=yes
-make local-runtime-build CONFIRM_LOCAL=yes
-make local-runtime-inspect CONFIRM_LOCAL=yes
+make build CONFIRM_LOCAL=yes
+make inspect-build
 ```
 
-The first image pair contains Radius execution tools; the second contains the
-API and provisioner. Inspection checks contents rather than trusting a tag.
-Existing immutable application image tags are not overwritten.
+Build prepares the API, provisioner, Radius executor/operator, charts, Terraform
+and provider dependencies before cluster creation. Public downloads belong to
+this stage. Inspection checks actual bytes and runtime permissions rather than
+trusting a tag. Existing immutable image tags are not overwritten.
 
 ### Create management and install Radius
 
 ```bash
-make local-bootstrap CONFIRM_LOCAL=yes
-make local-install-radius CONFIRM_LOCAL=yes
-make local-runtime-load CONFIRM_LOCAL=yes
+make bootstrap CONFIRM_LOCAL=yes
 ```
 
 Checkpoint: only management exists. Bootstrap verifies management Secret
@@ -148,15 +147,16 @@ encryption. Child clusters will be created by management Radius, not by
 host-side `kind create`.
 
 ```bash
-docker --context desktop-linux ps \
-  --filter name=radplanes-local- --format 'table {{.Names}}\t{{.Status}}'
-make local-setup CONFIRM_LOCAL=yes
-make local-deploy-management CONFIRM_LOCAL=yes
+make deploy-management CONFIRM_LOCAL=yes
+make kube ARGS='management get pods,pvc'
+make kube ARGS='management logs deployment/provisioner --tail=20'
 ```
 
-Setup registers Recipes; deployment initializes management PostgreSQL and
-starts the API/provisioner. Neither creates a child cluster. Use the shell
-controls below to inspect management before submitting a tenant.
+Deployment registers the prepared Recipes, initializes management PostgreSQL,
+and starts the API/provisioner. It waits for actual completion and creates no
+child cluster. To inspect Recipe registration as a separate manual checkpoint,
+run `make local-setup CONFIRM_LOCAL=yes` before deployment. No saved setup record
+or host credential bundle is required.
 
 ## 3. Run the manual scenarios
 
@@ -169,31 +169,23 @@ You obtain verified access and give each command an explicit plane and cluster.
 In your main terminal, from the demo checkout:
 
 ```bash
-export DEMO_ENV=local
-export STATE=".state/$DEMO_ENV"
 set -o pipefail
 umask 077
-mkdir -p "$STATE/manual"
+NOTES=$(mktemp -d "${TMPDIR:-/tmp}/plane-manual.XXXXXX")
 
-api() { ./scripts/harness/api.sh "$DEMO_ENV" "$@"; }
+api() { bash scripts/operations/api.sh "$@"; }
+k() { bash scripts/operations/kube.sh "$@"; }
+endpoint() { bash scripts/operations/endpoints.sh "$1" | jq -er '.url'; }
 
-export_state() {
+report() {
   uv run --no-sync python scripts/harness/local/export-state.py --once
 }
 
-k() {
-  local slot="$1"
-  shift
-  local file context namespace
-  file=$(jq -er --arg s "$slot" '.targets[$s].kubeconfig' "$STATE/acceptance.json") || return
-  context=$(jq -er --arg s "$slot" '.targets[$s].context' "$STATE/acceptance.json") || return
-  namespace=$(jq -er --arg s "$slot" '.targets[$s].namespace' "$STATE/acceptance.json") || return
-  kubectl --kubeconfig "$STATE/$file" --context "$context" \
-    --namespace "$namespace" --request-timeout=30s "$@"
+journal() {
+  k "$1" get configmap "plane-demo-fault-$2" -o json | jq -er '.data["record.json"] | fromjson'
 }
 
-export_state
-jq '{ready_for_onboarding, published_slots, pending_slots}' "$STATE/export-status.json"
+report
 k management get pods,pvc
 k management logs deployment/provisioner --tail=20
 api management GET /healthz
@@ -203,14 +195,16 @@ These shortcuts keep the commands below short:
 
 | Command | What it does |
 |---|---|
-| `api management GET ...` | Sends one HTTP request using the exported URL/key |
-| `k shared-data get ...` | Selects that slot's exported kubeconfig, context, and namespace |
-| `export_state` | Refreshes verified access files; creates no tenants |
+| `api management GET ...` | Discovers the endpoint/key and sends one HTTP request |
+| `k shared-data get ...` | Uses fresh scoped access, then discards its temporary kubeconfig |
+| `report` | Prints current topology and tenant status; creates no tenants or inventory file |
+| `journal SLOT COMPONENT` | Reads the fault record from its owning Kubernetes ConfigMap |
 
-Export exit **3** means expected child endpoints are incomplete. At this point,
-expect only management exported, `ready_for_onboarding: true`, bound
-`postgres-data` and `provisioner-state` PVCs, `provisioner_ready`, and HTTP 200.
-Other errors are blockers. Run export again after a new pair finishes provisioning.
+Initially the report contains only management and no tenants. Require a bound
+`postgres-data` PVC, `provisioner_ready`, and HTTP 200 before onboarding.
+The provisioner has no working-state PVC. Reports fail nonzero on observation
+errors. `$NOTES` holds only your optional response comparisons. No command
+discovers infrastructure or credentials from those notes.
 
 Every successful observation must show HTTP 200. The API helper prints HTTP
 status to stderr and JSON to stdout; non-2xx requests return nonzero.
@@ -236,8 +230,8 @@ Expect 200, then 404. Send the request once:
 ```bash
 api management POST /tenants \
   '{"tenant_id":"shared-a","isolation":"shared","initial_message":"alpha"}' \
-  > "$STATE/manual/shared-a-request.json"
-OP_A=$(jq -er '.operation_id' "$STATE/manual/shared-a-request.json")
+  > "$NOTES/shared-a-request.json"
+OP_A=$(jq -er '.operation_id' "$NOTES/shared-a-request.json")
 api management GET "/operations/$OP_A"
 ```
 
@@ -256,13 +250,13 @@ installs child Radius and deploys their applications. Require both
 Stop on `failed` or `interrupted`; do not reset state to force a retry.
 
 ```bash
-export_state
+report
 api control:shared GET /tenants/shared-a
 api data:shared GET /tenants/shared-a
 k shared-data get configmap tenant-shared-a -o json | jq .data
 ```
 
-Expect three exported slots. Control should become `applied`; data should
+Expect three discovered endpoints. Control should become `applied`; data should
 return `alpha`, version 1, and counter 0. Match the `onboarding_id` across
 the three APIs.
 
@@ -271,7 +265,10 @@ return endpoint URLs; endpoint and cluster discovery use provider APIs.
 
 ```bash
 api management GET /tenants/shared-a \
-  | jq '{pair_id}' > "$STATE/manual/shared-pair.json"
+  | jq '{pair_id}' > "$NOTES/shared-pair.json"
+for slot in shared-control shared-data; do
+  k "$slot" get namespace kube-system -o jsonpath='{.metadata.uid}{"\n"}'
+done > "$NOTES/shared-clusters-before.txt"
 ```
 
 #### Optional admission checks
@@ -333,10 +330,13 @@ Wait for `applied` and the `bravo` response, then compare placement:
 
 ```bash
 api management GET /tenants/shared-b \
-  | jq '{pair_id}' > "$STATE/manual/shared-b-pair.json"
-diff -u "$STATE/manual/shared-pair.json" "$STATE/manual/shared-b-pair.json"
-export_state
-jq '.targets | keys' "$STATE/acceptance.json"
+  | jq '{pair_id}' > "$NOTES/shared-b-pair.json"
+diff -u "$NOTES/shared-pair.json" "$NOTES/shared-b-pair.json"
+report | jq '.endpoints | keys'
+for slot in shared-control shared-data; do
+  k "$slot" get namespace kube-system -o jsonpath='{.metadata.uid}{"\n"}'
+done > "$NOTES/shared-clusters-after.txt"
+diff -u "$NOTES/shared-clusters-before.txt" "$NOTES/shared-clusters-after.txt"
 ```
 
 Expect no diff and still three slots. The new shared tenant added records,
@@ -357,11 +357,13 @@ k management logs deployment/provisioner --tail=20
 Wait for provisioning success and management readiness:
 
 ```bash
-export_state
+report
 api control:isolated-1 GET /tenants/isolated-c
 api data:isolated-1 GET /tenants/isolated-c
-jq -r '.targets | to_entries[] |
-  [.key, .value.cluster_id, .value.cluster_uid] | @tsv' "$STATE/acceptance.json"
+for slot in management shared-control shared-data isolated-1-control isolated-1-data; do
+  printf '%s ' "$slot"
+  k "$slot" get namespace kube-system -o jsonpath='{.metadata.uid}{"\n"}'
+done
 ```
 
 Expect five slots with five distinct cluster UIDs. The isolated tenant has
@@ -424,18 +426,18 @@ Capture a baseline after updates have applied:
 ```bash
 POLL_FROM=$(uv run --no-sync python -c \
   'from datetime import UTC, datetime; print(datetime.now(UTC).isoformat())')
-api management GET /tenants/shared-a > "$STATE/manual/m-before.json"
-api control:shared GET /tenants/shared-a > "$STATE/manual/c-before.json"
-api data:shared GET /tenants/shared-a > "$STATE/manual/d-before.json"
+api management GET /tenants/shared-a > "$NOTES/m-before.json"
+api control:shared GET /tenants/shared-a > "$NOTES/c-before.json"
+api data:shared GET /tenants/shared-a > "$NOTES/d-before.json"
 sleep 15
 k shared-control logs deployment/control-reconciler \
   --since-time="$POLL_FROM" --timestamps=true --tail=20
-api management GET /tenants/shared-a > "$STATE/manual/m-after.json"
-api control:shared GET /tenants/shared-a > "$STATE/manual/c-after.json"
-api data:shared GET /tenants/shared-a > "$STATE/manual/d-after.json"
-diff -u "$STATE/manual/m-before.json" "$STATE/manual/m-after.json"
-diff -u "$STATE/manual/c-before.json" "$STATE/manual/c-after.json"
-diff -u "$STATE/manual/d-before.json" "$STATE/manual/d-after.json"
+api management GET /tenants/shared-a > "$NOTES/m-after.json"
+api control:shared GET /tenants/shared-a > "$NOTES/c-after.json"
+api data:shared GET /tenants/shared-a > "$NOTES/d-after.json"
+diff -u "$NOTES/m-before.json" "$NOTES/m-after.json"
+diff -u "$NOTES/c-before.json" "$NOTES/c-after.json"
+diff -u "$NOTES/d-before.json" "$NOTES/d-after.json"
 ```
 
 Require a successful `control_poll` after `$POLL_FROM`, with `succeeded` greater
@@ -445,9 +447,9 @@ its updates while polling management. No successful poll means no proof yet.
 Read a timeline in small pages:
 
 ```bash
-api control:shared GET '/tenants/shared-a?limit=2' > "$STATE/manual/page.json"
-jq '{timeline, next_after_event_id}' "$STATE/manual/page.json"
-CURSOR=$(jq -r '.next_after_event_id' "$STATE/manual/page.json")
+api control:shared GET '/tenants/shared-a?limit=2' > "$NOTES/page.json"
+jq '{timeline, next_after_event_id}' "$NOTES/page.json"
+CURSOR=$(jq -r '.next_after_event_id' "$NOTES/page.json")
 if [ "$CURSOR" != null ]; then
   api control:shared GET "/tenants/shared-a?limit=2&after_event_id=$CURSOR"
 fi
@@ -460,10 +462,9 @@ configuration changes and data application.
 Check rejected requests:
 
 ```bash
-API_URL=$(jq -er '.management.url' "$STATE/endpoints.json")
-curl -sS -o /dev/null -w 'HTTP %{http_code}\n' "$API_URL/tenants/shared-a"
-curl -sS -o /dev/null -w 'HTTP %{http_code}\n' \
-  -H 'X-Demo-Key: wrong' "$API_URL/tenants/shared-a"
+curl -q -sS -o /dev/null -w 'HTTP %{http_code}\n' "$(endpoint management)/tenants/shared-a"
+curl -q -sS -o /dev/null -w 'HTTP %{http_code}\n' \
+  -H 'X-Demo-Key: wrong' "$(endpoint management)/tenants/shared-a"
 api management POST /tenants \
   '{"tenant_id":"Bad ID","isolation":"shared","initial_message":"invalid"}'
 api management POST /tenants \
@@ -474,7 +475,7 @@ Expect 401, 401, 422, and 409. The duplicate must not reset control's configurat
 or the counter. Repeat the curl checks for the child API URLs listed by:
 
 ```bash
-jq -r '.management.url, (.pairs[] | .control.url, .data.url)' "$STATE/endpoints.json"
+make endpoints ARGS=all
 ```
 
 Inspect the data API identity without displaying Secrets:
@@ -482,7 +483,7 @@ Inspect the data API identity without displaying Secrets:
 ```bash
 k shared-data get deployment data-api \
   -o jsonpath='{.spec.template.spec.serviceAccountName}{"\n"}'
-DATA_NS=$(jq -er '.targets["shared-data"].namespace' "$STATE/acceptance.json")
+DATA_NS=$(k shared-data get deployment data-api -o jsonpath='{.metadata.namespace}')
 API_ID="system:serviceaccount:$DATA_NS:data-api-runtime"
 k shared-data auth can-i get configmaps --as="$API_ID"
 k shared-data auth can-i get secret/data-reconciler-runtime --as="$API_ID"
@@ -499,8 +500,8 @@ The full in-Pod/named-permission check is available as
 You show that an existing control/data pair can keep changing configuration and
 serving requests without reaching management's database.
 
-Finish onboarding and export all five slots before faults. Open a second
-terminal in the same checkout and set the same `DEMO_ENV` and `STATE`.
+Finish onboarding and inspect all five endpoints before faults. Open a second
+terminal in the same checkout. It reads the same `.env`; no export is needed.
 Do not stop an API to simulate a database outage.
 The local fault helper uses the reconciler Pod's network namespace because
 kind's default CNI does not enforce NetworkPolicy.
@@ -508,9 +509,8 @@ kind's default CNI does not enforce NetworkPolicy.
 In the second terminal:
 
 ```bash
-uv run --no-sync python scripts/harness/fault-parent-link.py \
-  --config "$STATE/acceptance.json" \
-  --slot shared-control --component control-reconciler --duration 300 --execute
+make fault CONFIRM_LOCAL=yes \
+  ARGS='--slot shared-control --component control-reconciler --duration 300'
 ```
 
 This blocks shared control's connection to management PostgreSQL, not the
@@ -520,21 +520,16 @@ fresh/existing database connections, holds the fault, and restores it.
 In the main terminal:
 
 ```bash
-ls -t "$STATE"/evidence/fault-*.json
-```
-
-Use the exact new filename:
-
-```bash
-FAULT_FILE="$STATE/evidence/fault-REPLACE_WITH_NEW_ID.json"
-jq '{slot, component, outcome, blocked_at, restored}' "$FAULT_FILE"
+FAULT_SLOT=shared-control
+FAULT_COMPONENT=control-reconciler
+journal "$FAULT_SLOT" "$FAULT_COMPONENT" | jq '{slot, component, outcome, blocked_at, restored}'
 ```
 
 Require `shared-control`, `control-reconciler`, and `blocked_verified` before
 continuing. While the helper holds the fault:
 
 ```bash
-api management GET /tenants/shared-a > "$STATE/manual/m-blocked-before.json"
+api management GET /tenants/shared-a > "$NOTES/m-blocked-before.json"
 api control:shared PUT /tenants/shared-a/configuration '{"message":"without-management"}'
 api data:shared GET /tenants/shared-a
 api data:shared POST /tenants/shared-a/counter
@@ -544,16 +539,17 @@ The new message should reach data through control's own database. Keep reading
 and incrementing for at least 60 seconds, then:
 
 ```bash
-api management GET /tenants/shared-a > "$STATE/manual/m-blocked-after.json"
-diff -u "$STATE/manual/m-blocked-before.json" "$STATE/manual/m-blocked-after.json"
+api management GET /tenants/shared-a > "$NOTES/m-blocked-after.json"
+diff -u "$NOTES/m-blocked-before.json" "$NOTES/m-blocked-after.json"
 ```
 
 Expect no new management reports during blockage. After the fault terminal
 finishes:
 
 ```bash
-jq '{outcome, restored, physical_restored, restoration_started_at, restored_at}' "$FAULT_FILE"
-RESTORE_FROM=$(jq -er '.restoration_started_at' "$FAULT_FILE")
+journal "$FAULT_SLOT" "$FAULT_COMPONENT" \
+  | jq '{outcome, restored, physical_restored, restoration_started_at, restored_at}'
+RESTORE_FROM=$(journal "$FAULT_SLOT" "$FAULT_COMPONENT" | jq -er '.restoration_started_at')
 k shared-control logs deployment/control-reconciler \
   --since-time="$RESTORE_FROM" --timestamps=true --tail=20
 ```
@@ -570,20 +566,27 @@ then catch up to the newest configuration when control becomes reachable.
 Start only after the preceding fault is restored. Save the current data response:
 
 ```bash
-api data:shared GET /tenants/shared-a > "$STATE/manual/outage-baseline.json"
-jq . "$STATE/manual/outage-baseline.json"
+api data:shared GET /tenants/shared-a > "$NOTES/outage-baseline.json"
+jq . "$NOTES/outage-baseline.json"
 ```
 
 In the fault terminal:
 
 ```bash
-uv run --no-sync python scripts/harness/fault-parent-link.py \
-  --config "$STATE/acceptance.json" \
-  --slot shared-data --component data-reconciler --duration 300 --execute
+make fault CONFIRM_LOCAL=yes \
+  ARGS='--slot shared-data --component data-reconciler --duration 300'
 ```
 
-Select the new journal as `FAULT_FILE`. Require `shared-data`, `data-reconciler`,
-and `blocked_verified`. Now data cannot read control PostgreSQL.
+In the main terminal, select the owning journal:
+
+```bash
+FAULT_SLOT=shared-data
+FAULT_COMPONENT=data-reconciler
+journal "$FAULT_SLOT" "$FAULT_COMPONENT" | jq '{slot, component, outcome, blocked_at, restored}'
+```
+
+Require `shared-data`, `data-reconciler`, and `blocked_verified`. Now data cannot
+read control PostgreSQL.
 
 ```bash
 api control:shared PUT /tenants/shared-a/configuration '{"message":"queued-first"}'
@@ -615,7 +618,7 @@ Do not replace the data reconciler whose network namespace owns the local fault.
 After restoration:
 
 ```bash
-jq '{outcome, restored, physical_restored}' "$FAULT_FILE"
+journal "$FAULT_SLOT" "$FAULT_COMPONENT" | jq '{outcome, restored, physical_restored}'
 api control:shared GET /tenants/shared-a
 api data:shared GET /tenants/shared-a
 k shared-data get configmap tenant-shared-a -o json | jq .data
@@ -639,9 +642,9 @@ Prefer letting the timer finish. Ctrl-C requests restoration; still inspect
 the journal. If the process has stopped without confirmed restoration:
 
 ```bash
-uv run --no-sync python scripts/harness/fault-parent-link.py \
-  --config "$STATE/acceptance.json" --restore "$FAULT_FILE" --execute
-jq '{outcome, restored, physical_restored}' "$FAULT_FILE"
+make fault CONFIRM_LOCAL=yes \
+  ARGS="--slot $FAULT_SLOT --component $FAULT_COMPONENT --restore"
+journal "$FAULT_SLOT" "$FAULT_COMPONENT" | jq '{outcome, restored, physical_restored}'
 ```
 
 Do not use `kill -9`, replace the faulted reconciler, or delete its cluster to
@@ -656,9 +659,9 @@ After all faults are restored and operations completed, replace one datastore
 at a time. Start with the shared pair:
 
 ```bash
-api management GET /tenants/shared-a > "$STATE/manual/m-persist.json"
-api control:shared GET /tenants/shared-a > "$STATE/manual/c-persist.json"
-api data:shared GET /tenants/shared-a > "$STATE/manual/d-persist.json"
+api management GET /tenants/shared-a > "$NOTES/m-persist.json"
+api control:shared GET /tenants/shared-a > "$NOTES/c-persist.json"
+api data:shared GET /tenants/shared-a > "$NOTES/d-persist.json"
 k shared-control get pod postgres-0 -o custom-columns=NAME:.metadata.name,UID:.metadata.uid
 k shared-data get pod redis-0 -o custom-columns=NAME:.metadata.name,UID:.metadata.uid
 k shared-control get pvc postgres-data \
@@ -676,12 +679,12 @@ Repeat the Pod/PVC reads. Require new Pod UIDs but unchanged PVC UIDs and volume
 names. Do not delete PVCs. With no intervening state-changing API requests:
 
 ```bash
-api management GET /tenants/shared-a > "$STATE/manual/m-persist-after.json"
-api control:shared GET /tenants/shared-a > "$STATE/manual/c-persist-after.json"
-api data:shared GET /tenants/shared-a > "$STATE/manual/d-persist-after.json"
-diff -u "$STATE/manual/m-persist.json" "$STATE/manual/m-persist-after.json"
-diff -u "$STATE/manual/c-persist.json" "$STATE/manual/c-persist-after.json"
-diff -u "$STATE/manual/d-persist.json" "$STATE/manual/d-persist-after.json"
+api management GET /tenants/shared-a > "$NOTES/m-persist-after.json"
+api control:shared GET /tenants/shared-a > "$NOTES/c-persist-after.json"
+api data:shared GET /tenants/shared-a > "$NOTES/d-persist-after.json"
+diff -u "$NOTES/m-persist.json" "$NOTES/m-persist-after.json"
+diff -u "$NOTES/c-persist.json" "$NOTES/c-persist-after.json"
+diff -u "$NOTES/d-persist.json" "$NOTES/d-persist-after.json"
 ```
 
 Repeat the capture/replace/compare procedure for the remaining datastores:
@@ -706,22 +709,19 @@ owned clusters are gone.
 Restore all faults and paused workloads, then:
 
 ```bash
-export_state
-jq '.targets | keys' "$STATE/acceptance.json"
-make local-clean-plan
-make local-clean CONFIRM_LOCAL=yes
+make clean-plan
+make clean CONFIRM_LOCAL=yes
+make verify-clean
 ```
 
-The normal local cleaner requires all five exported slots. A partial/failed
-topology needs explicit recovery review, not direct child-cluster deletion.
-Use the exact cleanup record printed by the command:
+Cleanup reads current Docker, Kubernetes, Radius and Terraform ownership.
+It does not require all five slots to have been created or a saved export.
+Incomplete or contradictory ownership stops deletion; it does not authorize
+direct child-cluster deletion. Verification needs no cleanup record path.
 
-```bash
-make local-verify LOCAL_CLEANUP_RECORD=.state/local/evidence/cleanup-REPLACE_WITH_PRINTED_ID.json
-```
-
-Require `resources_removed`. Images/cache, the shared kind network, and protected
-state are retained intentionally. See [local cleanup](docs/local-cleanup.md).
+Require `resources_removed`. Images/cache and the shared kind network are
+retained intentionally. Historical workstation records are not consulted or
+bulk-deleted. See [local cleanup](docs/local-cleanup.md).
 
 ## References for the walkthrough
 

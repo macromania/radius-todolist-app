@@ -42,7 +42,8 @@ def handler(archive: Path, expected: str, *, module_root: Path = Path("/module")
     return StaticModule
 
 
-def serve(module_root: Path = Path("/module")) -> None:
+def serve(module_root: Path | None = None) -> None:
+    module_root = module_root or Path(os.environ.get("MODULE_ROOT", "/module"))
     sha = os.environ["MODULE_SHA256"]
     server = http.server.HTTPServer(
         ("0.0.0.0", 18080),

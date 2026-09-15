@@ -15,11 +15,14 @@ import yaml
 from plane_demo.management.providers import workloads
 from plane_demo.management.providers.commands import (
     Commands,
-    create_json,
     write_json,
     write_private,
 )
-from plane_demo.management.providers.credentials import Credentials
+from plane_demo.management.providers.credentials import (
+    Credentials,
+    CredentialSource,
+    credential_roles,
+)
 from plane_demo.management.providers.local_config import (
     SCOPE,
     SLOTS,
@@ -27,6 +30,7 @@ from plane_demo.management.providers.local_config import (
     private_ipv4,
     same_radius_id,
 )
+from plane_demo.management.providers.secret_store import CredentialScope
 from plane_demo.management.provisioning import Cluster, PairResult, ProvisioningError
 
 TYPES = {
@@ -40,37 +44,8 @@ PYTHON_IMAGE = (
     "docker.io/library/python:3.13.12-alpine3.23@sha256:"
     "bb1f2fdb1065c85468775c9d680dcd344f6442a2d1181ef7916b60a623f11d40"
 )
-TERRAFORM_INIT = """
-import hashlib,io,os,platform,urllib.request,zipfile
-from pathlib import Path
-arch={"aarch64":"arm64","x86_64":"amd64"}[platform.machine()]
-expected={"arm64":"8891e9dcedc9e3b8950bc6af9d4d8af1f4cfade3062f53b9dc403a89f6ce8c9c",
-          "amd64":"d25ce7b6902013ad905db3d2eab0be4cd905887fe88b81a6171b8d5503c31f3d"}[arch]
-url=f"https://releases.hashicorp.com/terraform/1.15.8/terraform_1.15.8_linux_{arch}.zip"
-with urllib.request.urlopen(url,timeout=90) as response:
-    archive=response.read(40000001)
-if len(archive)>40000000 or hashlib.sha256(archive).hexdigest()!=expected:
-    raise RuntimeError("terraform_archive_mismatch")
-binary=zipfile.ZipFile(io.BytesIO(archive)).read("terraform")
-for name in ("/terraform","/terraform/.terraform-global"):
-    Path(name).mkdir(exist_ok=True,mode=0o700)
-    os.chown(name,0,0)
-    os.chmod(name,0o700)
-for name in ("/terraform/terraform","/terraform/.terraform-global/terraform"):
-    if Path(name).exists():
-        os.chown(name,0,0)
-    Path(name).write_bytes(binary)
-    os.chmod(name,0o700)
-    os.chown(name,65532,65532)
-marker=Path("/terraform/.terraform-global/.terraform-ready")
-if marker.exists():
-    os.chown(marker,0,0)
-marker.touch(mode=0o600)
-os.chmod(marker,0o600)
-os.chown(marker,65532,65532)
-for name in ("/terraform/.terraform-global","/terraform"):
-    os.chown(name,65532,65532)
-"""
+TERRAFORM_INIT = "/opt/radplanes/bootstrap/terraform-init.py"
+PREPARED_ASSETS = Path("/opt/radplanes/bootstrap")
 
 
 def decode_access(value: str, context: str, *, child: bool) -> tuple[dict, bytes, str]:
@@ -121,10 +96,11 @@ class LocalProvider:
         self,
         config: LocalConfig,
         root: Path,
-        credentials: Credentials,
+        credentials: CredentialSource,
         commands: Commands | None = None,
         *,
         workspace: Path | None = None,
+        prepared_assets: Path = PREPARED_ASSETS,
     ):
         if credentials.environment != "local":
             raise ProvisioningError("credentials_environment_mismatch")
@@ -135,8 +111,9 @@ class LocalProvider:
         self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.state.chmod(0o700)
         self.config, self.credentials = config, credentials
+        self.prepared_assets = prepared_assets
         self.radius_scope = f"/planes/radius/local/resourceGroups/{config.radius_group}"
-        if credentials.has_database("management"):
+        if isinstance(credentials, Credentials) and credentials.has_database("management"):
             database = credentials.plane("management")["database"]
             if (
                 database.get("host") != config.management_cluster["nodeAddress"]
@@ -153,7 +130,11 @@ class LocalProvider:
             if config.identity
             else None,
         )
-        self.commands.protect(credentials._data)
+        credentials.bind(
+            lambda slot: workloads.read_database(self, slot),
+            self.commands.protect,
+            lambda: self.commands.guard(),
+        )
         self.radius_config = self.state / "radius.yaml"
         self.config_path = self.state / "provisioning.json"
         write_json(self.config_path, config.to_dict())
@@ -334,6 +315,49 @@ class LocalProvider:
                 raise ProvisioningError("management_radius_mismatch")
 
     def verify_recipes(self) -> None:
+        from plane_demo.management.providers.local_artifacts import (
+            binding_inputs,
+            module_descriptor,
+            prepared,
+        )
+
+        self._verified = False
+        try:
+            bundle = prepared(self.prepared_assets)
+        except (OSError, ValueError, KeyError, TypeError):
+            raise ProvisioningError("local_prepared_assets_missing") from None
+        try:
+            environment = json.loads(
+                self.rad(
+                    "management",
+                    "resource",
+                    "show",
+                    "Applications.Core/environments",
+                    "management",
+                    "--group",
+                    self.config.radius_group,
+                    "--output",
+                    "json",
+                )
+            )
+            inputs = binding_inputs(
+                environment,
+                self.config.resource_prefix,
+                self.config.radius_group,
+            )
+            if (
+                inputs["revision"] != bundle["revision"]
+                or inputs["dependencies"] != bundle["dependencies"]
+            ):
+                raise ValueError
+            for role in ("api", "provisioner"):
+                if inputs["images"][role] != {
+                    "reference": self.config.images[role],
+                    "id": self.config.image_ids[role],
+                }:
+                    raise ValueError
+        except (ValueError, KeyError, TypeError):
+            raise ProvisioningError("local_prepared_bindings_mismatch") from None
         for kind, recipe in self.config.recipes.items():
             module = self.kube_get(
                 "management", "radius-system", "configmap", recipe["moduleServer"]
@@ -341,27 +365,21 @@ class LocalProvider:
             if not module or module.get("immutable") is not True:
                 raise ProvisioningError("local_recipe_not_immutable")
             try:
-                archive = base64.b64decode(module["binaryData"]["archive.tar.gz"], validate=True)
-                server = module["data"]["server.py"].encode()
-                digest = hashlib.sha256(archive).hexdigest()
-                name = "local-module-" + hashlib.sha256(archive + server).hexdigest()[:20]
-                if (
-                    digest != recipe["digest"].removeprefix("sha256:")
-                    or name != recipe["moduleServer"]
-                    or module["metadata"]["name"] != name
-                    or module["metadata"]["namespace"] != "radius-system"
-                ):
+                module_descriptor(
+                    module,
+                    recipe,
+                    kind,
+                    self.config.resource_prefix,
+                    self.config.radius_group,
+                    bundle,
+                )
+                binding = environment["properties"]["recipes"][TYPES[kind]]["default"]
+                if binding["templatePath"] != recipe["reference"]:
                     raise ValueError
             except (ValueError, KeyError, TypeError):
                 raise ProvisioningError("local_recipe_digest_mismatch") from None
-            self._modules[kind] = {
-                "apiVersion": "v1",
-                "kind": "ConfigMap",
-                "metadata": {"name": name, "namespace": "radius-system"},
-                "immutable": True,
-                "data": {"server.py": server.decode()},
-                "binaryData": {"archive.tar.gz": base64.b64encode(archive).decode()},
-            }
+            self._modules[kind] = module
+        self._prepared_inputs = inputs
         self._verified = True
 
     def parameters(self, slot: str, name: str, values: dict) -> Path:
@@ -459,59 +477,31 @@ class LocalProvider:
         return any(item["name"] == name for item in values)
 
     def register_environment(self, slot: str, *, cluster: bool = False) -> str:
+        from plane_demo.management.providers.local_artifacts import (
+            environment as environment_properties,
+        )
+
         if not self._verified:
             self.verify_recipes()
         self.config.allocation(slot)
         target = "management" if cluster else slot
         environment = f"provision-{slot}" if cluster else slot
-        recipe_names = (
-            ["cluster"]
-            if cluster
-            else ["gateway", "redis" if slot.endswith("-data") else "postgresql"]
-        )
-        node = self.node_address(slot) if "postgresql" in recipe_names else None
-        parameters = {
-            "cluster": {"images": [self.config.images[role] for role in ("api", "provisioner")]},
-            "postgresql": {"node_address": node},
-            "redis": {},
-            "gateway": {
-                "gateway_host_port": self.config.allocation(slot)["gatewayPort"],
-            },
-        }
-        recipes = {
-            TYPES[kind]: {
-                "default": {
-                    "templateKind": "terraform",
-                    "templatePath": self.config.recipes[kind]["reference"],
-                    "parameters": parameters[kind],
-                }
-            }
-            for kind in recipe_names
-        }
-        values = {
-            "location": "global",
-            "properties": {
-                "compute": {
-                    "kind": "kubernetes",
-                    "resourceId": "self",
-                    "namespace": (
-                        f"{self.config.resource_prefix}-p-{slot}"
-                        if cluster
-                        else f"{self.config.resource_prefix}-{slot}"
-                    ),
-                },
-                "recipes": recipes,
-                "recipeConfig": {
-                    "env": {
-                        "DOCKER_HOST": "unix:///run/radplanes/docker.sock",
-                        "KIND_EXPERIMENTAL_PROVIDER": "docker",
-                        "KIND_EXPERIMENTAL_DOCKER_NETWORK": "kind",
-                    }
-                    if cluster
-                    else {},
-                },
-            },
-        }
+        try:
+            inputs = self._prepared_inputs
+            node = self.node_address(slot) if not cluster and not slot.endswith("-data") else None
+            values = environment_properties(
+                self.config.resource_prefix,
+                self.config.radius_group,
+                self.config.access_namespace,
+                slot,
+                self.config.recipes,
+                inputs,
+                node,
+                cluster=cluster,
+                all_recipes=slot == "management" and not cluster,
+            )
+        except (ValueError, KeyError, TypeError):
+            raise ProvisioningError("local_prepared_assets_missing") from None
         suffix = "cluster-environment" if cluster else "environment"
         path = self.state / f"{slot}-{suffix}.json"
         write_json(path, values)
@@ -543,18 +533,30 @@ class LocalProvider:
         self.config.allocation(slot)
         if slot == "management":
             raise ProvisioningError("management_is_bootstrap_owned")
-        intent = self.state / f"{slot}-cluster-intent.json"
         secret_name = f"{self.config.resource_prefix}-{slot}-access"
+        environments = json.loads(
+            self.rad(
+                "management",
+                "resource",
+                "list",
+                "Applications.Core/environments",
+                "--group",
+                self.config.radius_group,
+                "--output",
+                "json",
+            )
+        )
+        if isinstance(environments, dict):
+            environments = environments.get("value")
+        if not isinstance(environments, list):
+            raise ProvisioningError("invalid_radius_output")
         if (
-            intent.exists()
-            or intent.is_symlink()
+            any(item.get("name") == f"provision-{slot}" for item in environments)
             or self.resource_exists("management", "cluster", slot)
             or self.kube_get("management", self.config.access_namespace, "secret", secret_name)
         ):
             raise ProvisioningError("local_cluster_creation_incomplete")
-        create_json(
-            intent, {"version": 1, "slot": slot, "clusterId": self.expected_cluster_id(slot)}
-        )
+        # The real provisioning environment is created before submission and blocks silent replay.
         environment = self.register_environment(slot, cluster=True)
         # The shared module selects the registered 2025 API; generic resource create does not.
         self.deploy(
@@ -608,20 +610,8 @@ class LocalProvider:
         uid = json.loads(self.kubectl(slot, "get", "namespace", "kube-system", "-o", "json"))[
             "metadata"
         ]["uid"]
-        record = {
-            "version": 1,
-            "slot": slot,
-            "clusterId": self.expected_cluster_id(slot),
-            "resourceId": resource_id,
-            "accessSecretName": name,
-            "accessSecretUID": secret["metadata"]["uid"],
-            "clusterUID": uid,
-            "nodeAddress": address,
-        }
-        record_path = self.state / f"{slot}-cluster.json"
-        if record_path.exists() and json.loads(record_path.read_text()) != record:
-            raise ProvisioningError("local_child_identity_changed")
-        write_json(record_path, record)
+        if not isinstance(uid, str) or not uid:
+            raise ProvisioningError("local_child_identity_missing")
         return Cluster(slot, self.expected_cluster_id(slot), context, path)
 
     def node_address(self, slot: str) -> str:
@@ -650,82 +640,28 @@ class LocalProvider:
         return address
 
     def publish_modules(self, slot: str) -> None:
+        from plane_demo.management.providers.local_artifacts import matches, module_objects
+
+        if not self._verified:
+            self.verify_recipes()
         role, _ = self.names(slot)
         for kind in ("gateway", "redis" if role == "data" else "postgresql"):
-            recipe = self.config.recipes[kind]
-            name = recipe["moduleServer"]
-            sha = recipe["digest"].removeprefix("sha256:")
-            labels = {"app": name}
-            self.apply(
-                slot,
-                [
-                    self._modules[kind],
-                    {
-                        "apiVersion": "apps/v1",
-                        "kind": "Deployment",
-                        "metadata": {"name": name, "namespace": "radius-system"},
-                        "spec": {
-                            "replicas": 1,
-                            "selector": {"matchLabels": labels},
-                            "template": {
-                                "metadata": {"labels": labels},
-                                "spec": {
-                                    "automountServiceAccountToken": False,
-                                    "securityContext": {"runAsNonRoot": True, "runAsUser": 65532},
-                                    "containers": [
-                                        {
-                                            "name": "module",
-                                            "image": PYTHON_IMAGE,
-                                            "command": ["python3", "/module/server.py"],
-                                            "env": [
-                                                {
-                                                    "name": "MODULE_SHA256",
-                                                    "value": recipe["digest"].removeprefix(
-                                                        "sha256:"
-                                                    ),
-                                                }
-                                            ],
-                                            "ports": [{"containerPort": 18080}],
-                                            "readinessProbe": {
-                                                "httpGet": {
-                                                    "path": f"/{sha}.tar.gz",
-                                                    "port": 18080,
-                                                }
-                                            },
-                                            "securityContext": {
-                                                "readOnlyRootFilesystem": True,
-                                                "allowPrivilegeEscalation": False,
-                                                "capabilities": {"drop": ["ALL"]},
-                                            },
-                                            "resources": {
-                                                "requests": {"cpu": "25m", "memory": "32Mi"},
-                                                "limits": {"cpu": "200m", "memory": "64Mi"},
-                                            },
-                                            "volumeMounts": [
-                                                {
-                                                    "name": "module",
-                                                    "mountPath": "/module",
-                                                    "readOnly": True,
-                                                }
-                                            ],
-                                        }
-                                    ],
-                                    "volumes": [{"name": "module", "configMap": {"name": name}}],
-                                },
-                            },
-                        },
-                    },
-                    {
-                        "apiVersion": "v1",
-                        "kind": "Service",
-                        "metadata": {"name": name, "namespace": "radius-system"},
-                        "spec": {
-                            "selector": labels,
-                            "ports": [{"port": 18080, "targetPort": 18080}],
-                        },
-                    },
-                ],
+            objects = module_objects(
+                json.loads(self._modules[kind]["data"]["module.json"]),
+                self._prepared_inputs,
             )
+            name = objects[0]["metadata"]["name"]
+            existing = [
+                self.kube_get(slot, "radius-system", item["kind"].lower(), name) for item in objects
+            ]
+            if any(existing):
+                if not all(
+                    actual and matches(expected, actual)
+                    for expected, actual in zip(objects, existing, strict=True)
+                ):
+                    raise ProvisioningError("local_module_publication_incomplete_or_foreign")
+            else:
+                self.apply(slot, objects, create=True)
             self.kubectl(
                 slot,
                 "-n",
@@ -739,6 +675,15 @@ class LocalProvider:
     def configure_child_terraform(
         self, slot: str, names: tuple[str, ...] = ("dynamic-rp", "applications-rp")
     ) -> None:
+        from plane_demo.management.providers.local_artifacts import terraform_patch
+
+        if not self._verified:
+            self.verify_recipes()
+        try:
+            inputs = self._prepared_inputs
+            operator = inputs["images"]["operator"]["reference"]
+        except (ValueError, KeyError, TypeError):
+            raise ProvisioningError("local_prepared_assets_missing") from None
         for name in names:
             deployment = self.kube_get(slot, "radius-system", "deployment", name)
             if not deployment:
@@ -779,85 +724,11 @@ class LocalProvider:
                     configured = True
             if not configured:
                 raise ProvisioningError("child_terraform_configuration_missing")
-            patch = {
-                "spec": {
-                    "strategy": {"type": "Recreate", "rollingUpdate": None},
-                    "template": {
-                        "spec": {
-                            "automountServiceAccountToken": False,
-                            "securityContext": {
-                                "fsGroup": 65532,
-                                "fsGroupChangePolicy": "OnRootMismatch",
-                            },
-                            "initContainers": [
-                                {
-                                    "name": "local-terraform-layout",
-                                    "image": PYTHON_IMAGE,
-                                    "command": ["python3", "-c", TERRAFORM_INIT],
-                                    "securityContext": {
-                                        "runAsUser": 0,
-                                        "runAsGroup": 0,
-                                        "runAsNonRoot": False,
-                                        "allowPrivilegeEscalation": False,
-                                        "capabilities": {"drop": ["ALL"], "add": ["CHOWN"]},
-                                    },
-                                    "volumeMounts": [
-                                        {"name": "terraform", "mountPath": "/terraform"}
-                                    ],
-                                }
-                            ],
-                            "containers": [
-                                {
-                                    "name": name,
-                                    "env": [{"name": "RADIUS_LOGGING_LEVEL", "value": "error"}],
-                                    "volumeMounts": [
-                                        {
-                                            "name": "local-radius-service-account",
-                                            "mountPath": str(SERVICE_ACCOUNT),
-                                            "readOnly": True,
-                                        }
-                                    ],
-                                }
-                            ],
-                            "volumes": [
-                                {
-                                    "name": "local-radius-service-account",
-                                    "projected": {
-                                        "defaultMode": 0o440,
-                                        "sources": [
-                                            {
-                                                "serviceAccountToken": {
-                                                    "path": "token",
-                                                    "expirationSeconds": 3600,
-                                                }
-                                            },
-                                            {
-                                                "configMap": {
-                                                    "name": "kube-root-ca.crt",
-                                                    "items": [{"key": "ca.crt", "path": "ca.crt"}],
-                                                }
-                                            },
-                                            {
-                                                "downwardAPI": {
-                                                    "items": [
-                                                        {
-                                                            "path": "namespace",
-                                                            "fieldRef": {
-                                                                "apiVersion": "v1",
-                                                                "fieldPath": "metadata.namespace",
-                                                            },
-                                                        }
-                                                    ]
-                                                }
-                                            },
-                                        ],
-                                    },
-                                }
-                            ],
-                        }
-                    },
-                },
-            }
+            patch = terraform_patch(operator, name)
+            patch["spec"]["template"]["spec"]["initContainers"][0]["command"] = [
+                "python3",
+                TERRAFORM_INIT,
+            ]
             self.kubectl(
                 slot,
                 "-n",
@@ -884,15 +755,39 @@ class LocalProvider:
             cluster.slot
         ):
             raise ProvisioningError("cluster_output_mismatch")
-        intent = self.state / f"{cluster.slot}-radius-intent.json"
-        try:
-            create_json(intent, {"version": 1, "clusterId": cluster.cluster_id})
-        except FileExistsError:
-            raise ProvisioningError("local_child_bootstrap_incomplete") from None
+        if not self._verified:
+            self.verify_recipes()
+        chart = self.prepared_assets / "radius.tgz"
+        if not chart.is_file() or chart.is_symlink():
+            raise ProvisioningError("local_prepared_chart_missing")
+        if self.kube_get(cluster.slot, "radius-system", "namespace", "radius-system"):
+            raise ProvisioningError("local_child_bootstrap_incomplete")
+        self.apply(
+            cluster.slot,
+            {
+                "apiVersion": "v1",
+                "kind": "Namespace",
+                "metadata": {
+                    "name": "radius-system",
+                    "labels": {
+                        "plane-demo/resource-prefix": self.config.resource_prefix,
+                        "plane-demo/radius-group": self.config.radius_group,
+                    },
+                    "annotations": {
+                        "plane-demo/cluster-owner": (
+                            f"{self.radius_scope}/providers/Demo.Platform/clusters/{cluster.slot}"
+                        )
+                    },
+                },
+            },
+            create=True,
+        )
         self.rad(
             cluster.slot,
             "install",
             "kubernetes",
+            "--chart",
+            str(chart),
             "--kubecontext",
             cluster.context,
             "--skip-contour-install",
@@ -902,6 +797,8 @@ class LocalProvider:
             "global.terraform.enabled=false",
             "--set",
             "dynamicrp.buildkit.enabled=false",
+            "--set",
+            "global.terraform.loglevel=OFF",
             workspace=False,
             timeout=660,
         )
@@ -963,6 +860,29 @@ class LocalProvider:
                 }
             ],
         )
+        if self.config.identity:
+            identity = self.config.identity
+            scope = CredentialScope(identity.project, identity.deployment, "local")
+            names = [
+                scope.secret_name(slot, role)
+                for slot in SLOTS
+                for role in sorted(credential_roles(self.config, slot) | {"demoKey"})
+            ]
+            resources += workloads.role_binding(
+                namespace,
+                "plane-credential-store",
+                namespace,
+                "provisioner",
+                [
+                    {
+                        "apiGroups": [""],
+                        "resources": ["secrets"],
+                        "verbs": ["get"],
+                        "resourceNames": names,
+                    },
+                    {"apiGroups": [""], "resources": ["secrets"], "verbs": ["create"]},
+                ],
+            )
         name = "radplanes-local-provisioner-radius-api"
         return resources + [
             {
@@ -979,7 +899,10 @@ class LocalProvider:
                     {
                         "apiGroups": [""],
                         "resources": ["namespaces"],
-                        "resourceNames": ["kube-system"],
+                        "resourceNames": [
+                            "kube-system",
+                            *([namespace] if self.config.identity else []),
+                        ],
                         "verbs": ["get"],
                     },
                     {
@@ -1016,17 +939,7 @@ class LocalProvider:
                 "kind": "Namespace",
                 "metadata": {
                     "name": namespace,
-                    "labels": {
-                        "plane-demo/project": self.config.project_name,
-                        **(
-                            {
-                                "plane-demo/deployment": self.config.identity.deployment,
-                                "plane-demo/environment": "local",
-                            }
-                            if self.config.identity
-                            else {}
-                        ),
-                    },
+                    "labels": workloads.ownership_labels(self.config),
                 },
             },
         )
@@ -1083,6 +996,7 @@ class LocalProvider:
                     [{"apiGroups": [""], "resources": ["configmaps"], "verbs": verbs}],
                 )
         if role == "management":
+            resources += workloads.management_discovery_permissions(namespace, local=True)
             resources += self.management_permissions(
                 namespace, [recipe["moduleServer"] for recipe in self.config.recipes.values()]
             )
@@ -1092,17 +1006,11 @@ class LocalProvider:
                     "kind": "ConfigMap",
                     "metadata": {"name": "provisioning-settings", "namespace": namespace},
                     "immutable": True,
-                    "data": {"provisioning.json": json.dumps(self.config.to_dict())},
-                },
-                {
-                    "apiVersion": "v1",
-                    "kind": "PersistentVolumeClaim",
-                    "metadata": {"name": "provisioner-state", "namespace": namespace},
-                    "spec": {
-                        "accessModes": ["ReadWriteOnce"],
-                        "storageClassName": "standard",
-                        "resources": {"requests": {"storage": "2Gi"}},
-                    },
+                    "data": (
+                        self.config.bootstrap_settings
+                        if self.config.identity
+                        else {"provisioning.json": json.dumps(self.config.to_dict())}
+                    ),
                 },
             ]
         self.apply(slot, resources)
@@ -1143,7 +1051,10 @@ class LocalProvider:
         if role != "data":
             self.initialize_database(slot)
         self.runtime_secrets(slot)
-        values = {"image": self.config.images["api"]}
+        values = {
+            "image": self.config.images["api"],
+            "ownershipLabels": workloads.ownership_labels(self.config),
+        }
         if role == "management":
             values.update(provisionerImage=self.config.images["provisioner"])
         observe(f"{role}-application")
@@ -1186,4 +1097,4 @@ class LocalProvider:
         url = self.validate_endpoint(slot, url)
         write_json(self.state / f"{slot}-endpoint.json", {"url": url})
         key_file = f"{slot}.key"
-        write_private(self.state / key_file, self.credentials.plane(slot)["demoKey"] + "\n")
+        write_private(self.state / key_file, self.credentials.demo_key(slot) + "\n")

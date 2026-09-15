@@ -1,5 +1,6 @@
 import base64
 import copy
+import importlib.util
 import json
 import logging
 import os
@@ -7,7 +8,7 @@ import subprocess
 import sys
 from contextlib import contextmanager
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import uuid4
 
@@ -16,10 +17,22 @@ import pytest
 from psycopg.conninfo import conninfo_to_dict
 
 from plane_demo.management import provisioner
-from plane_demo.management.providers.azure import AzureProvider
+from plane_demo.management.providers import discovery
+from plane_demo.management.providers.azure import TYPES, AzureProvider
 from plane_demo.management.providers.commands import Commands
-from plane_demo.management.providers.credentials import Credentials, database_dsn
-from plane_demo.management.providers.identity import DemoConfig
+from plane_demo.management.providers.credentials import (
+    Credentials,
+    StoredCredentials,
+    credential_roles,
+    database_dsn,
+)
+from plane_demo.management.providers.identity import (
+    PUBLIC_KEYS,
+    SLOTS,
+    DemoConfig,
+    provisioning_namespace,
+)
+from plane_demo.management.providers.secret_store import CredentialScope, CredentialValue
 from plane_demo.management.provisioning import (
     OperatorConfig,
     PairResult,
@@ -178,6 +191,14 @@ def selected_config(raw_config):
         role: reference.replace(old_registry, foundation["registryLoginServer"])
         for role, reference in raw_config["images"].items()
     }
+    management = raw_config["allocations"]["management"]
+    raw_config["managementCluster"] = {
+        "id": management["clusterResourceGroupId"]
+        + "/providers/Microsoft.ContainerService/managedClusters/"
+        + management["clusterName"],
+        "name": management["clusterName"],
+        "resourceGroup": management["clusterResourceGroup"],
+    }
     return OperatorConfig.from_dict(raw_config, identity=identity)
 
 
@@ -233,6 +254,18 @@ def test_selected_identity_drives_provider_commands_and_temporary_workspace(
     provider.runtime_secrets("shared-data")
     assert secrets["data-api-runtime"]["PROJECT_ID"] == "sample"
     assert secrets["data-reconciler-runtime"]["PROJECT_ID"] == "sample"
+    emitted.clear()
+    provider.prerequisites("management")
+    settings = next(
+        item
+        for batch in emitted
+        if isinstance(batch, list)
+        for item in batch
+        if item["kind"] == "ConfigMap" and item["metadata"]["name"] == "provisioning-settings"
+    )
+    assert settings["data"] == selected_config.bootstrap_settings
+    assert settings["immutable"] is True
+    assert selected_config.identity.demo_keys["management"] not in json.dumps(settings)
 
 
 def test_selected_identity_round_trip_excludes_provided_credentials(selected_config):
@@ -246,6 +279,148 @@ def test_selected_identity_round_trip_excludes_provided_credentials(selected_con
     values["bootstrapIdentity"]["DEMO_KEY_MANAGEMENT"] = key
     with pytest.raises(ValueError, match="public settings only"):
         OperatorConfig.from_dict(values)
+
+
+def test_selected_child_provisioning_namespace_accounts_for_radius_application_suffix(
+    selected_config, tmp_path, monkeypatch
+):
+    provider = AzureProvider(
+        selected_config,
+        tmp_path,
+        credentials(tmp_path / "credentials.json", selected_config),
+    )
+    provider._verified = True
+    monkeypatch.setattr(provider, "rad", MagicMock())
+    provider.register_cluster_environment("isolated-1-control")
+    parameters = json.loads(
+        (provider.state / "isolated-1-control-cluster-environment.parameters.json").read_text()
+    )["parameters"]
+    namespace = parameters["namespace"]["value"]
+    assert namespace == "sample-demo-azure-p-3"
+    assert len(namespace + "-cluster-isolated-1-control") <= 63
+
+
+def test_maximum_selected_prefix_stays_within_kubernetes_namespace_limit():
+    identity = DemoConfig("azure", "abcdefghijklmnop", "ab", SUBSCRIPTION, "centralus")
+    assert len(identity.stem) == 25
+    for slot in SLOTS[1:]:
+        assert len(provisioning_namespace(identity.stem, slot) + f"-cluster-{slot}") <= 63
+        assert len(identity.namespace(slot)) <= 63
+
+
+def test_canonical_management_configuration_and_suspended_job_use_live_inputs(
+    selected_config, tmp_path, monkeypatch
+):
+    root = Path(__file__).resolve().parents[2]
+    monkeypatch.syspath_prepend(str(root / "scripts/operations"))
+    spec = importlib.util.spec_from_file_location(
+        "canonical_management_operator", root / "scripts/operations/run-management-job.py"
+    )
+    operator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(operator)
+    selected = selected_config.to_dict()
+    outputs = {
+        key: selected[key] for key in ("foundation", "coordinatorIdentity", "managementCluster")
+    }
+    outputs["allocations"] = list(selected["allocations"].values())
+    artifacts = {
+        "source_revision": "a" * 40,
+        "status": "artifacts_verified",
+        "content_verified": True,
+        "recipes": selected["recipes"],
+        "images": selected["images"],
+    }
+    observed, objects = [], {}
+    resumed = []
+
+    def execute(arguments, *, value=None, **kwargs):
+        observed.append(arguments)
+        if arguments[:2] == ["git", "status"]:
+            return ""
+        if arguments[:2] == ["git", "rev-parse"]:
+            return "a" * 40
+        if arguments[0] == "bash":
+            assert arguments[-1] == "--inspect"
+            return json.dumps(artifacts)
+        if arguments[:4] == ["az", "deployment", "sub", "show"]:
+            assert arguments[arguments.index("--subscription") + 1] == SUBSCRIPTION
+            return json.dumps(
+                {
+                    "properties": {
+                        "provisioningState": "Succeeded",
+                        "outputs": {key: {"value": item} for key, item in outputs.items()},
+                    }
+                }
+            )
+        assert arguments[0] == "kubectl"
+        if "get" in arguments:
+            position = arguments.index("get")
+            record = objects.get((arguments[position + 1].lower(), arguments[position + 2]))
+            return json.dumps(record) if record else ""
+        if "create" in arguments:
+            record = copy.deepcopy(value)
+            record["metadata"].update(uid=str(uuid4()), resourceVersion="1")
+            if record["kind"] == "Secret":
+                record["data"] = {
+                    key: base64.b64encode(item.encode()).decode()
+                    for key, item in record.pop("stringData").items()
+                }
+            key = (record["kind"].lower(), record["metadata"]["name"])
+            assert key not in objects
+            objects[key] = record
+            return json.dumps(record) if "-o" in arguments else ""
+        if "patch" in arguments:
+            job = objects["job", "deploy-management"]
+            patch = json.loads(arguments[arguments.index("-p") + 1])
+            assert patch[0]["value"] == job["metadata"]["uid"]
+            assert ("configmap", "deploy-management-config") in objects
+            assert ("secret", "deploy-management-keys") in objects
+            job["spec"]["suspend"] = False
+            job["status"] = {"conditions": [{"type": "Complete", "status": "True"}]}
+            resumed.append(job["metadata"]["uid"])
+            return ""
+        assert "wait" in arguments or "rollout" in arguments
+        assert resumed
+        return ""
+
+    monkeypatch.setattr(operator, "execute", execute)
+    config = operator.live_configuration(selected_config.identity)
+    assert config.identity.revision == "a" * 40
+    assert config.identity.demo_keys == selected_config.identity.demo_keys
+    result = operator.deploy_selected(
+        config, config.workspace("management"), str(tmp_path / "kubeconfig")
+    )
+    assert result["stage"] == "management-deployed"
+    job = objects["job", "deploy-management"]
+    secret = objects["secret", "deploy-management-keys"]
+    assert secret["metadata"]["ownerReferences"][0]["uid"] == job["metadata"]["uid"]
+    assert (
+        base64.b64decode(secret["data"]["DEMO_KEY_MANAGEMENT"]).decode()
+        == config.identity.demo_keys["management"]
+    )
+    assert not any(kind == "persistentvolumeclaim" for kind, _ in objects)
+    assert not any(".state" in argument for arguments in observed for argument in arguments)
+    changed_identity = DemoConfig.from_values(
+        {
+            **config.identity.public_values(),
+            "DEMO_KEY_MANAGEMENT": "changed-key-" + "x" * 48,
+        }
+    )
+    changed = OperatorConfig.from_dict(config.to_dict(), identity=changed_identity)
+    with pytest.raises(ValueError, match="Supplied bootstrap keys changed"):
+        operator.deploy_selected(
+            changed, config.workspace("management"), str(tmp_path / "kubeconfig")
+        )
+    job["spec"]["suspend"] = True
+    job["status"] = {}
+    job["spec"]["template"]["spec"]["containers"][0].pop("envFrom")
+    del objects["secret", "deploy-management-keys"]
+    before = copy.deepcopy(objects)
+    with pytest.raises(ValueError, match="Existing operator Job does not match"):
+        operator.deploy_selected(
+            config, config.workspace("management"), str(tmp_path / "kubeconfig")
+        )
+    assert objects == before
 
 
 def test_radius_commands_only_accept_selected_contexts_in_temporary_home(tmp_path):
@@ -1717,12 +1892,21 @@ def test_full_data_deploy_calls_certificate_then_https_and_preserves_it_on_reapp
 
     def run_command(args, **kwargs):
         nonlocal gateway_calls
+        if "list" in args and "Demo.Platform/gateways" in args:
+            return json.dumps([{"name": "gateway"}] if gateway_calls else [])
         if "show" in args and "Demo.Platform/gateways" in args:
             gateway_calls += 1
             https = gateway_calls > 1
             return json.dumps(
                 {
                     "properties": {
+                        "provisioningState": "Succeeded",
+                        "application": (
+                            f"{RADIUS_SCOPE}/providers/Applications.Core/applications/data"
+                        ),
+                        "environment": (
+                            f"{RADIUS_SCOPE}/providers/Applications.Core/environments/shared-data"
+                        ),
                         "host": host,
                         "url": ("https://" if https else "http://") + host,
                         "certificateSecretUri": uri if https else "",
@@ -1767,19 +1951,36 @@ def test_full_data_deploy_calls_certificate_then_https_and_preserves_it_on_reapp
     assert output["pairs"]["shared"]["data"]["key_file"] == "shared-data.key"
     assert (provider.state / "shared-data.key").stat().st_mode & 0o777 == 0o600
     retained_passwords = provider.credentials.path.read_text()
+    restarted = AzureProvider(
+        provider.config,
+        provider.root,
+        Credentials(provider.credentials.path),
+        provider.commands,
+        workspace=provider.root / "fresh-worker",
+    )
+    restarted._verified = True
+    monkeypatch.setattr(restarted, "tag_redis_nic", metadata_action)
     first_values = []
-    original_deploy = provider.deploy
+    original_deploy = restarted.deploy
 
     def observe_deploy(slot, template, application, values):
         first_values.append(dict(values))
         return original_deploy(slot, template, application, values)
 
-    provider.deploy = observe_deploy
-    provider.deploy_plane("shared-data")
+    restarted.deploy = observe_deploy
+    restarted.deploy_plane("shared-data")
     assert first_values[0]["gatewayPhase"] == "https"
     assert first_values[0]["certificateSecretUri"] == uri
     assert provider.credentials.path.read_text() == retained_passwords
     assert metadata_action.call_count == 4
+    assert not (restarted.state / "shared-data-certificate.json").exists()
+    monkeypatch.setattr(
+        restarted, "certificate", MagicMock(side_effect=ProvisioningError("certificate_failed"))
+    )
+    before = len(first_values)
+    with pytest.raises(ProvisioningError, match="certificate_failed"):
+        restarted.deploy_plane("shared-data")
+    assert first_values[before]["gatewayPhase"] == "https"
 
 
 def test_management_deploy_preserves_coordinator_identity_and_certificate_command(
@@ -1801,6 +2002,8 @@ def test_management_deploy_preserves_coordinator_identity_and_certificate_comman
 
     def run_command(args, **kwargs):
         nonlocal gateway_reads
+        if "list" in args and "Demo.Platform/gateways" in args:
+            return "[]"
         if "list" in args and "Demo.Platform/postgreSqlDatabases" in args:
             return json.dumps([{"name": "postgres"}])
         if "show" in args and "Demo.Platform/postgreSqlDatabases" in args:
@@ -1999,6 +2202,7 @@ def test_metadata_job_uses_radius_identity_not_coordinator_identity(
 def test_control_plane_deployment_does_not_run_redis_metadata(provider, monkeypatch):
     slot = "shared-control"
     uri = "https://demo-vault.vault.azure.net/secrets/gateway-shared-control"
+    monkeypatch.setattr(provider, "resource_exists", lambda *args: False)
     for name in (
         "prerequisites",
         "initialize_database",
@@ -2034,6 +2238,7 @@ def test_control_plane_deployment_does_not_run_redis_metadata(provider, monkeypa
 def test_data_deployment_stops_at_metadata_failure_without_publishing_an_endpoint(
     provider, monkeypatch
 ):
+    monkeypatch.setattr(provider, "resource_exists", lambda *args: False)
     for name in ("prerequisites", "runtime_secrets", "deploy", "certificate", "record_endpoint"):
         monkeypatch.setattr(provider, name, MagicMock())
     monkeypatch.setattr(
@@ -2123,54 +2328,21 @@ def test_same_metadata_helper_supports_a_separately_named_fresh_lifecycle_gate(
     assert target["application_id"].endswith("/applications/redis-life")
 
 
-def test_main_acquires_one_session_and_runs_the_actual_polling_loop(tmp_path, config, monkeypatch):
-    source = credentials(tmp_path / "operator-credentials.json", config)
-    runtime = tmp_path / "runtime"
-    runtime.mkdir()
-    config_file = runtime / "provisioning.json"
-    config_file.write_text(json.dumps(config.to_dict()))
-    monkeypatch.setenv("PROVIDER", "azure")
-    monkeypatch.setenv("PROJECT_ROOT", str(runtime))
-    monkeypatch.setenv("PROVISIONING_CONFIG", str(config_file))
-    monkeypatch.setenv("PROVISIONING_CREDENTIALS_JSON", json.dumps(source.runtime_seed(config)))
-    monkeypatch.setenv("MANAGEMENT_DSN", source.dsn("management", "mgmt_provisioner"))
-    store = MagicMock()
-    store.claim_pending.return_value = None
-    sessions = []
-
-    @contextmanager
-    def session(dsn):
-        sessions.append(dsn)
-        yield store
-
+@pytest.mark.parametrize("environment", ["azure", "local"])
+def test_worker_rejects_legacy_file_startup_before_discovery(tmp_path, monkeypatch, environment):
+    for name in PUBLIC_KEYS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("PROVIDER", environment)
+    monkeypatch.setenv("PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setenv("PROVISIONING_CONFIG", str(tmp_path / "missing-provisioning.json"))
+    monkeypatch.setenv("PROVISIONING_CREDENTIALS_JSON", "legacy seed is not an authority")
+    discovered, session = MagicMock(), MagicMock()
+    monkeypatch.setattr(provisioner, "read_runtime_configuration", discovered)
     monkeypatch.setattr(provisioner, "provisioner_session", session)
-    monkeypatch.setattr(provisioner.signal, "signal", lambda *_: None)
-    authenticate = MagicMock()
-    monkeypatch.setattr(AzureProvider, "authenticate", authenticate)
-    monkeypatch.setattr(AzureProvider, "connect_management", MagicMock())
-    monkeypatch.setattr(AzureProvider, "verify_recipes", MagicMock())
-    real_loop = provisioner.run_loop
-    stopped = False
-
-    def stop(_seconds):
-        nonlocal stopped
-        stopped = True
-
-    monkeypatch.setattr(
-        provisioner,
-        "run_loop",
-        lambda operations, driver: real_loop(
-            operations, driver, sleep=stop, stopped=lambda: stopped
-        ),
-    )
-    assert provisioner.main() == 0
-    assert len(sessions) == 1
-    store.interrupt_running.assert_called_once_with()
-    store.claim_pending.assert_called_once_with()
-    authenticate.assert_called_once_with(workload_required=True)
-    runtime_credentials = runtime / ".state/azure/credentials.json"
-    assert runtime_credentials.is_file()
-    assert "mgmt_api" not in runtime_credentials.read_text()
+    assert provisioner.main() == 1
+    discovered.assert_not_called()
+    session.assert_not_called()
+    assert not (tmp_path / ".state").exists()
 
 
 @pytest.fixture
@@ -2367,9 +2539,448 @@ def test_runtime_requires_exact_preassigned_workload_identity(provider, tmp_path
         provider.authenticate(workload_required=True)
 
 
+@pytest.fixture
+def azure_runtime_apis(selected_config, tmp_path, monkeypatch):
+    identity = DemoConfig.from_values(selected_config.bootstrap_settings)
+    account = tmp_path / "service-account"
+    account.mkdir()
+    (account / "namespace").write_text(identity.namespace("management"))
+    monkeypatch.setattr(discovery, "SERVICE_ACCOUNT", account)
+    monkeypatch.setattr(discovery.kube_config, "load_incluster_config", lambda **kwargs: None)
+    connection, core, apps = MagicMock(), MagicMock(), MagicMock()
+    manager = MagicMock()
+    manager.__enter__.return_value = connection
+    monkeypatch.setattr(discovery.client, "ApiClient", lambda settings: manager)
+    monkeypatch.setattr(discovery.client, "CoreV1Api", lambda _: core)
+    monkeypatch.setattr(discovery.client, "AppsV1Api", lambda _: apps)
+    core.read_namespace.return_value = SimpleNamespace(
+        metadata=SimpleNamespace(
+            name=identity.namespace("management"),
+            labels={
+                "plane-demo/project": identity.project,
+                "plane-demo/deployment": identity.deployment,
+                "plane-demo/environment": identity.environment,
+            },
+        )
+    )
+    resource_id = (
+        f"/planes/radius/local/resourceGroups/{identity.stem}"
+        "/providers/Applications.Core/environments/management"
+    )
+    recipes = {
+        kind: {
+            "reference": f"{identity.registry_name}.azurecr.io/radius-recipes/{kind}:src-"
+            + "c" * 64,
+            "digest": "sha256:" + "d" * 64,
+            "immutability": "acr-abac-arm-import-v1",
+        }
+        for kind in TYPES
+    }
+    environment = {
+        "id": resource_id,
+        "properties": {
+            "compute": {
+                "kind": "kubernetes",
+                "resourceId": "self",
+                "namespace": f"{identity.stem}-management",
+            },
+            "recipes": {
+                resource_type: {
+                    "default": {
+                        "templateKind": "bicep",
+                        "templatePath": recipes[kind]["reference"],
+                    }
+                }
+                for kind, (resource_type, _) in TYPES.items()
+            },
+        },
+    }
+    connection.call_api.return_value = environment
+
+    def deployment(name, namespace, **kwargs):
+        role = "api" if name == "management-api" else "provisioner"
+        return SimpleNamespace(
+            metadata=SimpleNamespace(name=name, namespace=namespace),
+            spec=SimpleNamespace(
+                template=SimpleNamespace(
+                    spec=SimpleNamespace(
+                        service_account_name=name,
+                        containers=[SimpleNamespace(name=name, image=selected_config.images[role])],
+                    )
+                )
+            ),
+        )
+
+    apps.read_namespaced_deployment.side_effect = deployment
+    values = selected_config.to_dict()
+    outputs = {
+        key: values[key] for key in ("foundation", "coordinatorIdentity", "managementCluster")
+    }
+    outputs["allocations"] = list(values["allocations"].values())
+    bootstrap = {
+        "properties": {
+            "provisioningState": "Succeeded",
+            "outputs": {key: {"value": value} for key, value in outputs.items()},
+        }
+    }
+    commands = []
+    workspaces = []
+    login = MagicMock(side_effect=lambda command, workspace, *_: workspaces.append(workspace))
+    monkeypatch.setattr(discovery, "login_workload_identity", login)
+
+    def az(command, arguments):
+        commands.append(arguments)
+        assert arguments[arguments.index("--subscription") + 1] == identity.subscription
+        if arguments[1:4] == ["deployment", "sub", "show"]:
+            assert arguments[arguments.index("--name") + 1] == identity.stem + "-bootstrap"
+            return bootstrap
+        assert arguments[1:4] == ["acr", "repository", "show"]
+        assert arguments[arguments.index("--name") + 1] == identity.registry_name
+        image = arguments[arguments.index("--image") + 1]
+        recipe = next(value for value in recipes.values() if value["reference"].endswith(image))
+        return {"digest": recipe["digest"]}
+
+    monkeypatch.setattr(Commands, "json", az)
+    monkeypatch.setenv("AZURE_CLIENT_ID", selected_config.coordinator_identity["clientId"])
+    monkeypatch.setenv("AZURE_TENANT_ID", selected_config.foundation["tenantId"])
+    return SimpleNamespace(
+        identity=identity,
+        expected=selected_config,
+        core=core,
+        apps=apps,
+        connection=connection,
+        environment=environment,
+        recipes=recipes,
+        bootstrap=bootstrap,
+        commands=commands,
+        workspaces=workspaces,
+        login=login,
+    )
+
+
+def test_azure_worker_reconstructs_configuration_from_current_apis(azure_runtime_apis, tmp_path):
+    api = azure_runtime_apis
+    result = discovery.read_runtime_configuration(api.identity, tmp_path)
+    assert result.identity == api.identity
+    assert result.foundation == api.expected.foundation
+    assert result.allocations == api.expected.allocations
+    assert result.images == api.expected.images
+    assert result.recipes == api.recipes
+    assert len(api.commands) == 5
+    assert api.workspaces and all(not path.exists() for path in api.workspaces)
+    api.login.assert_called_once()
+    api.connection.call_api.assert_called_once_with(
+        "/apis/api.ucp.dev/v1alpha3" + api.environment["id"],
+        "GET",
+        query_params=[("api-version", "2023-10-01-preview")],
+        response_type="object",
+        auth_settings=["BearerToken"],
+        _return_http_data_only=True,
+        _request_timeout=(5, 15),
+    )
+    assert not (tmp_path / ".state").exists()
+
+
+@pytest.mark.parametrize(
+    ("drift", "code"),
+    [
+        ("namespace", "management_namespace_mismatch"),
+        ("radius-owner", "management_radius_mismatch"),
+        ("radius-namespace", "management_radius_mismatch"),
+        ("foundation", "foundation_not_ready"),
+        ("workload-identity", "workload_identity_mismatch"),
+        ("recipe-kind", "management_recipe_binding_mismatch"),
+        ("recipe-registry", "management_recipe_binding_mismatch"),
+        ("malformed-environment", "runtime_discovery_contract_invalid"),
+    ],
+)
+def test_azure_runtime_discovery_refuses_wrong_owners_and_bindings(
+    azure_runtime_apis, tmp_path, drift, code
+):
+    api = azure_runtime_apis
+    binding = api.environment["properties"]["recipes"]["Demo.Platform/clusters"]["default"]
+    if drift == "namespace":
+        api.core.read_namespace.return_value.metadata.labels["plane-demo/deployment"] = "other"
+    elif drift == "radius-owner":
+        api.environment["id"] = "/planes/radius/local/resourceGroups/other"
+    elif drift == "radius-namespace":
+        api.environment["properties"]["compute"]["namespace"] = api.identity.namespace("management")
+    elif drift == "foundation":
+        api.bootstrap["properties"]["provisioningState"] = "Running"
+    elif drift == "workload-identity":
+        api.bootstrap["properties"]["outputs"]["coordinatorIdentity"]["value"]["clientId"] = (
+            "44444444-4444-4444-4444-444444444444"
+        )
+    elif drift == "recipe-kind":
+        binding["templateKind"] = "terraform"
+    elif drift == "recipe-registry":
+        binding["templatePath"] = "other.azurecr.io/recipes/cluster:v1"
+    else:
+        api.connection.call_api.return_value = []
+    with pytest.raises(ProvisioningError, match=code):
+        discovery.read_runtime_configuration(api.identity, tmp_path)
+    assert all(not path.exists() for path in api.workspaces)
+    assert not (tmp_path / ".state").exists()
+
+
+@pytest.mark.parametrize("unsafe", [False, True])
+def test_selected_recipe_consumer_checks_effective_policy_before_tags(
+    selected_config, tmp_path, monkeypatch, unsafe
+):
+    raw = selected_config.to_dict()
+    identity = selected_config.identity
+    for kind, recipe in raw["recipes"].items():
+        recipe.update(
+            reference=f"{identity.registry_name}.azurecr.io/radius-recipes/{kind}:src-" + "c" * 64,
+            immutability="acr-abac-arm-import-v1",
+        )
+    config = OperatorConfig.from_dict(raw, identity=identity)
+    root = Path(__file__).resolve().parents[2]
+    provider = AzureProvider(
+        config,
+        root,
+        credentials(tmp_path / "credentials.json", config),
+        workspace=tmp_path / "work",
+    )
+    registry_id = (
+        PREFIX
+        + f"rg-{identity.stem}-platform/providers/Microsoft.ContainerRegistry/registries/"
+        + identity.registry_name
+    )
+    policy = json.loads((root / "scripts/operations/azure/registry-policy.json").read_text())
+    role_ids = {
+        policy[key]
+        for key in ("repositoryReaderRoleId", "repositoryWriterRoleId", "dataImporterRoleId")
+    }
+    calls = []
+
+    def az(*arguments):
+        calls.append(arguments)
+        if arguments[:2] == ("acr", "show"):
+            return {
+                "id": registry_id,
+                "roleAssignmentMode": "AbacRepositoryPermissions",
+                "adminUserEnabled": False,
+                "anonymousPullEnabled": False,
+                "loginServer": config.foundation["registryLoginServer"],
+                "tags": {"project": identity.project, "deployment": identity.deployment},
+            }
+        if arguments[:3] == ("role", "assignment", "list"):
+            assert arguments[arguments.index("--scope") + 1] == registry_id
+            assert "--include-inherited" in arguments
+            assert "--all" not in arguments
+            return [
+                {
+                    "roleDefinitionId": (
+                        f"/subscriptions/{SUBSCRIPTION}/providers/Microsoft.Authorization/"
+                        f"roleDefinitions/{role_id}"
+                    ),
+                    **(
+                        {
+                            "conditionVersion": policy["conditionVersion"],
+                            "condition": policy["writerCondition"],
+                        }
+                        if role_id == policy["repositoryWriterRoleId"] and not unsafe
+                        else {}
+                    ),
+                }
+                for role_id in role_ids
+            ]
+        if arguments[:3] == ("role", "definition", "list"):
+            assert arguments[arguments.index("--scope") + 1] == registry_id
+            role_id = arguments[arguments.index("--name") + 1]
+            assert role_id in role_ids
+            return [
+                {
+                    "name": role_id,
+                    "permissions": [
+                        {
+                            "actions": ["*/read"],
+                            "dataActions": (
+                                [
+                                    "Microsoft.ContainerRegistry/registries/repositories/content/write"
+                                ]
+                                if role_id == policy["repositoryWriterRoleId"]
+                                else []
+                            ),
+                        }
+                    ],
+                }
+            ]
+        assert arguments[:3] == ("acr", "repository", "show")
+        return {"digest": "sha256:" + "a" * 64}
+
+    monkeypatch.setattr(provider, "az", az)
+    if unsafe:
+        with pytest.raises(ProvisioningError):
+            provider.verify_recipes()
+        assert provider._verified is False
+        assert not any(call[:3] == ("acr", "repository", "show") for call in calls)
+    else:
+        provider.verify_recipes()
+        assert provider._verified is True
+        assert sum(call[:3] == ("acr", "repository", "show") for call in calls) == 4
+        assert calls[0] == ("acr", "show", "--name", identity.registry_name)
+
+
+def test_selected_azure_main_uses_key_vault_without_seed_or_persistent_workspace(
+    tmp_path, selected_config, monkeypatch
+):
+    identity = DemoConfig.from_values(selected_config.bootstrap_settings)
+    discovery = MagicMock(return_value=selected_config)
+    monkeypatch.setattr(provisioner, "read_runtime_configuration", discovery)
+    for name, value in identity.public_values().items():
+        monkeypatch.setenv(name, value)
+    identity_module, azure_module = ModuleType("azure.identity"), ModuleType("azure")
+    azure_module.__path__ = []
+
+    @contextmanager
+    def credential():
+        yield object()
+
+    identity_module.WorkloadIdentityCredential = credential
+    monkeypatch.setitem(sys.modules, "azure", azure_module)
+    monkeypatch.setitem(sys.modules, "azure.identity", identity_module)
+    properties = database_properties()
+    scope = (
+        f"/planes/radius/local/resourceGroups/{selected_config.radius_group}"
+        "/providers/Applications.Core"
+    )
+    properties.update(
+        application=f"{scope}/applications/management",
+        environment=f"{scope}/environments/management",
+    )
+    values = {
+        role: f"synthetic-{role}-" + "x" * 48
+        for role in credential_roles(selected_config, "management")
+    }
+    backend = MagicMock()
+    backend.scope = CredentialScope(
+        selected_config.identity.project, selected_config.identity.deployment, "azure"
+    )
+    backend.get.side_effect = lambda slot, role: CredentialValue(values[role])
+    factory = MagicMock(return_value=backend)
+    monkeypatch.setattr(provisioner, "azure_key_vault_store", factory)
+    monkeypatch.setattr(AzureProvider, "resource", lambda *args: properties)
+    workspaces = []
+
+    def authenticate(provider, **kwargs):
+        assert isinstance(provider.credentials, StoredCredentials)
+        workspaces.append(provider.state)
+
+    monkeypatch.setattr(AzureProvider, "authenticate", authenticate)
+    monkeypatch.setattr(AzureProvider, "connect_management", lambda _: None)
+    monkeypatch.setattr(AzureProvider, "verify_recipes", lambda _: None)
+    for name, value in {
+        "PROVIDER": "azure",
+        "PROJECT_ROOT": str(tmp_path),
+        "PROVISIONING_CONFIG": str(tmp_path / "missing-inventory.json"),
+        "PROVISIONING_CREDENTIALS_JSON": "not a credential seed",
+        "AZURE_CLIENT_ID": selected_config.coordinator_identity["clientId"],
+        "AZURE_TENANT_ID": selected_config.foundation["tenantId"],
+        "MANAGEMENT_DSN": database_dsn(properties, "mgmt_provisioner", values["mgmt_provisioner"]),
+    }.items():
+        monkeypatch.setenv(name, value)
+    operations, sessions = MagicMock(), []
+    operations.claim_pending.return_value = None
+
+    @contextmanager
+    def session(dsn):
+        sessions.append(dsn)
+        yield operations
+
+    monkeypatch.setattr(provisioner, "provisioner_session", session)
+    original, stopped = provisioner.run_loop, []
+    monkeypatch.setattr(
+        provisioner,
+        "run_loop",
+        lambda operations, provider: original(
+            operations,
+            provider,
+            sleep=lambda _: stopped.append(True),
+            stopped=lambda: bool(stopped),
+        ),
+    )
+    assert provisioner.main() == 0
+    discovery.assert_called_once_with(identity, tmp_path)
+    assert len(sessions) == 1
+    operations.interrupt_running.assert_called_once()
+    operations.claim_pending.assert_called_once()
+    factory.assert_called_once()
+    assert (
+        factory.call_args.args[1]
+        == f"https://{selected_config.foundation['vaultName']}.vault.azure.net"
+    )
+    assert factory.call_args.kwargs["singleton_writer"] is True
+    assert callable(factory.call_args.kwargs["singleton_guard"])
+    assert workspaces and all(not workspace.exists() for workspace in workspaces)
+    assert not (tmp_path / ".state").exists()
+    backend.close.assert_called_once()
+    backend.get_or_create.assert_not_called()
+
+
 def test_local_startup_fails_without_a_fake_provider(monkeypatch):
     monkeypatch.setenv("PROVIDER", "local")
     assert provisioner.main() == 1
+
+
+@pytest.mark.parametrize("slot", ["management", "shared-control"])
+def test_incluster_management_command_uses_only_the_guarded_service_provider(
+    selected_config, tmp_path, monkeypatch, capsys, slot
+):
+    root = Path(__file__).resolve().parents[2]
+    monkeypatch.syspath_prepend(str(root / "scripts/operations"))
+    spec = importlib.util.spec_from_file_location(
+        "incluster_management_entrypoint", root / "scripts/operations/deploy-plane.py"
+    )
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+    path = tmp_path / "job-inputs.json"
+    path.write_text(json.dumps(selected_config.to_dict()))
+    provided = "synthetic-provided-shared-key-" + "z" * 48
+    monkeypatch.setenv("DEMO_KEY_SHARED_DATA", provided)
+    monkeypatch.setattr(sys, "argv", ["deploy-plane.py", "--config", str(path), "--slot", slot])
+    active, writer = MagicMock(), MagicMock()
+    provider = MagicMock()
+    provider.credentials = MagicMock(spec=StoredCredentials)
+    provider.deploy_plane.return_value = "https://management.centralus.cloudapp.azure.com"
+    events = []
+
+    @contextmanager
+    def guards(config):
+        assert config.identity.demo_keys["shared-data"] == provided
+        events.append("lock")
+        yield active, writer
+        events.append("unlock")
+
+    @contextmanager
+    def factory(config, root, **kwargs):
+        assert kwargs == {"guard": active, "writer_guard": writer}
+        assert config.identity.demo_keys["shared-data"] == provided
+        events.append("provider")
+        yield provider
+        events.append("closed")
+
+    monkeypatch.setattr(script, "bootstrap_guards", guards)
+    monkeypatch.setattr(script, "service_provider", factory)
+    result = script.main()
+    output = capsys.readouterr()
+    if slot != "management":
+        assert result == 1 and "children_are_provisioner_owned" in output.err
+        assert not events
+        return
+    assert result == 0
+    assert events == ["lock", "provider", "closed", "unlock"]
+    assert json.loads(output.out) == {
+        "slot": "management",
+        "url": provider.deploy_plane.return_value,
+    }
+    provider.authenticate.assert_called_once_with(workload_required=True)
+    provider.get_access.assert_called_once_with("management")
+    provider.register.assert_called_once_with("management")
+    provider.credentials.seed_provided_keys.assert_called_once_with()
+    provider.deploy_plane.assert_called_once_with("management")
+    assert not (tmp_path / ".state").exists()
 
 
 def test_entrypoints_are_cloud_free_for_help():

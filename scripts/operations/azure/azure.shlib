@@ -1,0 +1,288 @@
+#!/usr/bin/env bash
+
+# shellcheck source=../../lib/env.sh
+source "$ROOT/scripts/lib/env.sh"
+
+azure_json() {
+  az "$@" --subscription "$AZURE_SUBSCRIPTION_ID" --output json
+}
+
+azure_cleanup() {
+  local status=$?
+  if [[ -n "${INSPECTION_CONTAINER:-}" ]]; then
+    if ! azure_remove_inspection_container; then
+      printf 'ERROR: Temporary inspection container was not removed: %s\n' "$INSPECTION_CONTAINER" >&2
+      status=1
+    fi
+  fi
+  if [[ -n "${AZURE_WORKSPACE:-}" ]]; then
+    [[ "$AZURE_WORKSPACE" == "$ROOT"/.azure-stage.* && -d "$AZURE_WORKSPACE" \
+      && ! -L "$AZURE_WORKSPACE" \
+      && "$(cd "$AZURE_WORKSPACE" && pwd -P)" == "$AZURE_WORKSPACE" ]] || {
+      demo_error 'Refusing unexpected temporary workspace cleanup'; return 1;
+    }
+    rm -rf -- "$AZURE_WORKSPACE" || return
+  fi
+  return "$status"
+}
+
+azure_init() {
+  local mode="${1:-write}"
+  [[ "$mode" == read || "$mode" == write ]] || {
+    demo_error 'Invalid Azure stage access mode'; return 1;
+  }
+  demo_load_env "$ROOT/.env" || return
+  [[ "$DEMO_ENV" == azure ]] || { demo_error 'This stage requires DEMO_ENV=azure'; return 1; }
+  [[ "$mode" == read || "${CONFIRM_AZURE:-}" == yes ]] || {
+    demo_error 'Azure mutations require CONFIRM_AZURE=yes'; return 1;
+  }
+  unset DEMO_KEY_MANAGEMENT DEMO_KEY_SHARED_CONTROL DEMO_KEY_SHARED_DATA \
+    DEMO_KEY_ISOLATED_1_CONTROL DEMO_KEY_ISOLATED_1_DATA
+  AZURE_SUBSCRIPTION_ID=$(printf '%s' "$AZURE_SUBSCRIPTION_ID" | tr 'A-F' 'a-f') || return
+  STEM="$DEMO_PROJECT-$DEMO_DEPLOYMENT-azure"
+  IDENTITY_HASH=$(printf '%s' "$AZURE_SUBSCRIPTION_ID/$DEMO_PROJECT/$DEMO_DEPLOYMENT/azure" \
+    | shasum -a 256 | cut -c 1-20) || return
+  [[ "$IDENTITY_HASH" =~ ^[a-f0-9]{20}$ ]] || { demo_error 'Invalid identity hash'; return 1; }
+  REGISTRY="acr$IDENTITY_HASH"
+  HOST="$REGISTRY.azurecr.io"
+  VAULT="${DEMO_KEY_VAULT:-kv-$IDENTITY_HASH}"
+  VAULT_OWNED=true
+  [[ -z "${DEMO_KEY_VAULT+x}" ]] || VAULT_OWNED=false
+  PLATFORM_GROUP="rg-$STEM-platform"
+  SUBSCRIPTION_SCOPE="/subscriptions/$AZURE_SUBSCRIPTION_ID"
+  PLATFORM_SCOPE="$SUBSCRIPTION_SCOPE/resourceGroups/$PLATFORM_GROUP"
+  VAULT_RESOURCE_GROUP="$PLATFORM_GROUP"
+  VAULT_ID="$PLATFORM_SCOPE/providers/Microsoft.KeyVault/vaults/$VAULT"
+  BICEP="$HOME/.rad/bin/bicep"
+  [[ -x "$BICEP" ]] || { demo_error 'Install Radius bundled Bicep 0.42.1 first'; return 1; }
+  BICEP_VERSION=$("$BICEP" --version) || return
+  [[ "$BICEP_VERSION" == 'Bicep CLI version 0.42.1 '* ]] || {
+    demo_error 'This stage requires Radius bundled Bicep 0.42.1'; return 1;
+  }
+  AZURE_WORKSPACE=$(mktemp -d "$ROOT/.azure-stage.XXXXXX") || return
+  chmod 700 "$AZURE_WORKSPACE" || return
+  trap azure_cleanup EXIT
+}
+
+azure_discover_vault() {
+  local lower_group
+  [[ "$VAULT_OWNED" == false ]] || return 0
+  azure_json keyvault list --query '[].{id:id,name:name}' \
+    > "$AZURE_WORKSPACE/vault-candidates.json" || return
+  jq --arg name "$VAULT" '[.[] | select((.name | ascii_downcase) == $name)]' \
+    "$AZURE_WORKSPACE/vault-candidates.json" > "$AZURE_WORKSPACE/vault-list.json" || return
+  jq -e 'type == "array" and length == 1' "$AZURE_WORKSPACE/vault-list.json" >/dev/null || {
+    demo_error 'Selected external vault is missing or ambiguous in this subscription'; return 1;
+  }
+  VAULT_RESOURCE_GROUP=$(jq -er '.[0].id | split("/") | .[4] | select(length > 0)' \
+    "$AZURE_WORKSPACE/vault-list.json") || return
+  lower_group=$(printf '%s' "$VAULT_RESOURCE_GROUP" | tr '[:upper:]' '[:lower:]') || return
+  [[ "$lower_group" != "rg-$STEM-"* ]] || {
+    demo_error 'An external vault must be outside the resource groups owned by this deployment'; return 1;
+  }
+  VAULT_ID=$(jq -er '.[0].id' "$AZURE_WORKSPACE/vault-list.json") || return
+  azure_json keyvault show --name "$VAULT" --resource-group "$VAULT_RESOURCE_GROUP" \
+    > "$AZURE_WORKSPACE/vault.json" || return
+  azure_json account show > "$AZURE_WORKSPACE/vault-account.json" || return
+  jq -e --arg id "$SUBSCRIPTION_SCOPE/resourceGroups/$VAULT_RESOURCE_GROUP/providers/Microsoft.KeyVault/vaults/$VAULT" \
+    --arg discovered "$VAULT_ID" --arg name "$VAULT" \
+    --slurpfile account "$AZURE_WORKSPACE/vault-account.json" '
+    (.id | ascii_downcase) == ($id | ascii_downcase) and
+    (.id | ascii_downcase) == ($discovered | ascii_downcase) and
+    (.name | ascii_downcase) == $name and
+    (.properties.tenantId | ascii_downcase) == ($account[0].tenantId | ascii_downcase) and
+    .properties.provisioningState == "Succeeded" and .properties.enableRbacAuthorization == true and
+    .properties.publicNetworkAccess == "Disabled" and .properties.networkAcls.defaultAction == "Deny" and
+    .properties.networkAcls.bypass == "AzureServices" and
+    .properties.enableSoftDelete == true and .properties.enablePurgeProtection == true and
+    .properties.vaultUri == ("https://" + $name + ".vault.azure.net/")
+  ' "$AZURE_WORKSPACE/vault.json" >/dev/null || {
+    demo_error 'External vault identity, tenant, RBAC, or private-network protection differs'; return 1;
+  }
+}
+
+azure_credential_names() {
+  local slot role tuple digest
+  local roles=()
+  for slot in management shared-control shared-data isolated-1-control isolated-1-data; do
+    case "$slot" in
+      management) roles=(demoKey mgmt_api mgmt_provisioner cp_shared cp_isolated_1) ;;
+      *-control) roles=(demoKey cp_api cp_reconciler dp_reconciler) ;;
+      *-data) roles=(demoKey) ;;
+    esac
+    for role in "${roles[@]}"; do
+      tuple=$(jq -cn --arg project "$DEMO_PROJECT" --arg deployment "$DEMO_DEPLOYMENT" \
+        --arg slot "$slot" --arg role "$role" '[$project,$deployment,"azure",$slot,$role]') || return
+      digest=$(printf '%s' "$tuple" | shasum -a 256 | cut -d ' ' -f 1) || return
+      [[ "$digest" =~ ^[a-f0-9]{64}$ ]] || { demo_error 'Invalid credential name hash'; return 1; }
+      printf 'credential-%s\n' "$digest"
+    done
+  done
+}
+
+azure_owned() {
+  jq -e --arg project "$DEMO_PROJECT" --arg deployment "$DEMO_DEPLOYMENT" '
+    .tags.project == $project and .tags.deployment == $deployment and
+    .tags.environment == "azure" and .tags.managedBy == "radius-todolist-app"
+  ' >/dev/null
+}
+
+azure_foundation() {
+  azure_discover_vault || return
+  azure_json deployment sub show --name "$STEM-bootstrap" > "$AZURE_WORKSPACE/deployment.json" || return
+  jq -e --arg project "$DEMO_PROJECT" --arg deployment "$DEMO_DEPLOYMENT" \
+    --arg subscription "$AZURE_SUBSCRIPTION_ID" --arg location "$AZURE_LOCATION" \
+    --arg stem "$STEM" --arg registry "$REGISTRY" --arg vault "$VAULT" \
+    --arg vaultId "$VAULT_ID" --arg vaultGroup "$VAULT_RESOURCE_GROUP" --argjson vaultOwned "$VAULT_OWNED" \
+    --arg scope "$SUBSCRIPTION_SCOPE" --arg platform "$PLATFORM_SCOPE" '
+      (.properties.outputs | map_values(.value)) as $o |
+      .properties.provisioningState == "Succeeded" and
+      .properties.parameters.projectName.value == $project and
+      .properties.parameters.deploymentName.value == $deployment and
+      $o.foundation.projectName == $project and
+      $o.foundation.deploymentName == $deployment and $o.foundation.environment == "azure" and
+      $o.foundation.resourcePrefix == $stem and $o.foundation.radiusResourceGroup == $stem and
+      ($o.foundation.subscriptionId | ascii_downcase) == $subscription and
+      $o.foundation.location == $location and
+      $o.foundation.platformResourceGroup == ("rg-" + $stem + "-platform") and
+      $o.foundation.registryName == $registry and
+      $o.foundation.registryLoginServer == ($registry + ".azurecr.io") and
+      ($o.foundation.registryId | ascii_downcase) ==
+        (($platform + "/providers/Microsoft.ContainerRegistry/registries/" + $registry) | ascii_downcase) and
+      $o.foundation.vaultName == $vault and
+      ($o.foundation.vaultId | ascii_downcase) == ($vaultId | ascii_downcase) and
+      $o.foundation.vaultOwned == $vaultOwned and $o.foundation.vaultResourceGroup == $vaultGroup and
+      ($o.managementCluster.id | ascii_downcase) ==
+        (($scope + "/resourceGroups/rg-" + $stem +
+          "-management-cluster/providers/Microsoft.ContainerService/managedClusters/aks-" +
+          $stem + "-management") | ascii_downcase) and
+      $o.managementCluster.name == ("aks-" + $stem + "-management") and
+      ($o.allocations | map(.slot) | sort) ==
+        ["isolated-1-control", "isolated-1-data", "management", "shared-control", "shared-data"] and
+      ($o.allocations | all(.[];
+        .clusterName == ("aks-" + $stem + "-" + .slot) and
+        .clusterResourceGroup == ("rg-" + $stem + "-" + .slot + "-cluster") and
+        .appResourceGroup == ("rg-" + $stem + "-" + .slot + "-app") and
+        .certificateName == ("gateway-" + $stem + "-" + .slot) and
+        .acmeStateSecretName == ("acme-" + $stem + "-" + .slot) and
+        .namespace == ($stem + "-" + .slot + "-" +
+          (if .slot == "management" then "management" else (.slot | split("-") | last) end))))
+  ' "$AZURE_WORKSPACE/deployment.json" >/dev/null || {
+    demo_error 'Foundation is incomplete or does not match the selected deployment'; return 1;
+  }
+  jq '.properties.outputs | map_values(.value)' "$AZURE_WORKSPACE/deployment.json" \
+    > "$AZURE_WORKSPACE/foundation.json" || return
+  HOST=$(jq -er '.foundation.registryLoginServer' "$AZURE_WORKSPACE/foundation.json") || return
+  azure_json network private-endpoint show --resource-group "$PLATFORM_GROUP" \
+    --name "pe-$STEM-vault" > "$AZURE_WORKSPACE/vault-endpoint.json" || return
+  azure_owned < "$AZURE_WORKSPACE/vault-endpoint.json" || {
+    demo_error 'Vault private endpoint has another owner'; return 1;
+  }
+  jq -e --arg id "$PLATFORM_SCOPE/providers/Microsoft.Network/privateEndpoints/pe-$STEM-vault" \
+    --arg vault "$VAULT_ID" '
+    (.id | ascii_downcase) == ($id | ascii_downcase) and .provisioningState == "Succeeded" and
+    (.privateLinkServiceConnections | length) == 1 and
+    (.privateLinkServiceConnections[0].privateLinkServiceId | ascii_downcase) == ($vault | ascii_downcase) and
+    .privateLinkServiceConnections[0].groupIds == ["vault"] and
+    .privateLinkServiceConnections[0].privateLinkServiceConnectionState.status == "Approved"
+  ' "$AZURE_WORKSPACE/vault-endpoint.json" >/dev/null || {
+    demo_error 'Vault private endpoint must target the selected vault and have owner approval'; return 1;
+  }
+}
+
+azure_registry() {
+  azure_json acr show --name "$REGISTRY" --resource-group "$PLATFORM_GROUP" \
+    > "$AZURE_WORKSPACE/registry.json" || return
+  azure_owned < "$AZURE_WORKSPACE/registry.json" || {
+    demo_error 'Registry ownership differs from the selected deployment'; return 1;
+  }
+  jq -e '.roleAssignmentMode == "AbacRepositoryPermissions" and .adminUserEnabled == false
+         and .anonymousPullEnabled != true' \
+    "$AZURE_WORKSPACE/registry.json" >/dev/null || {
+    demo_error 'Registry must already use AbacRepositoryPermissions with admin access disabled; legacy-mode migration is not implicit'
+    return 1
+  }
+  jq -e --arg id "$PLATFORM_SCOPE/providers/Microsoft.ContainerRegistry/registries/$REGISTRY" \
+    --arg host "$HOST" '
+      (.id | ascii_downcase) == ($id | ascii_downcase) and
+      .loginServer == $host and .provisioningState == "Succeeded"
+    ' "$AZURE_WORKSPACE/registry.json" >/dev/null || {
+      demo_error 'Registry identity or provisioning state differs'; return 1;
+    }
+}
+
+azure_recipe_policy() {
+  local role
+  [[ -x "$ROOT/.venv/bin/python" ]] || {
+    demo_error 'Registry permission validation requires the project Python environment'; return 1;
+  }
+  azure_json role assignment list --scope \
+    "$PLATFORM_SCOPE/providers/Microsoft.ContainerRegistry/registries/$REGISTRY" \
+    --include-inherited --fill-principal-name false --fill-role-definition-name false \
+    > "$AZURE_WORKSPACE/registry-assignments.json" || return
+  jq -er '.[].roleDefinitionId | split("/") | last' \
+    "$AZURE_WORKSPACE/registry-assignments.json" | sort -u > "$AZURE_WORKSPACE/registry-role-ids" || return
+  printf '[]' > "$AZURE_WORKSPACE/registry-definitions.json"
+  while IFS= read -r role; do
+    [[ "$role" =~ ^[a-fA-F0-9]{8}(-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}$ ]] || {
+      demo_error 'Invalid registry role identifier'; return 1;
+    }
+    azure_json role definition list --name "$role" > "$AZURE_WORKSPACE/role.json" || return
+    jq -e --arg role "$role" \
+      'type == "array" and length == 1 and (.[0].name | ascii_downcase) == ($role | ascii_downcase)' \
+      "$AZURE_WORKSPACE/role.json" >/dev/null || {
+      demo_error 'Registry role definition could not be verified'; return 1;
+    }
+    jq -s 'add' "$AZURE_WORKSPACE/registry-definitions.json" "$AZURE_WORKSPACE/role.json" \
+      > "$AZURE_WORKSPACE/registry-definitions.next" || return
+    mv "$AZURE_WORKSPACE/registry-definitions.next" "$AZURE_WORKSPACE/registry-definitions.json" || return
+  done < "$AZURE_WORKSPACE/registry-role-ids"
+  "$ROOT/.venv/bin/python" "$ROOT/scripts/operations/azure/registry_policy.py" \
+    --assignments "$AZURE_WORKSPACE/registry-assignments.json" \
+    --definitions "$AZURE_WORKSPACE/registry-definitions.json"
+}
+
+azure_has_tag() {
+  local repository="$1" tag="$2"
+  azure_json acr repository list --name "$REGISTRY" > "$AZURE_WORKSPACE/repositories.json" || return 2
+  jq -e 'type == "array" and all(.[]; type == "string")' \
+    "$AZURE_WORKSPACE/repositories.json" >/dev/null || return 2
+  if ! jq -e --arg repository "$repository" 'index($repository) != null' \
+    "$AZURE_WORKSPACE/repositories.json" >/dev/null; then
+    return 1
+  fi
+  azure_json acr repository show-tags --name "$REGISTRY" --repository "$repository" \
+    > "$AZURE_WORKSPACE/tags.json" || return 2
+  jq -e 'type == "array" and all(.[]; type == "string")' \
+    "$AZURE_WORKSPACE/tags.json" >/dev/null || return 2
+  jq -e --arg tag "$tag" 'index($tag) != null' "$AZURE_WORKSPACE/tags.json" >/dev/null
+}
+
+azure_digest() {
+  azure_json acr repository show --name "$REGISTRY" --image "$1" \
+    > "$AZURE_WORKSPACE/image.json" || return
+  jq -er '.digest | select(test("^sha256:[a-f0-9]{64}$"))' \
+    "$AZURE_WORKSPACE/image.json" || { demo_error 'Invalid registry manifest digest'; return 1; }
+}
+
+azure_lock() {
+  local image="$1" digest="$2"
+  azure_json acr repository update --name "$REGISTRY" --image "$image" \
+    --write-enabled false --delete-enabled false > "$AZURE_WORKSPACE/lock.json" || return
+  azure_assert_lock "$digest"
+}
+
+azure_verify_lock() {
+  azure_json acr repository show --name "$REGISTRY" --image "$1" \
+    > "$AZURE_WORKSPACE/lock.json" || return
+  azure_assert_lock "$2"
+}
+
+azure_assert_lock() {
+  jq -e --arg digest "$1" '
+    .digest == $digest and .changeableAttributes.writeEnabled == false and
+    .changeableAttributes.deleteEnabled == false
+  ' "$AZURE_WORKSPACE/lock.json" >/dev/null || {
+    demo_error 'Immutable artifact lock did not match the observed digest'; return 1;
+  }
+}

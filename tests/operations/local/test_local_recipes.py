@@ -2,6 +2,7 @@ import base64
 import io
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -15,8 +16,9 @@ from local_support import ROOT, common, load, prepare, server
 RECIPES = ROOT / "infra/radius/recipes/local"
 HELPERS = ROOT / "scripts/recipes/local"
 SLOTS = ("shared-control", "shared-data", "isolated-1-control", "isolated-1-data")
-API_IMAGE = "localhost/radplanes-plane-api:" + "a" * 40
-WORKER_IMAGE = "localhost/radplanes-plane-provisioner:" + "b" * 40
+API_IMAGE = "localhost/radplanes-local-api:" + "a" * 40
+WORKER_IMAGE = "localhost/radplanes-local-provisioner:" + "b" * 40
+OPERATOR_IMAGE = "localhost/radplanes-local-operator:" + "c" * 40
 
 
 @pytest.mark.parametrize("recipe", prepare.RECIPE_FILES)
@@ -101,9 +103,7 @@ def test_bundle_keeps_one_exact_immutable_archive_per_server():
         assert sha == common.digest((ROOT / name).read_bytes())
     assert {
         name for name in bundle["sharedSourceHashes"] if name.startswith("infra/radius/apps/")
-    } == {
-        f"infra/radius/apps/{role}.bicep" for role in ("management", "control", "data")
-    }
+    } == {f"infra/radius/apps/{role}.bicep" for role in ("management", "control", "data")}
 
 
 def test_recipe_bundle_cli_returns_same_source_inputs():
@@ -242,6 +242,8 @@ def docker_double(tmp_path):
         "        print('worker' if mode == 'role' else 'control-plane')\n"
         "    else:\n"
         "        print('172.18.0.4')\n"
+        "elif args[:2] == ['image', 'inspect']:\n"
+        "    print('sha256:' + 'd' * 64)\n"
         "elif args[:2] == ['image', 'save']:\n"
         "    sys.stdout.buffer.write(b'offline-image-stream')\n"
         "    sys.exit(17 if mode == 'save' else 0)\n"
@@ -259,7 +261,10 @@ def docker_double(tmp_path):
         "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
         "CALLS": str(calls),
         "LOCAL_CLUSTER": "radplanes-local-shared-control",
-        "LOCAL_IMAGES": API_IMAGE + "\n" + WORKER_IMAGE,
+        "LOCAL_RESOURCE_PREFIX": "radplanes-local",
+        "LOCAL_SLOT": "shared-control",
+        "LOCAL_IMAGES": "\n".join((API_IMAGE, WORKER_IMAGE, OPERATOR_IMAGE, common.NODE_IMAGE)),
+        "LOCAL_IMAGE_IDS": "\n".join(["sha256:" + "d" * 64] * 4),
     }
     return tmp_path, env, calls
 
@@ -293,19 +298,20 @@ def run_import(fixture, *, trace=False):
 def test_image_copy_runpath_targets_only_created_owned_child(docker_double, slot):
     _, env, _ = docker_double
     env["LOCAL_CLUSTER"] = f"radplanes-local-{slot}"
+    env["LOCAL_SLOT"] = slot
     result, commands = run_import(docker_double)
     assert result.returncode == 0, result.stderr
     node = f"radplanes-local-{slot}-control-plane"
     assert all(command[-1] == node for command in commands[:2])
-    assert commands[2:4] == [
+    assert commands[3:5] == [
         ["image", "save", API_IMAGE],
         ["exec", "-i", node, "ctr", "--namespace", "k8s.io", "images", "import", "-"],
-    ] or commands[2:4] == [
+    ] or commands[3:5] == [
         ["exec", "-i", node, "ctr", "--namespace", "k8s.io", "images", "import", "-"],
         ["image", "save", API_IMAGE],
     ]
-    assert sum(command[:2] == ["image", "save"] for command in commands) == 2
-    assert sum(command[-3:] == ["images", "list", "--quiet"] for command in commands) == 2
+    assert sum(command[:2] == ["image", "save"] for command in commands) == 4
+    assert sum(command[-3:] == ["images", "list", "--quiet"] for command in commands) == 4
     assert all("create" not in command and "run" not in command for command in commands)
 
 
@@ -414,7 +420,7 @@ def test_node_address_helper_accepts_all_reserved_children(docker_double, slot):
     directory, env, calls = docker_double
     env["LOCAL_CLUSTER"] = f"radplanes-local-{slot}"
     result = subprocess.run(
-        ["sh", str(HELPERS / "cluster/node-address.sh"), env["LOCAL_CLUSTER"]],
+        ["sh", str(HELPERS / "cluster/node-address.sh"), env["LOCAL_RESOURCE_PREFIX"], slot],
         cwd=directory,
         env=env,
         capture_output=True,
@@ -426,24 +432,90 @@ def test_node_address_helper_accepts_all_reserved_children(docker_double, slot):
     assert all(command[-1] == env["LOCAL_CLUSTER"] + "-control-plane" for command in commands)
 
 
+def test_prepared_image_data_source_checks_ids_without_pulling(docker_double):
+    directory, env, calls = docker_double
+    expected = "sha256:" + "d" * 64
+    result = subprocess.run(
+        [
+            "sh",
+            str(HELPERS / "cluster/check-images.sh"),
+            "radplanes-local",
+            API_IMAGE,
+            expected,
+            OPERATOR_IMAGE,
+            expected,
+        ],
+        cwd=directory,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"prepared": "true"}
+    commands = [json.loads(line) for line in calls.read_text().splitlines()]
+    assert all(command[:2] == ["image", "inspect"] for command in commands)
+    result = subprocess.run(
+        [
+            "sh",
+            str(HELPERS / "cluster/check-images.sh"),
+            "radplanes-local",
+            API_IMAGE,
+            "sha256:" + "e" * 64,
+        ],
+        cwd=directory,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "changed or is missing" in result.stderr
+
+
+def test_first_create_graph_orders_preparation_node_and_address_probe():
+    compiler = ROOT / ".state/check/local-infra-tools/terraform"
+    if not compiler.is_file():
+        executable = shutil.which("terraform")
+        assert executable is not None, "Terraform is required for the Recipe graph regression"
+        compiler = Path(executable)
+    result = subprocess.run(
+        [str(compiler), f"-chdir={RECIPES / 'cluster'}", "graph", "-type=plan"],
+        env={**os.environ, "CHECKPOINT_DISABLE": "1"},
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert (
+        '"[root] data.external.child_address (expand)" -> "[root] kind_cluster.child (expand)"'
+        in result.stdout
+    )
+    assert (
+        '"[root] kind_cluster.child (expand)" -> "[root] data.external.prepared_images (expand)"'
+        in result.stdout
+    )
+
+
 def test_validator_checks_the_actual_archive_of_every_recipe(local_state, monkeypatch):
     validator = load("local_recipe_validator", ROOT / "scripts/operations/local/validate.py")
-    monkeypatch.setattr(validator, "STATE", local_state)
     commands = Mock()
+    commands.environment = {"PATH": os.environ["PATH"]}
     monkeypatch.setattr(validator, "Commands", Mock(return_value=commands))
-    seen = []
+    seen, workspaces = [], []
 
     def check_archive(argv, **kwargs):
         if argv[2] != "init":
-            return
+            return ""
         directory = Path(argv[1].removeprefix("-chdir="))
-        recipe = directory.name.rsplit("-", 1)[0]
+        recipe = directory.name
         for name in prepare.RECIPE_FILES[recipe]:
             source = HELPERS if name.endswith(".sh") else RECIPES
             assert (directory / name).read_bytes() == (source / recipe / name).read_bytes()
         assert "-backend=false" in argv and "-lockfile=readonly" in argv
         assert (directory / "tests" / f"{recipe}.tftest.hcl").is_file()
         seen.append(recipe)
+        workspaces.append(directory.parent)
+        assert not directory.is_relative_to(local_state)
+        return ""
 
     commands.run.side_effect = check_archive
     validator.validate()
@@ -451,4 +523,6 @@ def test_validator_checks_the_actual_archive_of_every_recipe(local_state, monkey
     assert [call.args[0][2] for call in commands.run.call_args_list] == [
         stage for _ in prepare.RECIPE_FILES for stage in ("fmt", "init", "validate", "test")
     ]
-    assert list((local_state / "validation").iterdir()) == []
+    assert all(not path.exists() for path in workspaces)
+    assert not (local_state / "validation").exists()
+    assert "no-live-tools" in commands.environment["PATH"]

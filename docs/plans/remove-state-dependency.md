@@ -49,16 +49,18 @@ general-purpose workflow/retry engine.
 - [x] (2026-09-14) Implement the literal `.env` initializer and typed configuration loader; Bash initialization and native endpoint/API helpers are Make-wired. Deployment consumption remains below.
 - [x] (2026-09-14) Share the selected identity with provider configuration, namespaces, Radius/access scopes, data project labels, and Azure certificate/Redis helpers. Add explicit temporary workspace support and a native Radius installer. Correct default context, CLI cache, caller argument, region, and image-source omissions found during verification.
 - [x] (2026-09-14) Implement and review service-owned credential-store primitives; committed/pushed in `84e8971`. Provider integration remains below.
-- [ ] Implement temporary workspaces and live metadata discovery.
-- [ ] Move Azure credentials to Key Vault and local credentials to Kubernetes.
+- [x] (2026-09-15) Implement temporary workspaces and live metadata discovery in both normal deployment callers and worker startup; component checks pass, live proof remains below.
+- [x] (2026-09-14) Wire public identity ConfigMap injection into selected worker startup and reconstruct runtime inputs from current Kubernetes/Radius/ARM APIs. Verify missing-inventory main paths, scoped ABAC consumer checks and local revision selection; 427 focused tests pass after the two rubber-duck corrections, and the bounded security review found no vulnerabilities. The corresponding native Azure flag correction passes six focused checks, including pinned CLI argument validation. Final caller integration and legacy-path retirement remain below.
+- [x] (2026-09-15) Wire service-owned credentials through both normal callers and worker startup; remove the worker's replay-seed and file-configuration branches.
 - [x] (2026-09-14) Remove database endpoint inventories and observe live shared-pair resources. Correct Radius ownership checks after rubber-duck review; both fix reviews, 265 focused tests, and 45 real PostgreSQL integration cases pass.
 - [x] (2026-09-14) Wire read-only transaction-owned database observation into both providers and replace database intent files with the actual init Secret. Unit and real PostgreSQL checks pass; corrected the orphan runtime-Secret gap found in review.
-- [ ] Remove remaining cluster/bootstrap filesystem operation markers.
-- [ ] Simplify local bootstrap and remove checkout-file mount dependencies.
-- [ ] Wire manual commands, API response contracts, scenarios, and cleanup.
+- [x] (2026-09-15) Use Radius/Kubernetes/SQL owners for normal bootstrap/provisioning progress; remove working PVCs and runtime state mounts.
+- [x] (2026-09-15) Wire the native prepared local build/bootstrap/setup pipeline and public operator factory. Runtime, credentials and access no longer require checkout mounts or saved workstation records.
+- [x] (2026-09-14) Convert the canonical local deployment caller to current setup/access APIs and the guarded service-credential factory. Fix fresh-checkout extension generation and nested-process timeout handling found in rubber-duck review; 225 focused tests pass with actual compiler and process checks. Bounded security review found no vulnerabilities. Native Make routing, legacy runtime-state removal and live proof remain open.
+- [x] (2026-09-15) Wire .env-selected Make/native stages, live kube/API helpers, owner-based cleanup and both updated manual guides. Source checks pass; host Make execution remains blocked by its Xcode license prerequisite.
 - [x] (2026-09-14) Wire public harness entrypoints and Make aliases to `.env`/live discovery and resource-owned fault recovery. Resolve pre-seal interruption, forged-baseline and replaced-Pod cancellation findings; both fix reviews and the final 450-test/230-subtest scoped run pass. Live outage proof and deployment/cleanup integration remain pending.
 - [ ] Prove Azure first and local second, including fresh-checkout and empty-worker recovery.
-- [ ] Retire the old runtime paths, update documentation, and commit the verified implementation.
+- [x] (2026-09-15) Retire worker file startup/state mounts, update current walkthroughs and contracts, and include the reviewed source implementation in this checkpoint. Source/unit/Recipe checks are recorded in FINDINGS; live verification remains a separate blocked step.
 - [ ] After implementation and verification, consolidate `docs/`, remove obsolete/duplicate documents and this ExecPlan, and update all surviving links.
 
 ## Surprises & Discoveries

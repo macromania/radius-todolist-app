@@ -10,17 +10,17 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 @pytest.mark.parametrize(
-    "target,operation,mutates",
+    "target,stage,environment",
     [
-        ("local-prepare", "scripts/operations/local/prepare.py", False),
-        ("local-executor-build", "scripts/operations/local/images.py build --execute", True),
-        ("local-executor-inspect", "scripts/operations/local/images.py inspect --execute", True),
-        ("local-bootstrap", "scripts/operations/local/bootstrap.py create --execute", True),
-        ("local-install-radius", "scripts/operations/local/bootstrap.py install --execute", True),
-        ("deploy-management-preview", "scripts/operations/run-management-job.py", False),
+        ("local-build", "build", "local"),
+        ("local-inspect-build", "inspect-build", "local"),
+        ("local-bootstrap", "bootstrap", "local"),
+        ("local-setup", "setup", "local"),
+        ("local-deploy-management", "deploy-management", "local"),
+        ("deploy-management-preview", "preview-management", None),
     ],
 )
-def test_manual_target_runs_one_explicit_stage(tmp_path, target, operation, mutates):
+def test_manual_target_runs_one_explicit_stage(tmp_path, target, stage, environment):
     result = subprocess.run(
         [
             "make",
@@ -37,30 +37,11 @@ def test_manual_target_runs_one_explicit_stage(tmp_path, target, operation, muta
         text=True,
         check=True,
     )
-    assert operation in result.stdout
-    assert result.stdout.count("uv run --no-sync python") == 1
-    if mutates:
-        assert "Set CONFIRM_LOCAL=yes" in result.stdout
-        denied = subprocess.run(
-            [
-                "make",
-                "--no-print-directory",
-                "-f",
-                str(ROOT / "Makefile"),
-                target,
-                "CONFIRM_LOCAL=no",
-                "RUN=false",
-            ],
-            cwd=tmp_path,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert denied.returncode != 0
-        assert "Set CONFIRM_LOCAL=yes" in denied.stderr
-        assert operation not in denied.stdout
-    else:
-        assert "--execute" not in result.stdout
+    assert f"bash scripts/operations/stage.sh {stage}" in result.stdout
+    assert result.stdout.count("bash scripts/operations/stage.sh") == 1
+    if environment:
+        assert f"PLANE_DEMO_EXPECT_ENV={environment}" in result.stdout
+    assert ".state/" not in result.stdout
 
 
 @pytest.mark.parametrize("checker_exit", [0, 7])

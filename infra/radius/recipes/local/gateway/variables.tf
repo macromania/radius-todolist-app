@@ -19,9 +19,9 @@ variable "context" {
       ], var.context.environment.name) && (
       var.context.application.name == (var.context.environment.name == "management" ? "management" : endswith(var.context.environment.name, "-control") ? "control" : "data")
       ) && (
-      var.context.runtime.kubernetes.namespace == "radplanes-local-${var.context.environment.name}-${var.context.application.name}"
+      var.context.runtime.kubernetes.namespace == "${var.resource_prefix}-${var.context.environment.name}-${var.context.application.name}"
       ) && can(regex(
-        "^/planes/radius/local/resourcegroups/radplanes-local/providers/demo\\.platform/gateways/[a-z][a-z0-9-]*$",
+        "^/planes/radius/local/resourcegroups/${var.radius_group}/providers/demo\\.platform/gateways/[a-z][a-z0-9-]*$",
         lower(var.context.resource.id)
     ))
     error_message = "Gateway must use an owned slot, Radius group, and matching application namespace."
@@ -46,5 +46,23 @@ variable "gateway_host_port" {
       isolated-1-control = 35493, isolated-1-data = 35494
     }, var.context.environment.name, -1)
     error_message = "gateway_host_port must be the exact slot reservation in 35490-35494."
+  }
+}
+
+variable "resource_prefix" {
+  description = "Selected project-deployment-local physical resource prefix."
+  type        = string
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]{0,23}[a-z0-9]$", var.resource_prefix))
+    error_message = "resource_prefix must be a validated lowercase deployment stem."
+  }
+}
+
+variable "radius_group" {
+  description = "Radius group that owns the gateway."
+  type        = string
+  validation {
+    condition     = var.radius_group == var.resource_prefix
+    error_message = "radius_group must match the selected deployment."
   }
 }

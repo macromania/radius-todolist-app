@@ -6,6 +6,8 @@ mock_provider "random" {
 }
 
 variables {
+  resource_prefix = "radplanes-local"
+  radius_group    = "radplanes-local"
   context = {
     application = { name = "data" }
     environment = { name = "shared-data" }

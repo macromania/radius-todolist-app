@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Preview full local teardown; --execute destroys demo data through its owners."""
+"""Preview .env-selected local teardown; --execute destroys data through verified live owners."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import argparse
 import base64
 import gzip
 import importlib.util
+import io
 import json
 import re
 import ssl
@@ -15,7 +16,7 @@ import time
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import yaml
@@ -95,6 +96,181 @@ def backend_secret_name(resource: dict) -> str:
     require(environment and application, "Full cleanup requires application-bound Terraform state")
     key = f"{environment}-{application}-{resource['id']}".lower()
     return "tfstate-default-" + digest(key.encode())[:40]
+
+
+def terraform_envelope(state):
+    require(
+        isinstance(state, dict)
+        and isinstance(state.get("lineage"), str)
+        and state["lineage"]
+        and type(state.get("serial")) is int
+        and state["serial"] > 0
+        and state.get("terraform_version") == "1.15.8"
+        and isinstance(state.get("resources"), list)
+        and all(
+            isinstance(item, dict) and item.get("mode") in {"managed", "data"}
+            for item in state["resources"]
+        ),
+        "Terraform state is incomplete or uses an unexpected version",
+    )
+    return {"lineage": state["lineage"], "serial": state["serial"]}
+
+
+def decode_terraform_payload(encoded):
+    try:
+        compressed = base64.b64decode(encoded, validate=True)
+        with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as stream:
+            raw = stream.read(4_000_001)
+        require(len(raw) <= 4_000_000, "Terraform payload exceeds the cleanup limit")
+        state = json.loads(raw)
+    except (OSError, EOFError, UnicodeError, ValueError):
+        raise LocalError("Terraform state payload is invalid") from None
+    return state, {**terraform_envelope(state), "sha256": digest(raw)}
+
+
+def managed_owners(state, expected, *, strict=True):
+    terraform_envelope(state)
+    managed = [entry for entry in state["resources"] if entry["mode"] == "managed"]
+    require(
+        len(managed) == len(expected)
+        and {(entry.get("type"), entry.get("name")) for entry in managed} == set(expected),
+        "Terraform contains missing, extra, or foreign managed resources",
+    )
+    result = {}
+    for entry in managed:
+        require(entry.get("module") == "module.default", "Terraform resource module differs")
+        instances = entry.get("instances")
+        require(isinstance(instances, list) and len(instances) == 1, "Partial Terraform ownership")
+        instance = instances[0]
+        require(
+            not instance.get("deposed") and not instance.get("status"),
+            "Terraform instance is tainted or deposed",
+        )
+        if strict:
+            provider = (
+                "terraform.io/builtin/terraform"
+                if entry["type"] == "terraform_data"
+                else "registry.terraform.io/tehcyx/kind"
+                if entry["type"] == "kind_cluster"
+                else "registry.terraform.io/hashicorp/random"
+                if entry["type"] == "random_password"
+                else "registry.terraform.io/hashicorp/kubernetes"
+            )
+            reference = f'provider["{provider}"]'
+            require(
+                entry.get("provider") in {reference, "module.default." + reference},
+                "Terraform resource provider differs",
+            )
+            require(instance.get("index_key") is None, "Unexpected counted Terraform owner")
+        require(
+            isinstance(instance.get("attributes"), dict), "Terraform resource attributes missing"
+        )
+        result[entry["type"], entry["name"]] = (entry, instance)
+    return result
+
+
+def validate_cluster_payload(
+    state, cluster_name, access_namespace, images, *, counted=False, strict=True
+):
+    owners = managed_owners(
+        state,
+        {
+            ("kind_cluster", "child"),
+            ("kubernetes_secret_v1", "access"),
+            ("terraform_data", "images"),
+        },
+        strict=strict,
+    )
+    attrs = owners["kind_cluster", "child"][1]["attributes"]
+    require(
+        attrs.get("name") == cluster_name
+        and attrs.get("id") == f"{cluster_name}-{NODE_IMAGE}"
+        and attrs.get("node_image") == NODE_IMAGE
+        and attrs.get("completed") is True
+        and isinstance(attrs.get("kubeconfig"), str)
+        and attrs["kubeconfig"]
+        and isinstance(attrs.get("client_key"), str)
+        and attrs["client_key"],
+        "Terraform does not describe the completed, owned child",
+    )
+    image_load, instance = owners["terraform_data", "images"]
+    image_attrs = instance["attributes"]
+    image_type = "string" if counted else ["object", {"reference": "string", "image_id": "string"}]
+    types = [
+        ["object", {"cluster_id": "string", "images": ["list", image_type]}],
+        ["object", {"cluster_id": "string", "images": ["tuple", [image_type] * len(images)]}],
+    ]
+    trigger = image_attrs.get("triggers_replace", {})
+    require(
+        image_load.get("provider") == 'provider["terraform.io/builtin/terraform"]'
+        and instance.get("schema_version") == 0
+        and (
+            (type(instance.get("index_key")) is int and instance["index_key"] == 0)
+            if counted
+            else instance.get("index_key") is None
+        )
+        and image_attrs.get("input") is None
+        and image_attrs.get("output") is None
+        and set(trigger) == {"type", "value"}
+        and trigger["type"] in types
+        and trigger["value"] == {"cluster_id": attrs["id"], "images": images},
+        "Terraform image-load owner or its inspected image references changed",
+    )
+    access_attrs = owners["kubernetes_secret_v1", "access"][1]["attributes"]
+    metadata = access_attrs.get("metadata", [])
+    require(
+        len(metadata) == 1
+        and metadata[0].get("name") == cluster_name + "-access"
+        and metadata[0].get("namespace") == access_namespace
+        and (
+            not strict
+            or access_attrs.get("id") == access_namespace + "/" + cluster_name + "-access"
+        ),
+        "Terraform access reference differs",
+    )
+    return attrs
+
+
+APPLICATION_STATE_OWNERS = {
+    "Demo.Platform/postgreSqlDatabases": {
+        ("random_password", "server"): None,
+        ("kubernetes_secret_v1", "server"): "postgres-credentials",
+        ("kubernetes_secret_v1", "setup"): "postgres-setup",
+        ("kubernetes_persistent_volume_claim_v1", "data"): "postgres-data",
+        ("kubernetes_service_v1", "postgres"): "postgres",
+        ("kubernetes_stateful_set_v1", "postgres"): "postgres",
+    },
+    "Applications.Datastores/redisCaches": {
+        ("random_password", "server"): None,
+        ("kubernetes_secret_v1", "server"): "redis-credentials",
+        ("kubernetes_persistent_volume_claim_v1", "data"): "redis-data",
+        ("kubernetes_service_v1", "redis"): "redis",
+        ("kubernetes_stateful_set_v1", "redis"): "redis",
+    },
+    "Demo.Platform/gateways": {
+        ("kubernetes_service_v1", "backend"): "gateway-api",
+        ("kubernetes_config_map_v1", "envoy"): "gateway-envoy",
+        ("kubernetes_deployment_v1", "envoy"): "gateway",
+        ("kubernetes_service_v1", "gateway"): "gateway",
+    },
+}
+
+
+def validate_application_payload(state, resource_type, namespace):
+    expected = APPLICATION_STATE_OWNERS[resource_type]
+    owners = managed_owners(state, expected)
+    for key, name in expected.items():
+        if name is None:
+            continue
+        attributes = owners[key][1]["attributes"]
+        metadata = attributes.get("metadata", [])
+        require(
+            len(metadata) == 1
+            and metadata[0].get("name") == name
+            and metadata[0].get("namespace") == namespace
+            and attributes.get("id") == namespace + "/" + name,
+            "Terraform application resource targets an unowned Kubernetes object",
+        )
 
 
 def fault_support():
@@ -374,17 +550,7 @@ class Cleanup:
             and labels.get("app.kubernetes.io/managed-by") == "terraform",
             "Foreign Terraform state owner",
         )
-        state = json.loads(
-            gzip.decompress(base64.b64decode(stored["data"]["tfstate"], validate=True))
-        )
-        require(
-            isinstance(state["lineage"], str)
-            and state["lineage"]
-            and type(state["serial"]) is int
-            and state["serial"] > 0
-            and state["terraform_version"] == "1.15.8",
-            f"{slot}: Terraform state is incomplete or uses an unexpected version",
-        )
+        state, _ = decode_terraform_payload(stored["data"]["tfstate"])
         summary = {
             "secret": name,
             "uid": metadata["uid"],
@@ -395,67 +561,19 @@ class Cleanup:
             "terraformState" not in target or target["terraformState"] == summary,
             f"{slot}: Terraform owner changed since preflight",
         )
-        managed = [entry for entry in state["resources"] if entry["mode"] == "managed"]
-        kinds = [entry for entry in managed if entry["type"] == "kind_cluster"]
-        accesses = [entry for entry in managed if entry["type"] == "kubernetes_secret_v1"]
-        image_loads = [entry for entry in managed if entry["type"] == "terraform_data"]
-        require(
-            len(managed) == 3 and len(kinds) == len(accesses) == len(image_loads) == 1,
-            "Full cleanup requires exactly the cluster, image-load, and access Terraform owners",
-        )
-        require(
-            len(kinds[0]["instances"])
-            == len(accesses[0]["instances"])
-            == len(image_loads[0]["instances"])
-            == 1,
-            "Partial Terraform ownership",
-        )
-        attrs = kinds[0]["instances"][0]["attributes"]
         name = f"radplanes-local-{slot}"
-        require(
-            attrs["name"] == name
-            and attrs["id"] == f"{name}-{NODE_IMAGE}"
-            and attrs["node_image"] == NODE_IMAGE
-            and attrs["completed"] is True
-            and attrs["kubeconfig"]
-            and attrs["client_key"],
-            "Terraform does not describe the completed, owned child",
-        )
-        image_load = image_loads[0]
-        instance = image_load["instances"][0]
-        image_attrs = instance["attributes"]
-        require(
-            image_load.get("module") == "module.default"
-            and image_load.get("name") == "images"
-            and image_load.get("provider") == 'provider["terraform.io/builtin/terraform"]'
-            and type(instance.get("index_key")) is int
-            and instance["index_key"] == 0
-            and instance.get("schema_version") == 0
-            and not instance.get("deposed")
-            and not instance.get("status")
-            and image_attrs["input"] is None
-            and image_attrs["output"] is None
-            and image_attrs.get("triggers_replace")
-            == {
-                "type": ["object", {"cluster_id": "string", "images": ["list", "string"]}],
-                "value": {
-                    "cluster_id": attrs["id"],
-                    "images": [
-                        self.record["images"][role]["reference"] for role in ("api", "provisioner")
-                    ],
-                },
-            },
-            "Terraform image-load owner or its inspected image references changed",
+        attrs = validate_cluster_payload(
+            state,
+            name,
+            NAMESPACE,
+            [self.record["images"][role]["reference"] for role in ("api", "provisioner")],
+            counted=True,
+            strict=False,
         )
         access = target["accessSecret"]
         require(
             access["name"] == f"{name}-access" and access["namespace"] == NAMESPACE,
             "Foreign access Secret",
-        )
-        tracked = accesses[0]["instances"][0]["attributes"]["metadata"][0]
-        require(
-            tracked["name"] == access["name"] and tracked["namespace"] == NAMESPACE,
-            "Terraform access reference differs",
         )
         live = self.get("management", "secret", access["name"], NAMESPACE)
         require(
@@ -1163,7 +1281,616 @@ def load_inputs() -> tuple[dict, dict]:
     }
 
 
-def main(argv: list[str] | None = None) -> int:
+def live_support():
+    name = "plane_demo_live_cleanup"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(
+            name, Path(__file__).parents[1] / "clean-azure.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
+class LiveLocalCleanup(live_support().LiveClusterCleanup):
+    def __init__(self, **kwargs):
+        super().__init__(environment="local", **kwargs)
+        self.host = None
+        self.nodes, self.states, self.access = {}, {}, {}
+        self.state_proofs = {}
+        self.initial_unrelated = None
+
+    def check_bootstrap_lease(self):
+        namespace = self.config.namespace("management")
+        raw = self.kube(
+            "management",
+            "get",
+            "leases.coordination.k8s.io",
+            "management-bootstrap",
+            "--ignore-not-found",
+            "-o",
+            "json",
+            namespace=namespace,
+        )
+        if not raw.strip():
+            return
+        metadata = json.loads(raw).get("metadata", {})
+        require(
+            metadata.get("name") == "management-bootstrap"
+            and metadata.get("namespace") == namespace,
+            "Unexpected management bootstrap Lease response; cleanup refused",
+        )
+        raise LocalError(
+            "Active or interrupted management bootstrap Lease exists; "
+            "release it through the deployment owner before cleanup"
+        )
+
+    def call(self, argv, *, mutation=False, **kwargs):
+        if mutation:
+            self.check_bootstrap_lease()
+        return super().call(argv, mutation=mutation, **kwargs)
+
+    def docker(self, *args):
+        if self.host is None:
+            self.host = self.json(
+                [
+                    "env",
+                    "-u",
+                    "DOCKER_HOST",
+                    "-u",
+                    "DOCKER_CONTEXT",
+                    "-u",
+                    "DOCKER_CONFIG",
+                    "docker",
+                    "context",
+                    "inspect",
+                    "desktop-linux",
+                    "--format",
+                    "{{json .Endpoints.docker.Host}}",
+                ]
+            )
+            require(
+                isinstance(self.host, str)
+                and re.fullmatch(r"unix:///[^\s?#]+", self.host)
+                and ".." not in Path(self.host.removeprefix("unix://")).parts,
+                "Docker Desktop must use a local Unix socket",
+            )
+        return ["docker", "--host", self.host, *args]
+
+    def containers(self):
+        ids = self.call(self.docker("ps", "-aq", "--no-trunc")).split()
+        require(
+            all(DOCKER_ID.fullmatch(value) for value in ids) and len(set(ids)) == len(ids),
+            "Docker returned invalid container IDs",
+        )
+        values = self.json(self.docker("inspect", "--type", "container", *ids)) if ids else []
+        require(
+            isinstance(values, list) and {value["Id"] for value in values} == set(ids),
+            "Incomplete Docker inventory",
+        )
+        nodes = {}
+        for value in values:
+            name = value["Name"].removeprefix("/")
+            owner = (value["Config"].get("Labels") or {}).get("io.x-k8s.kind.cluster", "")
+            if not (
+                name.startswith(self.config.stem + "-") or owner.startswith(self.config.stem + "-")
+            ):
+                continue
+            slot = next((slot for slot in SLOTS if owner == self.config.slot_name(slot)), None)
+            require(slot is not None and slot not in nodes, "Unknown or duplicate deployment node")
+            index = SLOTS.index(slot)
+            require(
+                name == self.config.slot_name(slot) + "-control-plane"
+                and value["Config"].get("Image") == NODE_IMAGE
+                and value["HostConfig"]["PortBindings"]
+                == {
+                    "6443/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(35495 + index)}],
+                    "31480/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(35490 + index)}],
+                },
+                "Local node identity, image, or reserved ports differ",
+            )
+            nodes[slot] = value
+        return nodes, set(ids) - {value["Id"] for value in nodes.values()}
+
+    def environment_scope(self, slot, app, properties):
+        require(not properties.get("providers", {}).get("azure"), "Local Radius references Azure")
+
+    def resource_scope(self, item):
+        if isinstance(item, str):
+            require(
+                not item.lower().startswith("/subscriptions/"), "Local resource references Azure"
+            )
+        elif isinstance(item, dict):
+            for value in item.values():
+                self.resource_scope(value)
+        elif isinstance(item, list):
+            for value in item:
+                self.resource_scope(value)
+
+    def cluster_record(self, slot, properties):
+        name = self.config.slot_name(slot)
+        require(
+            (not properties.get("clusterId") or properties["clusterId"] == "kind://" + name)
+            and (not properties.get("clusterName") or properties["clusterName"] == name)
+            and (
+                not properties.get("bootstrapAccessRef")
+                or properties["bootstrapAccessRef"]
+                == (f"kubernetes://{self.config.stem}-access/{name}-access#kubeconfig")
+            ),
+            "Radius child points at another kind owner",
+        )
+        if slot in self.nodes:
+            require(
+                properties.get("clusterId") == "kind://" + name
+                and bool(properties.get("bootstrapAccessRef")),
+                "Live child lacks Radius outputs",
+            )
+
+    def state_inventory(self, slot):
+        output = self.kube(
+            slot,
+            "get",
+            "secrets",
+            "-l",
+            "tfstate=true",
+            "-o",
+            'jsonpath={range .items[*]}{.metadata.name}{"\\t"}{.metadata.uid}{"\\t"}'
+            '{.metadata.labels.tfstate}{"\\t"}{.metadata.labels.app\\.kubernetes\\.io/managed-by}'
+            '{"\\n"}{end}',
+            namespace="radius-system",
+        )
+        result = {}
+        for line in output.splitlines():
+            fields = line.split("\t")
+            require(
+                len(fields) == 4
+                and re.fullmatch(r"tfstate-default-[a-f0-9]{40}", fields[0])
+                and str(UUID(fields[1])) == fields[1]
+                and fields[2:] == ["true", "terraform"]
+                and fields[0] not in result,
+                "Unowned or malformed Terraform backend metadata",
+            )
+            result[fields[0]] = fields[1]
+        return result
+
+    def access_secret(self, slot):
+        name = self.config.slot_name(slot) + "-access"
+        namespace = self.config.stem + "-access"
+        raw = self.kube(
+            "management",
+            "get",
+            "secret",
+            name,
+            "--ignore-not-found",
+            "-o",
+            'jsonpath={.metadata.name}{"\\n"}{.metadata.namespace}{"\\n"}{.metadata.uid}{"\\n"}'
+            '{.metadata.labels.radplanes\\.local/slot}{"\\n"}'
+            "{.metadata.annotations.radplanes\\.local/radius-resource}",
+            namespace=namespace,
+        )
+        if not raw.strip():
+            return None
+        fields = raw.splitlines()
+        require(
+            len(fields) == 5
+            and fields[:2] == [name, namespace]
+            and str(UUID(fields[2])) == fields[2]
+            and fields[3] == slot
+            and same_radius_id(fields[4], f"{self.scope}/providers/Demo.Platform/clusters/{slot}"),
+            "Child access Secret ownership differs",
+        )
+        return fields[2]
+
+    def access_inventory(self):
+        raw = self.kube(
+            "management",
+            "get",
+            "secrets",
+            "-o",
+            'jsonpath={range .items[*]}{.metadata.name}{"\\t"}{.metadata.uid}{"\\t"}'
+            '{.metadata.labels.radplanes\\.local/slot}{"\\t"}'
+            '{.metadata.annotations.radplanes\\.local/radius-resource}{"\\n"}{end}',
+            namespace=self.config.stem + "-access",
+        )
+        result = {}
+        for line in raw.splitlines():
+            fields = line.split("\t")
+            require(
+                len(fields) == 4
+                and fields[2] in CHILDREN
+                and fields[0] == self.config.slot_name(fields[2]) + "-access"
+                and str(UUID(fields[1])) == fields[1]
+                and same_radius_id(
+                    fields[3], f"{self.scope}/providers/Demo.Platform/clusters/{fields[2]}"
+                )
+                and fields[2] not in result,
+                "Unrecognized or foreign child access Secret",
+            )
+            result[fields[2]] = fields[1]
+        return result
+
+    def preflight_dependencies(self, clusters, owners):
+        for slot, value in self.inventories.items():
+            expected = {
+                backend_secret_name(item)
+                for item in value["resources"]
+                if item["type"] in live_support().DEPENDENCIES | {"Demo.Platform/clusters"}
+            }
+            self.states[slot] = self.state_inventory(slot)
+            require(
+                set(self.states[slot]) == expected, "Radius and Terraform backend owners differ"
+            )
+        for slot in owners:
+            self.access[slot] = self.access_secret(slot)
+            require(
+                slot not in clusters or self.access[slot] is not None,
+                "Live child has no Radius-owned access Secret",
+            )
+        require(
+            self.access_inventory()
+            == {
+                slot: identifier
+                for slot, identifier in self.access.items()
+                if identifier is not None
+            },
+            "Unrecognized child access Secret inventory",
+        )
+        for slot in self.inventories:
+            self.validate_state_payloads(slot, remember=True)
+
+    def read_state_payload(self, slot, name):
+        fields = self.kube(
+            slot,
+            "get",
+            "secret",
+            name,
+            "-o",
+            'jsonpath={.metadata.name}{"\\n"}{.metadata.namespace}{"\\n"}'
+            '{.metadata.uid}{"\\n"}{.data.tfstate}',
+            namespace="radius-system",
+        ).splitlines()
+        require(
+            len(fields) == 4
+            and fields[:2] == [name, "radius-system"]
+            and fields[2] == self.states[slot][name],
+            "Terraform payload owner changed",
+        )
+        state, proof = decode_terraform_payload(fields[3])
+        return state, {"uid": fields[2], **proof}
+
+    def cluster_images(self, resource):
+        properties = resource["properties"]
+        name = properties["environment"].rsplit("/", 1)[1]
+        environment = self.rad("management", "env", "show", name)
+        require(
+            same_radius_id(environment["id"], properties["environment"]),
+            "Cluster Recipe environment changed",
+        )
+        binding = environment["properties"]["recipes"]["Demo.Platform/clusters"]["default"]
+        parameters = binding["parameters"]
+        require(
+            binding["templateKind"] == "terraform"
+            and parameters["resource_prefix"] == self.config.stem
+            and parameters["radius_group"] == self.config.stem
+            and parameters["access_namespace"] == self.config.stem + "-access",
+            "Cluster Recipe ownership parameters differ",
+        )
+        runtime, dependencies = parameters["runtime_images"], parameters["dependency_images"]
+        require(
+            set(runtime) == {"api", "provisioner", "operator"}
+            and isinstance(dependencies, list)
+            and 1 <= len(dependencies) <= 61,
+            "Cluster Recipe image inputs are incomplete",
+        )
+        images = [runtime[role] for role in ("api", "provisioner", "operator")] + dependencies
+        require(
+            all(
+                isinstance(item, dict)
+                and set(item) == {"reference", "image_id"}
+                and isinstance(item["reference"], str)
+                and item["reference"]
+                and re.fullmatch(r"sha256:[a-f0-9]{64}", item["image_id"])
+                for item in images
+            )
+            and len({item["reference"] for item in images}) == len(images)
+            and any(item["reference"] == NODE_IMAGE for item in dependencies),
+            "Cluster Recipe image identity differs",
+        )
+        for role, image in runtime.items():
+            require(
+                re.fullmatch(
+                    rf"localhost/{re.escape(self.config.stem)}-{role}:[a-f0-9]{{40}}",
+                    image["reference"],
+                ),
+                "Foreign cluster runtime image",
+            )
+        return images
+
+    def validate_child_credentials(self, child, attributes):
+        if child not in self.targets:
+            return
+        try:
+            selected = yaml.safe_load(self.targets[child]["kubeconfig"].read_text())
+            original = yaml.safe_load(attributes["kubeconfig"])
+            fields = self.kube(
+                "management",
+                "get",
+                "secret",
+                self.config.slot_name(child) + "-access",
+                "-o",
+                'jsonpath={.metadata.uid}{"\\n"}{.data.kubeconfig}',
+                namespace=self.config.stem + "-access",
+            ).splitlines()
+            require(
+                len(fields) == 2 and fields[0] == self.access[child],
+                "Child access Secret changed during payload verification",
+            )
+            tracked = yaml.safe_load(base64.b64decode(fields[1], validate=True))
+            for value in (selected, original, tracked):
+                require(
+                    isinstance(value, dict)
+                    and len(value["contexts"])
+                    == len(value["clusters"])
+                    == len(value["users"])
+                    == 1,
+                    "Ambiguous Terraform child credentials",
+                )
+            ca = selected["clusters"][0]["cluster"]["certificate-authority-data"]
+            user = selected["users"][0]["user"]
+            require(
+                original["clusters"][0]["cluster"]["certificate-authority-data"] == ca
+                and original["users"][0]["user"] == user
+                and attributes["client_key"].encode()
+                == base64.b64decode(user["client-key-data"], validate=True)
+                and tracked["clusters"][0]["cluster"]["certificate-authority-data"] == ca
+                and tracked["users"][0]["user"] == user
+                and tracked["current-context"] == self.config.slot_name(child)
+                and tracked["clusters"][0]["cluster"].get("tls-server-name")
+                == self.config.slot_name(child)
+                and tracked["clusters"][0]["cluster"]["server"]
+                == "https://"
+                + self.nodes[child]["NetworkSettings"]["Networks"]["kind"]["IPAddress"]
+                + ":6443",
+                "Terraform kind credentials do not match the owned child access",
+            )
+        except (OSError, UnicodeError, ValueError, TypeError, KeyError, yaml.YAMLError):
+            raise LocalError("Terraform child credential proof is invalid") from None
+
+    def validate_state_payloads(self, slot, *, remember=False):
+        self.verify_state_uids(slot)
+        for resource in self.inventories[slot]["resources"]:
+            if resource["type"] not in live_support().DEPENDENCIES | {
+                "Demo.Platform/clusters"
+            } or resource["id"].lower() in self.removed.get(slot, set()):
+                continue
+            name = backend_secret_name(resource)
+            state, proof = self.read_state_payload(slot, name)
+            if resource["type"] == "Demo.Platform/clusters":
+                child = resource["properties"]["slot"]
+                attrs = validate_cluster_payload(
+                    state,
+                    self.config.slot_name(child),
+                    self.config.stem + "-access",
+                    self.cluster_images(resource),
+                )
+                self.validate_child_credentials(child, attrs)
+            else:
+                validate_application_payload(state, resource["type"], self.config.namespace(slot))
+            key = (slot, name)
+            if remember:
+                self.state_proofs[key] = proof
+            else:
+                require(
+                    self.state_proofs.get(key) == proof, "Terraform payload changed since preflight"
+                )
+
+    def rad(self, slot, *args, mutation=False):
+        if mutation:
+            require(args[:2] == ("app", "delete"), "Unexpected Radius mutation")
+            self.validate_state_payloads(slot)
+        return super().rad(slot, *args, mutation=mutation)
+
+    def child_apps_absent(self, slot):
+        require(
+            not self.rows(self.rad(slot, "app", "list"))
+            and not self.native_resources(slot)
+            and not self.state_inventory(slot),
+            "Child Radius or Terraform owners remain",
+        )
+        nodes, _ = self.containers()
+        require(nodes.get(slot, {}).get("Id") == self.nodes[slot]["Id"], "Child node was replaced")
+        self.verify_cluster(slot)
+
+    def verify_state_uids(self, slot):
+        expected = {
+            backend_secret_name(item): self.states[slot][backend_secret_name(item)]
+            for item in self.inventories[slot]["resources"]
+            if item["type"] in live_support().DEPENDENCIES | {"Demo.Platform/clusters"}
+            and item["id"].lower() not in self.removed.get(slot, set())
+        }
+        require(self.state_inventory(slot) == expected, "Terraform backend ownership changed")
+
+    def delete_app(self, slot, app):
+        self.verify_state_uids(slot)
+        super().delete_app(slot, app)
+        if self.execute:
+            self.verify_state_uids(slot)
+
+    def before_child_delete(self, slot, record):
+        super().before_child_delete(slot, record)
+        self.validate_state_payloads("management")
+        require(self.access_secret(slot) == self.access[slot], "Child access Secret UID changed")
+        self.check_bootstrap_lease()
+
+    def child_absent(self, slot, record):
+        deadline = self.clock() + 900
+        state = backend_secret_name(record)
+        while True:
+            nodes, _ = self.containers()
+            if (
+                slot not in nodes
+                and state not in self.state_inventory("management")
+                and self.access_secret(slot) is None
+            ):
+                return
+            require(self.clock() < deadline, "Radius child, backend, or access Secret remains")
+            self.sleep(3)
+
+    def check_faults(self, slot):
+        namespace = self.namespace(slot)
+        kube = self.check_journals(slot, namespace)
+        node = self.nodes[slot]
+        values = self.json(self.docker("exec", node["Id"], "crictl", "pods", "-o", "json"))
+        sandboxes = self.rows(values)
+        role = "management" if slot == "management" else slot.rsplit("-", 1)[1]
+        component = role + "-reconciler"
+        relevant = []
+        for value in sandboxes:
+            metadata = value.get("metadata", {})
+            require(
+                all(isinstance(metadata.get(key), str) for key in ("name", "namespace", "uid")),
+                "CRI sandbox scope is incomplete",
+            )
+            if metadata["namespace"] == self.config.namespace(slot) and metadata["name"].startswith(
+                component + "-"
+            ):
+                relevant.append(value)
+        require(kube is not None or not relevant, "Orphaned fault namespace requires inspection")
+        if kube is None or not relevant:
+            return
+        helpers = live_support().fault_helpers()
+        local = helpers.fault_class(type("Local", (), {"environment": "local", "live": False})())
+        module = sys.modules[local.__module__]
+        pods = self.rows(kube.json("get", "pods", "-l", "plane-demo/component=" + component))
+        deployment = kube.deployment(component)
+        for item in relevant:
+            metadata = item["metadata"]
+            matching = [pod for pod in pods if pod["metadata"]["uid"] == metadata["uid"]]
+            require(len(matching) == 1, "Orphaned reconciler sandbox is not safe to ignore")
+            pod = matching[0]
+            require(
+                pod["metadata"]["name"] == metadata["name"]
+                and pod["metadata"]["namespace"] == metadata["namespace"]
+                and pod["spec"].get("nodeName") == node["Name"][1:]
+                and not pod["spec"].get("hostNetwork")
+                and not pod["spec"].get("hostPID"),
+                "Reconciler sandbox owner differs",
+            )
+            owners = pod["metadata"].get("ownerReferences", [])
+            require(len(owners) == 1 and owners[0]["kind"] == "ReplicaSet", "Unexpected Pod owner")
+            rs = kube.json("get", "replicaset", owners[0]["name"])
+            require(
+                rs["metadata"]["uid"] == owners[0]["uid"]
+                and any(
+                    owner.get("kind") == "Deployment"
+                    and owner.get("uid") == deployment["metadata"]["uid"]
+                    for owner in rs["metadata"].get("ownerReferences", [])
+                ),
+                "Reconciler controller UID differs",
+            )
+            sandbox = self.json(self.docker("exec", node["Id"], "crictl", "inspectp", item["id"]))
+            status, info = sandbox["status"], sandbox["info"]
+            require(
+                status["id"] == item["id"]
+                and status["metadata"] == metadata
+                and status["state"] == "SANDBOX_READY"
+                and status["labels"].get("io.kubernetes.pod.uid") == metadata["uid"]
+                and type(info.get("pid")) is int
+                and info["pid"] > 1,
+                "Reconciler network namespace is not verified",
+            )
+            inode = self.call(
+                self.docker("exec", node["Id"], "stat", "-Lc", "%i", f"/proc/{info['pid']}/ns/net")
+            ).strip()
+            require(re.fullmatch(r"[1-9][0-9]{0,19}", inode), "Invalid network namespace inode")
+            rules = self.call(
+                self.docker(
+                    "exec",
+                    node["Id"],
+                    "bash",
+                    "-ceu",
+                    module.NETWORK_COMMAND,
+                    "cleanup-netns",
+                    str(info["pid"]),
+                    inode,
+                    "iptables",
+                    "-w",
+                    "2",
+                    "-S",
+                    "OUTPUT",
+                )
+            )
+            require("plane-demo-fault-" not in rules, "Active parent fault must be restored first")
+
+    def clean(self):
+        self.nodes, self.initial_unrelated = self.containers()
+        clusters = dict(self.nodes)
+        if "management" in clusters:
+            self.check_bootstrap_lease()
+        self.clean_radius(clusters)
+        if "management" in clusters:
+            if self.execute:
+                require(
+                    not self.state_inventory("management"), "Management Terraform owners remain"
+                )
+                require(not self.access_inventory(), "Child access Secret owners remain")
+                for slot in CHILDREN:
+                    require(self.access_secret(slot) is None, "Child access Secret remains")
+                nodes, _ = self.containers()
+                require(
+                    set(nodes) == {"management"}
+                    and nodes["management"]["Id"] == self.nodes["management"]["Id"],
+                    "Management node changed or children remain",
+                )
+                self.verify_cluster("management")
+            self.note("bootstrap-management-kind", self.config.slot_name("management"))
+            if self.execute:
+                target = self.targets["management"]
+                self.call(
+                    [
+                        "kind",
+                        "delete",
+                        "cluster",
+                        "--name",
+                        self.config.slot_name("management"),
+                        "--kubeconfig",
+                        str(target["kubeconfig"]),
+                    ],
+                    mutation=True,
+                    timeout=600,
+                    env={
+                        **self.env,
+                        "HOME": str(target["home"]),
+                        "DOCKER_HOST": self.host,
+                        "KIND_EXPERIMENTAL_PROVIDER": "docker",
+                    },
+                )
+        if not self.execute:
+            return {"status": "planned", "environment": "local", "steps": self.steps}
+        result = self.verify()
+        require(
+            self.initial_unrelated <= set(result["unrelatedContainerIds"]),
+            "An unrelated container disappeared during cleanup",
+        )
+        result["unrelatedPreservationVerified"] = True
+        result["steps"] = self.steps
+        return result
+
+    def verify(self):
+        nodes, unrelated = self.containers()
+        require(not nodes, "Owned local containers remain: " + ", ".join(sorted(nodes)))
+        return {
+            "status": "clean",
+            "scope": "owned-active-resources",
+            "environment": "local",
+            "deployment": self.config.stem,
+            "unrelatedContainerIds": sorted(unrelated),
+            "retained": ["kind network", "images and build cache", "local files"],
+        }
+
+
+def legacy_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--execute", action="store_true", help="Destroy all local demo data")
@@ -1245,6 +1972,44 @@ def main(argv: list[str] | None = None) -> int:
             write_private(cleanup.path, cleanup.record)
         print(message + "; no automatic recovery or direct child deletion", file=sys.stderr)
         return 130 if isinstance(error, KeyboardInterrupt) else 1
+
+
+def main(argv=None, *, engine_factory=LiveLocalCleanup):
+    parser = argparse.ArgumentParser(
+        description="Normal local cleanup from .env and live Radius owners."
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--execute", action="store_true")
+    mode.add_argument(
+        "--verify", action="store_true", help="Independent Docker verification; no record required"
+    )
+    parser.add_argument("--environment", choices=("local",), default="local")
+    args = parser.parse_args(argv)
+    engine = None
+    try:
+        engine = engine_factory(execute=args.execute)
+        print(json.dumps(engine.verify() if args.verify else engine.clean(), indent=2))
+        return 0
+    except KeyboardInterrupt:
+        print(
+            "Cleanup incomplete: interrupted; inspect live owners before retrying.", file=sys.stderr
+        )
+        return 130
+    except (
+        LocalError,
+        live_support().CleanupError,
+        live_support().ConfigError,
+        live_support().fault_helpers().AcceptanceError,
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+    ) as error:
+        print(f"Cleanup incomplete: {error}; no direct child deletion", file=sys.stderr)
+        return 1
+    finally:
+        if engine is not None:
+            engine.close()
 
 
 if __name__ == "__main__":

@@ -5,7 +5,6 @@ import importlib.util
 import json
 import os
 import subprocess
-import sys
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,14 +14,22 @@ from uuid import uuid4
 import psycopg
 import pytest
 from psycopg.conninfo import conninfo_to_dict
+from test_local_deploy_caller import caller as caller
+from test_prepared_local_provider import prepared_provider as prepared_provider
 
 from plane_demo.management import provisioner
 from plane_demo.management.providers import local
 from plane_demo.management.providers.commands import Commands
-from plane_demo.management.providers.credentials import Credentials, database_dsn
+from plane_demo.management.providers.credentials import (
+    Credentials,
+    StoredCredentials,
+    credential_roles,
+    database_dsn,
+)
 from plane_demo.management.providers.identity import DemoConfig
 from plane_demo.management.providers.local import LocalProvider
 from plane_demo.management.providers.local_config import ACCESS_NAMESPACE, SCOPE, SLOTS, LocalConfig
+from plane_demo.management.providers.secret_store import CredentialScope, CredentialValue
 from plane_demo.management.provisioning import (
     Cluster,
     PairResult,
@@ -127,6 +134,10 @@ def test_selected_local_identity_drives_names_access_and_temporary_commands(
     for slot, allocation in raw_local["allocations"].items():
         allocation.update(clusterName=identity.slot_name(slot), context=identity.slot_name(slot))
     raw_local["managementCluster"]["clusterId"] = f"kind://{identity.slot_name('management')}"
+    for role, image in raw_local["images"].items():
+        image["reference"] = (
+            f"localhost/{identity.stem}-{role}:" + image["reference"].rsplit(":", 1)[1]
+        )
     selected = LocalConfig.from_dict(raw_local, identity=identity)
     root, workspace = tmp_path / "checkout", tmp_path / "work"
     root.mkdir()
@@ -179,6 +190,42 @@ def test_selected_local_identity_drives_names_access_and_temporary_commands(
     )
     assert access["rules"][0]["resourceNames"] == [
         f"{identity.slot_name(slot)}-access" for slot in SLOTS[1:]
+    ]
+    credential_role = next(
+        value
+        for value in permissions
+        if value["kind"] == "Role" and value["metadata"]["name"] == "plane-credential-store"
+    )
+    assert credential_role["metadata"]["namespace"] == identity.namespace("management")
+    assert credential_role["rules"][0]["verbs"] == ["get"]
+    assert len(credential_role["rules"][0]["resourceNames"]) == 15
+    assert credential_role["rules"][1] == {
+        "apiGroups": [""],
+        "resources": ["secrets"],
+        "verbs": ["create"],
+    }
+    emitted.clear()
+    provider.prerequisites("management")
+    settings = next(
+        item
+        for batch in emitted
+        if isinstance(batch, list)
+        for item in batch
+        if item["kind"] == "ConfigMap" and item["metadata"]["name"] == "provisioning-settings"
+    )
+    assert settings["data"] == selected.bootstrap_settings
+    assert settings["immutable"] is True
+    binding = next(
+        value
+        for value in permissions
+        if value["kind"] == "RoleBinding" and value["metadata"]["name"] == "plane-credential-store"
+    )
+    assert binding["subjects"] == [
+        {
+            "kind": "ServiceAccount",
+            "name": "provisioner",
+            "namespace": identity.namespace("management"),
+        }
     ]
     restored = LocalConfig.from_dict(selected.to_dict())
     assert restored.identity == identity
@@ -526,24 +573,26 @@ def test_isolated_pair_uses_distinct_allocated_ids_and_ports(provider, config, m
 
 
 def test_child_creation_actual_commands_use_management_radius_bicep_and_never_kind(
-    provider, monkeypatch
+    prepared_provider, monkeypatch
 ):
+    provider, _, inputs, _ = prepared_provider
     provider._verified = True
     provider.commands.run.side_effect = [
         "[]",
-        "",
+        "[]",
         "",
         "",
         json.dumps(
             {
                 "properties": {
                     "provisioningState": "Succeeded",
-                    "clusterId": "kind://radplanes-local-shared-control",
-                    "clusterName": "radplanes-local-shared-control",
-                    "bootstrapAccessRef": f"kubernetes://{ACCESS_NAMESPACE}/radplanes-local-shared-control-access#kubeconfig",
+                    "clusterId": provider.expected_cluster_id("shared-control"),
+                    "clusterName": provider.config.allocation("shared-control")["clusterName"],
+                    "bootstrapAccessRef": f"kubernetes://{provider.config.access_namespace}/{provider.config.resource_prefix}-shared-control-access#kubeconfig",
                 }
             }
         ),
+        json.dumps([{"name": "provision-shared-control"}]),
     ]
     get_access = MagicMock(return_value="protected-access")
     monkeypatch.setattr(provider, "get_access", get_access)
@@ -551,11 +600,13 @@ def test_child_creation_actual_commands_use_management_radius_bicep_and_never_ki
     calls = [call.args[0] for call in provider.commands.run.call_args_list]
     submissions = [args for args in calls if "deploy" in args]
     assert len(submissions) == 1
-    assert all("radplanes-local-management" in args for args in submissions)
+    assert all(provider.config.allocation("management")["context"] in args for args in submissions)
     assert submissions[0][4].endswith("/modules/child-cluster.bicep")
     assert "provision-shared-control" in submissions[0]
-    environment = next(args for args in calls if "Applications.Core/environments" in args)
-    assert "create" in environment and "radplanes-local-management" in environment
+    environment = next(
+        args for args in calls if "Applications.Core/environments" in args and "create" in args
+    )
+    assert provider.config.allocation("management")["context"] in environment
     assert "--group" not in environment
     assert not any("create" in args and "Demo.Platform/clusters" in args for args in calls)
     assert not any(args[0] in {"kind", "docker", "terraform", "az"} for args in calls)
@@ -563,8 +614,17 @@ def test_child_creation_actual_commands_use_management_radius_bicep_and_never_ki
         (provider.state / "shared-control-cluster-environment.json").read_text()
     )
     cluster_recipe = parameters["properties"]["recipes"]["Demo.Platform/clusters"]["default"]
-    assert cluster_recipe["parameters"]["images"] == list(provider.config.images.values())
-    assert (provider.state / "shared-control-cluster-intent.json").is_file()
+    assert {
+        item["reference"]
+        for item in (
+            *cluster_recipe["parameters"]["runtime_images"].values(),
+            *cluster_recipe["parameters"]["dependency_images"],
+        )
+    } == {
+        *(item["reference"] for item in inputs["images"].values()),
+        *(item["reference"] for item in inputs["dependencies"]),
+    }
+    assert not (provider.state / "shared-control-cluster-intent.json").exists()
     with pytest.raises(ProvisioningError, match="local_cluster_creation_incomplete"):
         provider.ensure_child_cluster("shared-control")
 
@@ -572,7 +632,14 @@ def test_child_creation_actual_commands_use_management_radius_bicep_and_never_ki
 def test_failed_cluster_submission_is_not_retried(provider, monkeypatch):
     monkeypatch.setattr(provider, "resource_exists", lambda *_: False)
     monkeypatch.setattr(provider, "kube_get", lambda *_: None)
-    monkeypatch.setattr(provider, "register_environment", lambda *_, **__: "provision-shared-data")
+    environments = []
+    monkeypatch.setattr(provider, "rad", lambda *args, **kwargs: json.dumps(environments))
+
+    def register(*args, **kwargs):
+        environments.append({"name": "provision-shared-data"})
+        return "provision-shared-data"
+
+    monkeypatch.setattr(provider, "register_environment", register)
     submission = MagicMock(side_effect=ProvisioningError("command_timeout"))
     monkeypatch.setattr(provider, "deploy", submission)
     for expected in ("command_timeout", "local_cluster_creation_incomplete"):
@@ -581,12 +648,11 @@ def test_failed_cluster_submission_is_not_retried(provider, monkeypatch):
     assert submission.call_count == 1
 
 
-def test_recipe_startup_verifies_actual_immutable_content(provider, modules, monkeypatch):
-    by_name = {module["metadata"]["name"]: module for module in modules.values()}
-    monkeypatch.setattr(provider, "kube_get", lambda _, __, ___, name: by_name[name])
+def test_recipe_startup_verifies_actual_immutable_content(prepared_provider):
+    provider, _, _, modules = prepared_provider
     provider.verify_recipes()
-    assert provider._verified and set(provider._modules) == set(modules)
-    modules["cluster"]["data"]["server.py"] = "changed"
+    assert provider._verified and set(provider._modules) == set(provider.config.recipes)
+    modules[provider.config.recipes["cluster"]["moduleServer"]]["data"]["module.json"] = "{}"
     with pytest.raises(ProvisioningError, match="local_recipe_digest_mismatch"):
         provider.verify_recipes()
 
@@ -780,7 +846,7 @@ def test_local_runtime_secrets_keep_api_and_worker_credentials_separate(provider
     assert set(emitted["management-api-runtime"]) == {"MANAGEMENT_DSN", "DEMO_KEY"}
     worker = emitted["provisioner-runtime"]
     assert worker["PROVIDER"] == "local" and "DEMO_KEY" not in worker
-    assert "mgmt_api" not in worker["PROVISIONING_CREDENTIALS_JSON"]
+    assert set(worker) == {"MANAGEMENT_DSN", "PROVIDER"}
     assert conninfo_to_dict(worker["MANAGEMENT_DSN"])["sslmode"] == "disable"
 
 
@@ -900,6 +966,7 @@ def test_local_deploy_uses_shared_bicep_and_correct_health_address(
         {
             "image": provider.config.images["api"],
             "provisionerImage": provider.config.images["provisioner"],
+            "ownershipLabels": {"plane-demo/project": "radplanes"},
         },
     )
     assert provider.commands.run.call_args.args[0][-1] == health
@@ -950,47 +1017,101 @@ def test_local_commands_do_not_inherit_cloud_or_daemon_credentials(tmp_path, mon
     assert set(commands.environment) == {"HOME", "PATH", "LC_ALL"}
 
 
-def test_local_main_enters_existing_singleton_loop_and_marks_interrupted_once(
-    tmp_path, config, monkeypatch
+def test_selected_main_reads_service_credentials_and_discards_worker_workspace(
+    tmp_path, raw_local, monkeypatch
 ):
-    source = credential_file(tmp_path / "operator.json", config)
-    config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps(config.to_dict()))
+    from kubernetes import config as kube_config
+
+    identity = DemoConfig("local", "sample", "demo")
+    raw_local["projectName"] = identity.project
+    for slot, allocation in raw_local["allocations"].items():
+        allocation.update(clusterName=identity.slot_name(slot), context=identity.slot_name(slot))
+    raw_local["managementCluster"]["clusterId"] = f"kind://{identity.slot_name('management')}"
+    for role, image in raw_local["images"].items():
+        image["reference"] = (
+            f"localhost/{identity.stem}-{role}:" + image["reference"].rsplit(":", 1)[1]
+        )
+    config = LocalConfig.from_dict(raw_local, identity=identity)
+    discovery = MagicMock(return_value=config)
+    monkeypatch.setattr(provisioner, "read_runtime_configuration", discovery)
+    for name, value in identity.public_values().items():
+        monkeypatch.setenv(name, value)
+    properties = db_properties()
+    scope = f"/planes/radius/local/resourceGroups/{identity.stem}/providers/Applications.Core"
+    properties.update(
+        application=f"{scope}/applications/management",
+        environment=f"{scope}/environments/management",
+        serverId=f"kubernetes://{identity.namespace('management')}/statefulsets/postgres",
+    )
+    passwords = {
+        role: f"synthetic-{role}-" + "x" * 48 for role in credential_roles(config, "management")
+    }
+    backend = MagicMock()
+    backend.scope = CredentialScope(identity.project, identity.deployment, "local")
+    backend.get.side_effect = lambda slot, role: CredentialValue(passwords[role])
+    discovered = []
+
+    def credential_store(scope, namespace, api, **kwargs):
+        assert callable(kwargs["singleton_guard"])
+        discovered.append((scope, namespace))
+        return backend
+
+    monkeypatch.setattr(provisioner, "KubernetesCredentialStore", credential_store)
+    monkeypatch.setattr(kube_config, "load_incluster_config", lambda **kwargs: None)
+    monkeypatch.setattr(LocalProvider, "resource", lambda *args: properties)
+    workspaces = []
+
+    def authenticate(provider, **kwargs):
+        assert isinstance(provider.credentials, StoredCredentials)
+        workspaces.append(provider.state)
+
+    monkeypatch.setattr(LocalProvider, "authenticate", authenticate)
+    monkeypatch.setattr(LocalProvider, "connect_management", lambda _: None)
+    monkeypatch.setattr(LocalProvider, "verify_recipes", lambda _: None)
     monkeypatch.setenv("PROVIDER", "local")
     monkeypatch.setenv("PROJECT_ROOT", str(tmp_path))
-    monkeypatch.setenv("PROVISIONING_CONFIG", str(config_path))
-    monkeypatch.setenv("PROVISIONING_CREDENTIALS_JSON", json.dumps(source.runtime_seed(config)))
-    monkeypatch.setenv("MANAGEMENT_DSN", source.dsn("management", "mgmt_provisioner"))
-    store = MagicMock()
-    store.claim_pending.return_value = None
-    entered = []
+    monkeypatch.setenv("PROVISIONING_CONFIG", str(tmp_path / "missing-inventory.json"))
+    monkeypatch.setenv("PROVISIONING_CREDENTIALS_JSON", "not a credential seed")
+    monkeypatch.setenv(
+        "MANAGEMENT_DSN",
+        database_dsn(
+            properties,
+            "mgmt_provisioner",
+            passwords["mgmt_provisioner"],
+            environment="local",
+        ),
+    )
+    operations = MagicMock()
+    operations.claim_pending.return_value = None
+    sessions = []
 
     @contextmanager
     def session(dsn):
-        entered.append(dsn)
-        yield store
+        sessions.append(dsn)
+        yield operations
 
     monkeypatch.setattr(provisioner, "provisioner_session", session)
-    monkeypatch.setattr(provisioner.signal, "signal", lambda *_: None)
-    auth = MagicMock()
-    monkeypatch.setattr(LocalProvider, "authenticate", auth)
-    monkeypatch.setattr(LocalProvider, "connect_management", MagicMock())
-    monkeypatch.setattr(LocalProvider, "verify_recipes", MagicMock())
-    original = provisioner.run_loop
-    stopped = []
+    original, stopped = provisioner.run_loop, []
     monkeypatch.setattr(
         provisioner,
         "run_loop",
-        lambda operations, driver: original(
-            operations, driver, sleep=lambda _: stopped.append(True), stopped=lambda: bool(stopped)
+        lambda operations, provider: original(
+            operations,
+            provider,
+            sleep=lambda _: stopped.append(True),
+            stopped=lambda: bool(stopped),
         ),
     )
     assert provisioner.main() == 0
-    assert len(entered) == 1 and conninfo_to_dict(entered[0])["sslmode"] == "disable"
-    auth.assert_called_once_with(workload_required=True)
-    store.interrupt_running.assert_called_once()
-    store.claim_pending.assert_called_once()
-    assert (tmp_path / ".state/local/credentials.json").exists()
+    discovery.assert_called_once_with(identity, tmp_path)
+    assert len(sessions) == 1
+    operations.interrupt_running.assert_called_once()
+    operations.claim_pending.assert_called_once()
+    assert discovered[0][1] == identity.namespace("management")
+    assert discovered[0][0].project == identity.project
+    assert workspaces and all(not workspace.exists() for workspace in workspaces)
+    assert not (tmp_path / ".state").exists()
+    backend.get_or_create.assert_not_called()
     assert not (tmp_path / ".state/azure").exists()
 
 
@@ -1012,132 +1133,34 @@ def test_operator_preview_makes_no_commands(entrypoint, monkeypatch):
     command.assert_not_called()
 
 
-def test_operator_deploy_calls_real_provider_flow_once(tmp_path, config, monkeypatch):
-    script = load_operator("deploy-demo")
-    state = tmp_path / ".state/local"
-    credentials = credential_file(state / "credentials.json", config, database=False)
-    (state / "provisioning.json").write_text(json.dumps(config.to_dict()))
-    (state / "setup-demo-complete.json").write_text(
-        json.dumps(
-            {
-                "managementUID": UID,
-                "configurationSHA256": hashlib.sha256(
-                    json.dumps(config.to_dict(), sort_keys=True).encode()
-                ).hexdigest(),
-            }
-        )
-    )
-    calls = []
-    for name in ("authenticate", "connect_management", "verify_recipes"):
-        monkeypatch.setattr(LocalProvider, name, lambda self, method=name: calls.append(method))
-    monkeypatch.setattr(
-        LocalProvider,
-        "deploy_plane",
-        lambda self, slot: calls.append(("deploy_plane", slot)) or "http://127.0.0.1:35490",
-    )
-    assert script.deploy(tmp_path) == "http://127.0.0.1:35490"
-    assert calls == [
-        "authenticate",
-        "connect_management",
-        "verify_recipes",
-        ("deploy_plane", "management"),
+def test_operator_deploy_invokes_guarded_factory_flow_once(caller):
+    assert caller.script.deploy(caller.root) == "http://127.0.0.1:35490"
+    assert caller.order == [
+        "lease-acquired",
+        ("seed", "management"),
+        ("seed", "shared-control"),
+        ("deploy", "management"),
+        "lease-released",
     ]
-    assert (state / "deploy-demo-complete.json").exists()
-    assert credentials.plane("management")["demoKey"]
-    with pytest.raises(ProvisioningError, match="local_deployment_already_attempted"):
-        script.deploy(tmp_path)
+    assert not (caller.root / ".state").exists()
 
 
 def test_setup_entrypoint_builds_config_from_real_read_path_and_registers_management(
-    tmp_path, config, modules, monkeypatch
+    tmp_path, monkeypatch
 ):
     script = load_operator("setup-demo")
-    state = tmp_path / ".state/local"
-    home = state / "home/.kube"
-    home.mkdir(parents=True)
-    path = home / "config"
-    path.write_text(
-        json.dumps(access("radplanes-local-management", "https://127.0.0.1:35495", child=False))
-    )
-    path.chmod(0o600)
-    (state / "management-created.json").write_text(
-        json.dumps(
-            {
-                "name": "radplanes-local-management",
-                "context": "radplanes-local-management",
-                "nodeAddress": "172.18.0.2",
-                "secretEncryptionVerified": True,
-            }
-        )
-    )
-    (state / "installed.json").write_text("{}")
-    (state / "runtime-images.json").write_text(
-        json.dumps(
-            {
-                "content_verified": True,
-                "source_revision": "a" * 40,
-                **{
-                    role: {"reference": config.images[role], "image_id": config.image_ids[role]}
-                    for role in ("api", "provisioner")
-                },
-            }
-        )
-    )
-    bundle = {
-        "objects": list(modules.values()),
-        "modules": {
-            kind: {
-                "url": recipe["reference"],
-                "sha256": recipe["digest"].removeprefix("sha256:"),
-                "moduleServer": recipe["moduleServer"],
-            }
-            for kind, recipe in config.recipes.items()
-        },
-    }
-    commands = MagicMock(spec=Commands)
-    commands.environment = {}
-    commands.guard = MagicMock()
-    commands.run.side_effect = lambda args, **kwargs: "" if "status" in args else "a" * 40
-    commands.json.side_effect = [
-        bundle,
-        {"metadata": {"uid": UID}},
-        {"status": {"addresses": [{"type": "InternalIP", "address": "172.18.0.2"}]}},
-        {"spec": {"clusterIP": "10.96.0.1"}},
-    ]
-    monkeypatch.setattr(script, "Commands", lambda *_, **__: commands)
-    order = []
-    for name in (
-        "authenticate",
-        "apply",
-        "kubectl",
-        "verify_recipes",
-        "configure_child_terraform",
-        "register",
-        "connect_management",
-    ):
-        monkeypatch.setattr(
-            LocalProvider,
-            name,
-            lambda self, *args, method=name, **kwargs: order.append((method, args)),
-        )
-    result = script.setup(tmp_path)
-    assert result == config
-    assert order[0][0] == "authenticate" and order[-1][0] == "connect_management"
-    assert ("configure_child_terraform", ("management", ("applications-rp",))) in order
-    assert ("register", ("management",)) in order
-    assert (state / "setup-demo-complete.json").exists()
-    assert LocalConfig.load(state / "provisioning.json") == config
-    read_commands = [call.args[0] for call in commands.json.call_args_list]
-    assert all(
-        "--context" in args and "radplanes-local-management" in args for args in read_commands[1:]
-    )
-    with pytest.raises(ProvisioningError, match="local_setup_already_attempted"):
-        script.setup(tmp_path)
+    native = MagicMock(return_value=17)
+    monkeypatch.setattr(script.subprocess, "call", native)
+    monkeypatch.setattr(script, "ROOT", tmp_path)
+    assert script.main(["--execute"]) == 17
+    native.assert_called_once_with(["bash", str(tmp_path / "scripts/operations/local/setup.sh")])
+    assert not (tmp_path / ".state").exists()
 
 
 def test_child_bootstrap_configures_both_stock_rps_without_socket_or_image_replacement(
-    provider, monkeypatch
+    prepared_provider, monkeypatch
 ):
+    provider, _, inputs, _ = prepared_provider
     slot = "shared-control"
     layouts = {}
     for name in ("dynamic-rp", "applications-rp"):
@@ -1159,7 +1182,12 @@ def test_child_bootstrap_configures_both_stock_rps_without_socket_or_image_repla
         layouts[("configmap", name + "-config")] = {
             "data": {"radius-self-host.yaml": "terraform:\n  path: /terraform\n  logLevel: TRACE\n"}
         }
-    monkeypatch.setattr(provider, "kube_get", lambda _, __, kind, name: layouts[(kind, name)])
+    monkeypatch.setattr(provider, "kube_get", lambda _, __, kind, name: layouts.get((kind, name)))
+    monkeypatch.setattr(
+        provider,
+        "apply",
+        lambda _, value, **kwargs: layouts.update({("namespace", "radius-system"): value}),
+    )
     published = MagicMock()
     registered = MagicMock()
     monkeypatch.setattr(provider, "publish_modules", published)
@@ -1181,11 +1209,15 @@ def test_child_bootstrap_configures_both_stock_rps_without_socket_or_image_repla
         pod = patch["spec"]["template"]["spec"]
         assert pod["automountServiceAccountToken"] is False
         assert "image" not in pod["containers"][0]
-        assert pod["containers"][0]["env"] == [{"name": "RADIUS_LOGGING_LEVEL", "value": "error"}]
+        assert {"name": "TF_CLI_CONFIG_FILE", "value": "/terraform/terraform.tfrc"} in (
+            pod["containers"][0]["env"]
+        )
         assert pod["initContainers"][0]["volumeMounts"] == [
             {"name": "terraform", "mountPath": "/terraform"}
         ]
-        assert pod["initContainers"][0]["command"] == ["python3", "-c", local.TERRAFORM_INIT]
+        assert pod["initContainers"][0]["command"] == ["python3", local.TERRAFORM_INIT]
+        assert pod["initContainers"][0]["image"] == inputs["images"]["operator"]["reference"]
+        assert pod["initContainers"][0]["imagePullPolicy"] == "Never"
         assert pod["initContainers"][0]["securityContext"]["capabilities"] == {
             "drop": ["ALL"],
             "add": ["CHOWN"],
@@ -1283,11 +1315,10 @@ def test_child_access_run_path_proves_secret_ownership_tls_node_and_cluster_uid(
     assert cluster == Cluster(slot, provider.expected_cluster_id(slot), context, path)
     assert path.stat().st_mode & 0o777 == 0o600
     assert json.loads(path.read_text()) == kubeconfig
-    record = json.loads((provider.state / f"{slot}-cluster.json").read_text())
-    assert record["clusterUID"] == UID and record["accessSecretUID"] == "access-uid"
-    assert record["nodeAddress"] == "172.18.0.3"
+    assert not (provider.state / f"{slot}-cluster.json").exists()
     calls = [call.args[0] for call in provider.commands.run.call_args_list]
     assert "--raw=/readyz" in calls[1]
+    assert "kube-system" in calls[3]
     assert all(context in args for args in calls[1:])
     assert not any("--insecure-skip-tls-verify" in args for args in calls)
 
@@ -1301,56 +1332,51 @@ def test_child_access_run_path_proves_secret_ownership_tls_node_and_cluster_uid(
     ],
 )
 def test_environment_passes_only_the_required_recipe_parameters(
-    provider, monkeypatch, slot, datastore, port
+    prepared_provider, monkeypatch, slot, datastore, port
 ):
+    provider, _, _, _ = prepared_provider
     provider._verified = True
     address = MagicMock(return_value="172.18.0.4")
     monkeypatch.setattr(provider, "node_address", address)
     assert provider.register_environment(slot) == slot
     parameters = json.loads((provider.state / f"{slot}-environment.json").read_text())["properties"]
     values = parameters["recipes"]
-    assert set(values) == {datastore, "Demo.Platform/gateways"}
-    assert values["Demo.Platform/gateways"]["default"]["parameters"] == {"gateway_host_port": port}
+    assert set(values) == (
+        set(local.TYPES.values()) if slot == "management" else {datastore, "Demo.Platform/gateways"}
+    )
+    identity = {
+        "resource_prefix": provider.config.resource_prefix,
+        "radius_group": provider.config.radius_group,
+    }
+    assert values["Demo.Platform/gateways"]["default"]["parameters"] == {
+        **identity,
+        "gateway_host_port": port,
+    }
     if slot.endswith("-data"):
-        assert values[datastore]["default"]["parameters"] == {}
+        assert values[datastore]["default"]["parameters"] == identity
         address.assert_not_called()
     else:
-        assert values[datastore]["default"]["parameters"] == {"node_address": "172.18.0.4"}
+        assert values[datastore]["default"]["parameters"] == {
+            **identity,
+            "node_address": "172.18.0.4",
+        }
         address.assert_called_once_with(slot)
     assert parameters["recipeConfig"]["env"] == {}
     command = provider.commands.run.call_args.args[0]
-    assert f"radplanes-local-{slot}" in command
+    assert provider.config.allocation(slot)["context"] in command
     assert "--group" not in command
 
 
 def test_source_only_recipe_bundle_matches_runtime_verification_and_child_publication(
-    provider, raw_local, monkeypatch
+    prepared_provider, monkeypatch
 ):
-    result = subprocess.run(
-        [sys.executable, str(ROOT / "scripts/operations/local/recipe-bundle.py")],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    bundle = json.loads(result.stdout)
-    assert bundle["liveStatus"] == "not-run"
-    raw_local["recipes"] = {
-        kind: {
-            "reference": module["url"],
-            "digest": "sha256:" + module["sha256"],
-            "moduleServer": module["moduleServer"],
-        }
-        for kind, module in bundle["modules"].items()
-    }
-    provider.config = LocalConfig.from_dict(raw_local)
-    modules = {
-        item["metadata"]["name"]: item for item in bundle["objects"] if item["kind"] == "ConfigMap"
-    }
-    monkeypatch.setattr(provider, "kube_get", lambda _, __, ___, name: modules[name])
+    provider, _, _, modules = prepared_provider
     provider.verify_recipes()
     published = []
-    monkeypatch.setattr(provider, "apply", lambda _, resources: published.extend(resources))
+    monkeypatch.setattr(provider, "kube_get", lambda *args: None)
+    monkeypatch.setattr(
+        provider, "apply", lambda _, resources, **kwargs: published.extend(resources)
+    )
     monkeypatch.setattr(provider, "kubectl", MagicMock())
     provider.publish_modules("shared-data")
     names = {provider.config.recipes[kind]["moduleServer"] for kind in ("redis", "gateway")}

@@ -8,7 +8,11 @@ param entrypoint string
 param serviceAccount string
 param runtimeServiceAccount string = serviceAccount
 param runtimeSecretName string = ''
+param runtimeConfigMapName string = ''
 param settings object = {}
+param ownershipLabels object = {
+  'plane-demo/project': 'radplanes'
+}
 param volumes array = []
 param mounts array = []
 param connections object = {}
@@ -89,11 +93,10 @@ resource workload 'Applications.Core/containers@2023-10-01-preview' = {
       }
       {
         kind: 'kubernetesMetadata'
-        labels: {
+        labels: union(ownershipLabels, {
           'azure.workload.identity/use': workloadIdentity ? 'true' : 'false'
           'plane-demo/component': name
-          'plane-demo/project': 'radplanes'
-        }
+        })
       }
     ]
     runtimes: {
@@ -115,13 +118,19 @@ resource workload 'Applications.Core/containers@2023-10-01-preview' = {
           containers: [
             {
               name: name
-              envFrom: empty(runtimeSecretName) ? [] : [
+              envFrom: concat(empty(runtimeSecretName) ? [] : [
                 {
                   secretRef: {
                     name: runtimeSecretName
                   }
                 }
-              ]
+              ], empty(runtimeConfigMapName) ? [] : [
+                {
+                  configMapRef: {
+                    name: runtimeConfigMapName
+                  }
+                }
+              ])
               volumeMounts: mounts
               resources: {
                 requests: {

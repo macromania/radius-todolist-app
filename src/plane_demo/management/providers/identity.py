@@ -28,6 +28,12 @@ class ConfigError(ValueError):
     """Configuration errors never include supplied values."""
 
 
+def provisioning_namespace(prefix: str, slot: str) -> str:
+    if not re.fullmatch(r"[a-z][a-z0-9-]{0,24}", prefix) or slot not in SLOTS[1:]:
+        raise ConfigError("Invalid child provisioning namespace selection")
+    return f"{prefix}-p-{SLOTS.index(slot)}"
+
+
 @dataclass(frozen=True)
 class DemoConfig:
     environment: Environment

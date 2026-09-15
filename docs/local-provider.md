@@ -1,9 +1,10 @@
 # Full local provider contract
 
 The one-child Radius executor gate passed on September 10, 2026. This document
-describes the full-demo implementation. The fresh five-cluster scenario,
-parent outages, corrected API identity, and owner-ordered teardown are verified;
-see [the gate evidence](local.md) and [FINDINGS.md](../FINDINGS.md) for exact run scopes.
+describes the current provider contract. Earlier five-cluster scenarios and
+teardown do not prove the state-removal refactor; its fresh live run is still
+pending. See [the historical gate](local.md) and [FINDINGS.md](../FINDINGS.md)
+for exact revision scopes.
 
 ## Fresh local run
 
@@ -18,38 +19,32 @@ global current context. Remote endpoints and missing contexts fail explicitly;
 there is no fallback to another runtime. Use project Python 3.13, kind 0.31.0, Radius 0.60.2 with
 Bicep 0.42.1, and the reserved ports in `ports.env`.
 
-Preserve this checkout's historical `.state/local`. All local commands use that
-fixed path within their own checkout, so run the fresh procedure from a **new
-clone or worktree with no `.state/local`**. For example, after verifying the old
-project clusters are gone:
+Preserve historical `.state/local` archives. Current commands do not read them.
+A new clone or worktree needs only source, the selected `.env`, and access to
+the same Docker Desktop daemon. For example:
 
 ```sh
 git worktree add --detach ../radius-three-plane-fresh HEAD
 cd ../radius-three-plane-fresh
 ```
 
-Checkouts share the same Docker daemon, cluster names, and ports; do not run
+Checkouts share the same Docker daemon and reserved ports; do not run
 two deployments concurrently. An interrupted or failed attempt requires explicit
 ownership review. These commands do not retry, adopt, or clear its state.
 
 ```sh
 uv sync --locked
 make check
-make local-prepare
-make local-executor-build CONFIRM_LOCAL=yes
-make local-executor-inspect CONFIRM_LOCAL=yes
-make local-runtime-build CONFIRM_LOCAL=yes
-make local-runtime-inspect CONFIRM_LOCAL=yes
-make local-bootstrap CONFIRM_LOCAL=yes
-make local-install-radius CONFIRM_LOCAL=yes
-make local-runtime-load CONFIRM_LOCAL=yes
-make local-setup CONFIRM_LOCAL=yes
-make local-deploy-management CONFIRM_LOCAL=yes
+make init ENV=local
+make build CONFIRM_LOCAL=yes
+make inspect-build
+make bootstrap CONFIRM_LOCAL=yes
+make deploy-management CONFIRM_LOCAL=yes
 uv run --no-sync python scripts/harness/local/export-state.py --watch --timeout 7200
 ```
 
 Keep the exporter in a separate terminal or attached background process. Once
-`export-status.json` reports `ready_for_onboarding: true`, run
+the management API and worker are ready, run
 `make local-test CONFIRM_LOCAL=yes` from another terminal. Completion must say
 `outcome: passed`; submission is not proof. Then follow
 [full local cleanup](local-cleanup.md) after preserving acceptance and restored
@@ -58,7 +53,8 @@ fault evidence. Image preparation never publishes to an external registry.
 ## Run path and ownership
 
 Management runs the existing singleton provisioner with `PROVIDER=local`.
-Startup loads `LocalConfig`, uses `.state/local/credentials.json`, proves its
+Startup discovers `LocalConfig` through current APIs, reads owned Kubernetes
+credential Secrets, and proves its
 management service-account username, CA, node address, and `kube-system`
 namespace UID, then reads the actual management Radius group/environment and
 the immutable Recipe ConfigMaps. It does not use an Azure identity or inherit
@@ -76,44 +72,27 @@ The provider never invokes kind, Docker, Terraform apply, or direct cluster
 creation. `rad deploy` waits for completion; the provider then requires a
 successful custom-resource state and exact allocation outputs. Cluster-only
 environments are `provision-SLOT`, applications are `cluster-SLOT`, and the
-Radius group is `radplanes-local`.
+Radius group is the selected `STEM`.
 Environment registration uses the existing `Applications.Core/environments`
 2023 API, as the gate did. This generic create path is never used for the
 2025 custom cluster type; no new environment-specific application template is
 required.
 
-The shared pair is reused without infrastructure calls. The isolated tenant
+Shared reuse observes current cluster/gateway owners without creating resources.
+The isolated tenant
 uses the distinct `isolated-1-control` and `isolated-1-data` allocations.
 Management readiness still means the control reconciler created its tenant
 record. Control/data poll their parents; no API pushes tenant configuration.
 
-## Immutable configuration
+## Public identity and discovered configuration
 
-`PROVISIONING_CONFIG` defaults to `/etc/plane-demo/provisioning.json`. The
-operator writes the same schema to `.state/local/provisioning.json` and mounts
-it through immutable `provisioning-settings`:
+`provisioning-settings` contains only public starting settings and is injected
+into the worker environment. There is no mounted provisioning inventory or
+file credential seed. Let `STEM` mean `PROJECT-DEPLOYMENT-local`. The worker
+reads all consumed Recipe bindings and runtime image IDs from management Radius,
+and current node/Service/namespace/CA data from Kubernetes.
 
-```json
-{
-  "version": 1,
-  "provider": "local",
-  "projectName": "radplanes",
-  "allocations": {
-    "management": {
-      "slot": "management",
-      "clusterName": "radplanes-local-management",
-      "context": "radplanes-local-management",
-      "gatewayPort": 35490,
-      "apiPort": 35495
-    }
-  },
-  "recipes": {},
-  "images": {},
-  "managementCluster": {}
-}
-```
-
-This abbreviated example is not deployable. All five exact entries are required:
+The fixed slot allocation is:
 
 | Slot | Gateway host port | Kubernetes host API port |
 |---|---:|---:|
@@ -123,9 +102,12 @@ This abbreviated example is not deployable. All five exact entries are required:
 | isolated-1-control | 35493 | 35498 |
 | isolated-1-data | 35494 | 35499 |
 
-Every cluster name and context is `radplanes-local-SLOT`. Application namespaces
-are `radplanes-local-SLOT-ROLE`; environments are `SLOT`, applications are
+Every cluster name and context is `STEM-SLOT`. Application namespaces
+are `STEM-SLOT-ROLE`; environments are `SLOT`, applications are
 `management`, `control`, or `data`. No Azure foundation or fake ARM IDs appear.
+An application environment's namespace prefix is `STEM-SLOT`; Radius appends
+the application name. Child provisioning uses the shorter `STEM-p-INDEX` prefix
+so the final namespace stays within Kubernetes's length limit.
 
 `recipes` has `cluster`, `postgresql`, `redis`, and `gateway`. Each entry has:
 
@@ -137,23 +119,24 @@ are `radplanes-local-SLOT-ROLE`; environments are `SLOT`, applications are
 SHA-256. `SHA` is the archive's full SHA-256. Startup reads the named immutable
 ConfigMap and checks both hashes. Child clusters receive those verified,
 source-only ConfigMaps and static module servers, not management credentials.
-Radius injects `context`. Additional Recipe parameters are exactly `images`
-for clusters, `node_address` for PostgreSQL, none for Redis, and
-`gateway_host_port` for gateways. The gateway routes to its own backend Service
+Radius injects `context`. Cluster parameters carry the selected resource/group/
+access names, runtime image references and IDs, and prepared dependency images.
+PostgreSQL uses `node_address`; gateways use `gateway_host_port`.
+The gateway routes to its own backend Service
 DNS and does not accept a node-address parameter.
 
 `images.api` and `images.provisioner` each contain `reference` and `imageId`.
-References are `localhost/radplanes-plane-ROLE:FULL_COMMIT`, with the same
+References are `localhost/STEM-ROLE:FULL_COMMIT`, with the same
 40-digit source revision. IDs are the expected inspected Docker image IDs.
-The parent/operator builds, inspects, and loads management images separately.
+Build prepares and inspects all images; bootstrap loads management images.
 The cluster Recipe receives both references and streams them from the Radius
 executor's daemon into child containerd; there is no host child-image loading.
 
-`managementCluster` has `clusterId=kind://radplanes-local-management`,
+The in-memory `managementCluster` has `clusterId=kind://STEM-management`,
 `uid` (the actual `kube-system` namespace UID), `nodeAddress`, `serviceAddress`
 (the Kubernetes service IPv4 address), and `caSHA256` (the CA bytes).
-These values are read from the existing, protected management kubeconfig and
-cross-checked with the bootstrap record, not guessed from a previous run.
+These values come from current APIs and fresh, privately scoped access. An
+optional `DEMO_REVISION` pin must match the consumed bindings and images.
 
 ## Access and Radius installation
 
@@ -166,17 +149,17 @@ kubeconfig and bundled Bicep 0.42.1 compiler.
 
 Child output must include:
 
-* `clusterId=kind://radplanes-local-SLOT`
-* `clusterName=radplanes-local-SLOT`
-* `bootstrapAccessRef=kubernetes://radplanes-local-access/radplanes-local-SLOT-access#kubeconfig`
+* `clusterId=kind://STEM-SLOT`
+* `clusterName=STEM-SLOT`
+* `bootstrapAccessRef=kubernetes://STEM-access/STEM-SLOT-access#kubeconfig`
 
 The worker may get only the four named access Secrets. It checks their names,
 namespace, slot labels, Radius ownership annotation, and UID. A child kubeconfig
 must contain exactly one static certificate-authenticated context, CA data,
-`https://PRIVATE_NODE_IP:6443`, and `tls-server-name=radplanes-local-SLOT`.
+`https://PRIVATE_NODE_IP:6443`, and `tls-server-name=STEM-SLOT`.
 Exec plugins, proxy overrides, plaintext endpoints, and TLS bypasses are rejected.
 Actual `/readyz`, node identity, and cluster UID reads precede installation.
-Protected `SLOT-cluster.json` records retain the non-secret ownership proof.
+Current API owners, not workstation cluster records, determine re-entry.
 
 Children install stock Radius 0.60.2 without a Docker image/socket overlay.
 Both Terraform-capable RPs receive a checksum-pinned Terraform 1.15.8 layout
@@ -203,8 +186,8 @@ match the plane's private node IP, port `31543`, database name, `plane_setup`,
 `postgres-setup`. Only that temporary setup Secret and bootstrap Job/Secret
 are removed. The retained `postgres-credentials` server Secret and PVC are not reset.
 
-Local credentials explicitly record `provider: local` and
-`database.tlsRequired: false`; DSNs require `sslmode=disable` and port `31543`.
+Local database bindings explicitly require `tlsRequired: false`;
+DSNs require `sslmode=disable` and port `31543`.
 Azure remains the default credential mode, requires verified TLS, and retains
 its `.postgres.database.azure.com:5432` restrictions. Missing TLS metadata never
 opts an Azure database into plaintext. Runtime API and provisioner secrets and
@@ -223,9 +206,9 @@ Public endpoint records always contain `http://127.0.0.1:ALLOCATED_PORT`. A
 management worker Pod checks administrative liveness through the child's
 private node address on port `31480`; it must not try the Mac's loopback URL.
 That internal health address never replaces the operator's public URL.
-The provider writes only `SLOT-endpoint.json` and protected `SLOT.key` files.
-The exporter is the sole publisher of aggregate `endpoints.json`; the local
-provider neither creates nor reads or modifies that exporter-owned file.
+Operator endpoint/API commands discover this URL and their own key for each
+invocation. Optional stdout reports are observations, not inventories required
+by another command.
 
 ## Operator stages
 
@@ -257,8 +240,9 @@ claim a Terraform state UID or a live full-demo state proof.
 
 ### Management setup and deployment
 
-After parent-reviewed native image inspection/loading and the existing
-management bootstrap, preview or execute these **separate** stages:
+After image inspection and management bootstrap, the normal
+`make deploy-management CONFIRM_LOCAL=yes` performs Recipe setup and deployment.
+They can also be inspected as separate administrative stages:
 
 ```sh
 uv run python scripts/operations/local/setup-demo.py
@@ -268,17 +252,23 @@ uv run python scripts/operations/local/setup-demo.py --execute
 uv run python scripts/operations/local/deploy-demo.py --execute
 ```
 
-Setup obtains the source-only bundle from `recipe-bundle.py`, builds the exact
-config, publishes module servers, and registers the management environment/types.
-Deployment initializes management PostgreSQL through Radius and the existing
-SQL Job, creates the `standard` provisioner PVC and restricted service accounts,
-and deploys the existing management app. `OnRootMismatch` and private state-file
-modes are preserved. Neither stage creates a cluster or builds an image.
+Setup consumes the operator image's verified prepared bundle, publishes module
+servers and registers management bindings. Deployment observes that setup,
+regenerates required ignored Bicep extensions, and enters the public
+`local_operator_provider` factory. Its namespace-owned bootstrap Lease prevents
+concurrent operators and is never automatically taken over. Service-owned keys
+are seeded before the normal provider initializes SQL and deploys management.
 
-Each stage writes an exclusive intent before mutation and a separate completion
-record only after its actual checks. Existing intents block automatic replay.
-The full tenant/outage harness is a later, explicit acceptance stage. A successful
-offline test or management deployment does not claim that acceptance passed.
+The provider has no working-state PVC. Temporary access, SDK certificate files
+and CLI homes are removed on exit. The shared command supervisor terminates
+owned descendants on timeout. `OnRootMismatch` and private credential modes
+remain intact. Neither setup nor management deployment creates a child cluster
+or builds an image.
+
+Radius resources, their Terraform state and committed SQL metadata determine
+progress. An interrupted Lease or contradictory resources require explicit
+review, not deletion of a workstation intent. The tenant/outage harness remains
+a separate opt-in acceptance stage.
 
 Offline coverage is in `tests/unit/test_local_provider.py` together with the
 unchanged Azure behavior tests in `tests/unit/test_provisioner.py`. These checks

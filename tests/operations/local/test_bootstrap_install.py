@@ -1,4 +1,3 @@
-import base64
 import json
 from unittest.mock import Mock
 
@@ -157,6 +156,10 @@ def test_capacity_and_all_ports_are_recorded_before_management_create(
     monkeypatch.setattr(bootstrap, "require_inspection", Mock())
     monkeypatch.setattr(bootstrap, "reserve_ports", Mock(return_value=held))
     commands = Mock()
+    commands.env = {
+        "HOME": str(local_state / "home"),
+        "DOCKER_HOST": "unix:///test/docker-desktop.sock",
+    }
 
     def run(args, **kwargs):
         calls.append(args)
@@ -186,17 +189,14 @@ def test_capacity_and_all_ports_are_recorded_before_management_create(
             }
         ],
         {
-            "kvs": [
-                {
-                    "value": base64.b64encode(
-                        b"k8s:enc:aescbc:v1:local-key:probe" if encrypted else b"plaintext-probe"
-                    ).decode()
-                }
-            ]
+            "cluster": common.MANAGEMENT,
+            "nodeId": "management-id",
+            "keyStatus": "created",
+            "syntheticCiphertextVerified": encrypted,
         },
     ]
     if not encrypted:
-        with pytest.raises(common.LocalError, match="not encrypted"):
+        with pytest.raises(common.LocalError, match="encryption was not verified"):
             bootstrap.create(commands, "/var/run/docker.sock")
         assert not (local_state / "management-created.json").exists()
         assert not any("delete" in args for args in calls)
@@ -221,17 +221,19 @@ def test_capacity_and_all_ports_are_recorded_before_management_create(
     readiness = next(args for args in calls if "--for=condition=Ready" in args)
     assert calls.index(creation) < calls.index(rename) < calls.index(readiness)
     assert readiness[readiness.index("--context") + 1] == common.MANAGEMENT
-    encryption = yaml.safe_load((local_state / "management/encryption.yaml").read_text())
-    assert encryption["resources"][0]["providers"][0]["aescbc"]
-    assert (local_state / "management/encryption.yaml").stat().st_mode & 0o777 == 0o600
+    assert not (local_state / "management/encryption.yaml").exists()
     assert (
         json.loads((local_state / "management-created.json").read_text())[
             "secretEncryptionVerified"
         ]
         is True
     )
-    assert any("create" in args and "radplanes-encryption-probe" in args for args in calls)
-    assert any("delete" in args and "radplanes-encryption-probe" in args for args in calls)
-    assert (
-        "/registry/secrets/default/radplanes-encryption-probe" in (commands.json.call_args.args[0])
-    )
+    helper = commands.json.call_args.args[0]
+    assert helper[:2] == [
+        "bash",
+        str(bootstrap.ROOT / "scripts/operations/local/encryption.sh"),
+    ]
+    assert helper[helper.index("--cluster") + 1] == common.MANAGEMENT
+    assert helper[helper.index("--kubeconfig") + 1] == str(local_state / "home/.kube/config")
+    assert helper[helper.index("--context") + 1] == common.MANAGEMENT
+    assert helper[helper.index("--docker-host") + 1] == commands.env["DOCKER_HOST"]

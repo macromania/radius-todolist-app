@@ -1,17 +1,21 @@
 #!/bin/sh
 set -eu
 
-[ "$#" -eq 1 ] || {
-    echo "Exactly one owned child name is required" >&2
+[ "$#" -eq 2 ] || {
+    echo "A selected prefix and reserved child slot are required" >&2
     exit 1
 }
-case "$1" in
-    radplanes-local-shared-control|radplanes-local-shared-data|radplanes-local-isolated-1-control|radplanes-local-isolated-1-data) ;;
+# shellcheck source=image-contract.sh
+. "$(dirname "$0")/image-contract.sh"
+check_prefix "$1" || { echo "Invalid selected prefix" >&2; exit 1; }
+case "$2" in
+    shared-control|shared-data|isolated-1-control|isolated-1-data) ;;
     *) echo "Only reserved local child nodes are permitted" >&2; exit 1 ;;
 esac
-node="$1-control-plane"
+cluster="$1-$2"
+node="$cluster-control-plane"
 label=$(docker inspect --type container --format '{{index .Config.Labels "io.x-k8s.kind.cluster"}}' "$node")
-[ "$label" = "$1" ] || {
+[ "$label" = "$cluster" ] || {
     echo "Docker node ownership label mismatch" >&2
     exit 1
 }

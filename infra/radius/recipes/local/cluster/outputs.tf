@@ -4,7 +4,7 @@ output "result" {
     values = {
       clusterId          = "kind://${kind_cluster.child.name}"
       clusterName        = kind_cluster.child.name
-      bootstrapAccessRef = "kubernetes://radplanes-local-access/${kubernetes_secret_v1.access.metadata[0].name}#kubeconfig"
+      bootstrapAccessRef = "kubernetes://${var.access_namespace}/${kubernetes_secret_v1.access.metadata[0].name}#kubeconfig"
     }
   }
 }

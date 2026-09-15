@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+
+azure_provenance() {
+  local component="$1" api_base="$2"
+  shift 2
+  "$ROOT/.venv/bin/python" "$ROOT/scripts/operations/azure/build_provenance.py" "$@" \
+    --source "$SOURCE" --component "$component" --revision "$REVISION" \
+    --host "$HOST" --api-base "$api_base"
+}
+
+azure_existing_provenance() {
+  local component="$1" digest="$2" api_base="$3" run_id
+  azure_registry || return
+  run_id=$(azure_provenance "$component" "$api_base" lookup --registry-info "$AZURE_WORKSPACE/registry.json" \
+    --digest "$digest") || return
+  azure_json acr task show-run --registry "$REGISTRY" --run-id "$run_id" \
+    > "$AZURE_WORKSPACE/run-$component.json" || return
+  azure_provenance "$component" "$api_base" verify --registry-info "$AZURE_WORKSPACE/registry.json" \
+    --run-info "$AZURE_WORKSPACE/run-$component.json" --digest "$digest" \
+    > "$AZURE_WORKSPACE/provenance-$component.json"
+}
+
+azure_fresh_build() {
+  local component="$1" staging="$2" api_base="$3" run_id key
+  azure_registry || return
+  key="plane-demo-proof-$component-$REVISION"
+  jq -e --arg key "$key" '.tags[$key] == null and (.tags | length) < 50' \
+    "$AZURE_WORKSPACE/registry.json" >/dev/null || {
+    demo_error 'Fresh build proof already exists or registry tag capacity is exhausted'; return 1;
+  }
+  local args=(acr build --subscription "$AZURE_SUBSCRIPTION_ID" --registry "$REGISTRY" \
+    --platform linux/amd64 --file "images/$component/Dockerfile" --image "$staging" \
+    --build-arg "SOURCE_REVISION=$REVISION" --source-acr-auth-id '[caller]' --no-wait --output json)
+  if [[ "$component" == provisioner ]]; then
+    args+=(--build-arg TARGETARCH=amd64 --build-arg "API_IMAGE=$api_base")
+  fi
+  (cd "$SOURCE" && TMPDIR="$AZURE_WORKSPACE" az "${args[@]}" .) \
+    > "$AZURE_WORKSPACE/queued-$component.json" || return
+  run_id=$(jq -er '(.properties // .).runId | select(test("^[a-zA-Z0-9]{1,32}$"))' \
+    "$AZURE_WORKSPACE/queued-$component.json") || return
+  # Submission JSON is not build output. Stream the entire explicit run next.
+  az acr task logs --subscription "$AZURE_SUBSCRIPTION_ID" --registry "$REGISTRY" \
+    --run-id "$run_id" >&2 || return
+  azure_json acr task show-run --registry "$REGISTRY" --run-id "$run_id" \
+    > "$AZURE_WORKSPACE/run-$component.json" || return
+  azure_provenance "$component" "$api_base" fresh --queued-info "$AZURE_WORKSPACE/queued-$component.json" \
+    --run-info "$AZURE_WORKSPACE/run-$component.json" --staging "$staging" \
+    > "$AZURE_WORKSPACE/fresh-$component.json" || return
+}
+
+azure_record_build_proof() {
+  local component="$1" digest="$2" api_base="$3" key value filesystem
+  key=$(jq -er '.key' "$AZURE_WORKSPACE/fresh-$component.json") || return
+  value=$(jq -er '.value' "$AZURE_WORKSPACE/fresh-$component.json") || return
+  filesystem=$(jq -er '.filesystem_sha256 | select(test("^[a-f0-9]{64}$"))' \
+    "$AZURE_WORKSPACE/inspection-$component.json") || return
+  value="$value:$filesystem"
+  azure_registry || return
+  jq -e --arg key "$key" --arg value "$value" \
+    '.tags[$key] == null or .tags[$key] == $value' "$AZURE_WORKSPACE/registry.json" >/dev/null || {
+    demo_error 'Existing ARM build proof differs; it will not be replaced'; return 1;
+  }
+  azure_json tag update --resource-id \
+    "$PLATFORM_SCOPE/providers/Microsoft.ContainerRegistry/registries/$REGISTRY" \
+    --operation Merge --tags "$key=$value" > "$AZURE_WORKSPACE/proof-update.json" || return
+  azure_existing_provenance "$component" "$digest" "$api_base"
+}

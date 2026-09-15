@@ -26,6 +26,7 @@ mock_provider "kind" {
 }
 
 mock_provider "external" {
+  override_during = plan
   mock_data "external" {
     defaults = {
       result = { address = "172.18.0.3" }
@@ -34,9 +35,27 @@ mock_provider "external" {
 }
 
 mock_provider "kubernetes" {
+  override_during = plan
+}
+
+override_resource {
+  target          = terraform_data.images
+  override_during = plan
+  values          = {}
 }
 
 variables {
+  resource_prefix  = "radplanes-local"
+  radius_group     = "radplanes-local"
+  access_namespace = "radplanes-local-access"
+  runtime_images = {
+    api         = { reference = "localhost/radplanes-local-api:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", image_id = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+    provisioner = { reference = "localhost/radplanes-local-provisioner:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", image_id = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
+    operator    = { reference = "localhost/radplanes-local-operator:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", image_id = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" }
+  }
+  dependency_images = [
+    { reference = "kindest/node:v1.35.0@sha256:452d707d4862f52530247495d180205e029056831160e22870e37e3f6c1ac31f", image_id = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" },
+  ]
   context = {
     resource = {
       id = "/planes/radius/local/resourceGroups/radplanes-local/providers/Demo.Platform/clusters/shared-control"
@@ -48,9 +67,16 @@ variables {
   }
 }
 
-run "bounded_recipe_contract" {
+run "create_mock_child" {
   command = apply
+  # Materialize only the mocked prerequisite. Image import remains a separately tested shell path.
+  plan_options {
+    target = [kind_cluster.child]
+  }
+}
 
+run "bounded_recipe_contract" {
+  command = plan
   assert {
     condition     = kind_cluster.child.kind_config[0].networking[0].api_server_address == "127.0.0.1"
     error_message = "The host API must bind loopback only."
@@ -194,21 +220,46 @@ run "isolated_data_ports" {
 
 run "image_import_is_in_create_graph" {
   command = plan
-  variables {
-    images = ["localhost/radplanes-plane-api:0123456789abcdef0123456789abcdef01234567"]
-  }
   assert {
-    condition     = length(terraform_data.images) == 1 && terraform_data.images[0].triggers_replace.images == var.images
+    condition     = terraform_data.images.triggers_replace.images == local.prepared_images
     error_message = "Image references must trigger the post-kind-create import resource."
   }
 }
 
-run "gate_does_not_import_images" {
-  command = plan
-  assert {
-    condition     = length(terraform_data.images) == 0
-    error_message = "Default gate behavior must not load application images."
+run "selected_deployment_names" {
+  command   = plan
+  state_key = "selected-deployment"
+  variables {
+    resource_prefix  = "sample-demo-local"
+    radius_group     = "sample-demo-local"
+    access_namespace = "sample-demo-local-access"
+    context = {
+      resource = {
+        id = "/planes/radius/local/resourceGroups/sample-demo-local/providers/Demo.Platform/clusters/shared-control"
+        properties = {
+          slot        = "shared-control"
+          environment = "/planes/radius/local/resourceGroups/sample-demo-local/providers/Applications.Core/environments/provision-shared-control"
+        }
+      }
+    }
+    runtime_images = {
+      api         = { reference = "localhost/sample-demo-local-api:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", image_id = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+      provisioner = { reference = "localhost/sample-demo-local-provisioner:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", image_id = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
+      operator    = { reference = "localhost/sample-demo-local-operator:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", image_id = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" }
+    }
   }
+  assert {
+    condition     = kind_cluster.child.name == "sample-demo-local-shared-control" && kubernetes_secret_v1.access.metadata[0].namespace == "sample-demo-local-access"
+    error_message = "The selected deployment must own both the node and its parent access Secret."
+  }
+}
+
+run "normal_path_requires_prepared_images" {
+  command = plan
+  variables {
+    dependency_images = []
+  }
+  expect_failures = [var.dependency_images]
 }
 
 run "reject_unknown_slots" {
@@ -230,15 +281,19 @@ run "reject_unknown_slots" {
 run "reject_foreign_images" {
   command = plan
   variables {
-    images = ["docker.io/library/postgres:latest"]
+    runtime_images = {
+      api = { reference = "foreign.example/api:latest", image_id = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+    }
   }
-  expect_failures = [var.images]
+  expect_failures = [var.runtime_images]
 }
 
 run "reject_shell_image_injection" {
   command = plan
   variables {
-    images = ["localhost/radplanes-plane-api:0123456789abcdef0123456789abcdef01234567;id"]
+    runtime_images = {
+      api = { reference = "localhost/radplanes-local-api:0123456789abcdef0123456789abcdef01234567;id", image_id = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+    }
   }
-  expect_failures = [var.images]
+  expect_failures = [var.runtime_images]
 }

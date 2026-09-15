@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Preview or execute manifest-checked Azure teardown, Radius owners first."""
+"""Preview or execute .env-selected Azure teardown through verified live Radius owners."""
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -17,6 +20,10 @@ from plane_demo.management.providers.commands import Commands
 from plane_demo.management.provisioning import ProvisioningError
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+from scripts.operations.config import ConfigError, load_config  # noqa: E402
+
 PROJECT = "radplanes"
 SUBSCRIPTION = "a3ed6c04-563f-4855-ac84-bdf1e5fbc3fc"
 TAGS = {"project": PROJECT, "managedBy": "radius-todolist-app", "SecurityControl": "Ignore"}
@@ -850,7 +857,11 @@ class Cleanup:
                     "true",
                     mutation=True,
                 )
-        return self.verify() if self.execute else {"status": "planned", "steps": self.steps}
+        return (
+            {**self.verify(), "steps": self.steps}
+            if self.execute
+            else {"status": "planned", "steps": self.steps}
+        )
 
     def verify(self) -> dict:
         remaining = [
@@ -881,7 +892,1183 @@ class Cleanup:
         return {"status": "clean", "subscriptionId": SUBSCRIPTION, "softDeletedVaults": tombstones}
 
 
-def main(*, verify_only: bool = False) -> int:
+SLOTS = ("management", "shared-control", "shared-data", "isolated-1-control", "isolated-1-data")
+CHILDREN = ("shared-data", "isolated-1-data", "shared-control", "isolated-1-control")
+TERMINAL = {"Succeeded", "Failed", "Canceled"}
+DEPENDENCIES = {
+    "Demo.Platform/postgreSqlDatabases",
+    "Demo.Platform/gateways",
+    "Applications.Datastores/redisCaches",
+}
+OPEN_CLUSTER = r"""
+set -euo pipefail
+set +x
+umask 077
+source "$1/scripts/lib/env.sh"
+source "$1/scripts/lib/discovery.sh"
+demo_load_env "$1/.env"
+[[ "$DEMO_ENV" == "$CLEANUP_ENV" && "$DEMO_PROJECT" == "$CLEANUP_PROJECT" &&
+   "$DEMO_DEPLOYMENT" == "$CLEANUP_DEPLOYMENT" ]] || {
+  demo_error 'Cleanup configuration changed'; exit 1;
+}
+unset DEMO_KEY_MANAGEMENT DEMO_KEY_SHARED_CONTROL DEMO_KEY_SHARED_DATA \
+  DEMO_KEY_ISOLATED_1_CONTROL DEMO_KEY_ISOLATED_1_DATA
+DEMO_WORKSPACE=$2
+demo_open_cluster "$3"
+cluster=$(demo_kube get namespace kube-system --output json)
+jq -n --arg context "$DEMO_CONTEXT" --arg kubeconfig "$DEMO_KUBECONFIG" \
+  --argjson cluster "$cluster" '{context:$context,kubeconfig:$kubeconfig,cluster:$cluster}'
+"""
+
+
+def fault_helpers():
+    name = "plane_demo_cleanup_journal_helpers"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(
+            name, Path(__file__).parents[1] / "harness/fault-parent-link.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
+class LiveClusterCleanup:
+    """Cluster-only access and Radius owner deletion shared by the normal cleanup paths."""
+
+    def __init__(
+        self, *, environment, execute=False, runner=None, clock=time.monotonic, sleep=time.sleep
+    ):
+        self.config = load_config(ROOT / ".env")
+        require(self.config.environment == environment, "Cleanup environment differs from .env")
+        self.environment, self.execute = environment, execute
+        self.runner = runner or subprocess.run
+        self.clock, self.sleep = clock, sleep
+        self.confirmation = "CONFIRM_AZURE" if environment == "azure" else "CONFIRM_LOCAL"
+        require(
+            not execute or os.environ.get(self.confirmation) == "yes",
+            f"Execution requires {self.confirmation}=yes",
+        )
+        self.workspace = tempfile.TemporaryDirectory(prefix=".cleanup-", dir=ROOT)
+        self.work = Path(self.workspace.name)
+        self.scope = f"/planes/radius/local/resourceGroups/{self.config.stem}"
+        self.targets, self.inventories, self.steps = {}, {}, []
+        self.removed = {}
+        self.env = dict(os.environ)
+        for key in ("DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_HOST", "KUBECONFIG"):
+            self.env.pop(key, None)
+        self.env["AZURE_CONFIG_DIR"] = os.environ.get(
+            "AZURE_CONFIG_DIR", str(Path.home() / ".azure")
+        )
+
+    def close(self):
+        self.workspace.cleanup()
+
+    def current(self):
+        require(load_config(ROOT / ".env") == self.config, "Cleanup configuration changed")
+
+    def call(self, argv, *, mutation=False, payload=None, env=None, timeout=180):
+        self.current()
+        if mutation:
+            require(
+                self.execute and os.environ.get(self.confirmation) == "yes",
+                f"Mutation requires --execute and {self.confirmation}=yes",
+            )
+        try:
+            result = self.runner(
+                argv,
+                input=payload,
+                env=env or self.env,
+                cwd=ROOT,
+                timeout=timeout,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            raise CleanupError(
+                f"{argv[0]} unavailable or timed out; cleanup is incomplete"
+            ) from None
+        require(result.returncode == 0, f"{argv[0]} command failed; no provider fallback")
+        require(len(result.stdout) <= 8_000_000, "Cleanup response exceeds inventory limit")
+        return result.stdout
+
+    def json(self, argv, **kwargs):
+        try:
+            return json.loads(self.call(argv, **kwargs))
+        except ValueError:
+            raise CleanupError("Cleanup command returned invalid JSON") from None
+
+    def rows(self, value):
+        require(
+            not isinstance(value, dict)
+            or not (value.get("nextLink") or value.get("@odata.nextLink")),
+            "Incomplete inventory pagination",
+        )
+        return array(value)
+
+    def open_cluster(self, slot):
+        require(slot in SLOTS, "Unknown cleanup slot")
+        if slot in self.targets:
+            return self.targets[slot]
+        work = Path(tempfile.mkdtemp(prefix="access-", dir=self.work))
+        value = self.json(
+            ["bash", "-c", OPEN_CLUSTER, "cleanup-access", str(ROOT), str(work), slot],
+            env={
+                **os.environ,
+                "TMPDIR": str(self.work),
+                "CLEANUP_ENV": self.environment,
+                "CLEANUP_PROJECT": self.config.project,
+                "CLEANUP_DEPLOYMENT": self.config.deployment,
+            },
+        )
+        context = self.config.slot_name(slot)
+        profile = work / slot / "kubeconfig"
+        require(
+            value.get("context") == context
+            and value.get("kubeconfig") == str(profile)
+            and profile.is_file()
+            and not profile.is_symlink()
+            and profile.stat().st_mode & 0o777 == 0o600,
+            "Cluster access is not the selected private profile",
+        )
+        metadata = value["cluster"]["metadata"]
+        require(
+            metadata["name"] == "kube-system" and str(UUID(metadata["uid"])) == metadata["uid"],
+            "Live cluster UID is invalid",
+        )
+        home = work / "home"
+        home.mkdir(mode=0o700)
+        (home / ".kube").mkdir(mode=0o700)
+        (home / ".kube/config").symlink_to(profile)
+        radius = work / "radius.json"
+        radius.write_text(
+            json.dumps(
+                {
+                    "workspaces": {
+                        "default": context,
+                        "items": {
+                            context: {
+                                "connection": {"kind": "kubernetes", "context": context},
+                                "scope": self.scope,
+                            }
+                        },
+                    }
+                }
+            )
+        )
+        radius.chmod(0o600)
+        target = {
+            "slot": slot,
+            "context": context,
+            "kubeconfig": profile,
+            "home": home,
+            "radius": radius,
+            "cluster_uid": metadata["uid"],
+        }
+        self.targets[slot] = target
+        return target
+
+    def kube(self, slot, *args, namespace=None, mutation=False, payload=None):
+        target = self.open_cluster(slot)
+        return self.call(
+            [
+                "kubectl",
+                "--kubeconfig",
+                str(target["kubeconfig"]),
+                "--context",
+                target["context"],
+                "--request-timeout=30s",
+                *(["-n", namespace] if namespace else []),
+                *args,
+            ],
+            mutation=mutation,
+            payload=payload,
+            env={**self.env, "HOME": str(target["home"])},
+        )
+
+    def kube_json(self, slot, *args, **kwargs):
+        return json.loads(self.kube(slot, *args, "-o", "json", **kwargs))
+
+    def verify_cluster(self, slot):
+        current = self.kube_json(slot, "get", "namespace", "kube-system")
+        require(
+            current["metadata"]["uid"] == self.targets[slot]["cluster_uid"],
+            "Cluster UID changed since cleanup preflight",
+        )
+
+    def namespace(self, slot):
+        name = self.config.namespace(slot)
+        raw = self.kube(slot, "get", "namespace", name, "--ignore-not-found", "-o", "json")
+        if not raw.strip():
+            return None
+        value = json.loads(raw)
+        metadata = value["metadata"]
+        require(
+            metadata["name"] == name and str(UUID(metadata["uid"])) == metadata["uid"],
+            "Application namespace identity differs",
+        )
+        require(
+            all(
+                metadata.get("labels", {}).get(key) == expected
+                for key, expected in {
+                    "plane-demo/project": self.config.project,
+                    "plane-demo/deployment": self.config.deployment,
+                    "plane-demo/environment": self.environment,
+                }.items()
+            ),
+            "Application namespace ownership differs",
+        )
+        return value
+
+    def rad(self, slot, *args, mutation=False):
+        target = self.open_cluster(slot)
+        raw = self.call(
+            [
+                "rad",
+                "--config",
+                str(target["radius"]),
+                *args,
+                "--workspace",
+                target["context"],
+                "--group",
+                self.config.stem,
+                *([] if mutation else ["--output", "json"]),
+            ],
+            mutation=mutation,
+            timeout=900 if mutation else 180,
+            env={**self.env, "HOME": str(target["home"]), "KUBECONFIG": str(target["kubeconfig"])},
+        )
+        return None if mutation else json.loads(raw)
+
+    def native_resources(self, slot):
+        value = json.loads(
+            self.kube(
+                slot,
+                "get",
+                "--raw",
+                f"/apis/api.ucp.dev/v1alpha3{self.scope}/resources?api-version=2023-10-01-preview",
+            )
+        )
+        result, seen = [], set()
+        for item in self.rows(value):
+            name, kind, identifier = item["name"], item["type"], item["id"]
+            require(
+                SLUG.fullmatch(name)
+                and re.fullmatch(r"[A-Za-z0-9.]+/[A-Za-z0-9.]+", kind)
+                and same_id(identifier, f"{self.scope}/providers/{kind}/{name}")
+                and identifier.lower() not in seen,
+                "Foreign or duplicate Radius resource",
+            )
+            seen.add(identifier.lower())
+            if kind.lower() not in {
+                "applications.core/applications",
+                "applications.core/environments",
+                "microsoft.resources/deployments",
+            }:
+                result.append(item)
+        return result
+
+    def inventory(self, slot):
+        self.verify_cluster(slot)
+        role = "management" if slot == "management" else slot.rsplit("-", 1)[1]
+        apps = self.rows(self.rad(slot, "app", "list"))
+        resources = self.native_resources(slot)
+        allowed = {role} | (
+            {f"cluster-{child}" for child in CHILDREN} if slot == "management" else set()
+        )
+        require(len({item["name"] for item in apps}) == len(apps), "Duplicate Radius applications")
+        bindings, owners = {}, {}
+        for app in apps:
+            name = app["name"]
+            require(
+                name in allowed and same_id(app["id"], self.app_id(name)),
+                "Unexpected Radius application owner",
+            )
+            environment = slot if name == role else "provision-" + name.removeprefix("cluster-")
+            env_id = f"{self.scope}/providers/Applications.Core/environments/{environment}"
+            require(
+                same_id(app["properties"]["environment"], env_id), "Foreign application environment"
+            )
+            value = self.rad(slot, "env", "show", environment)
+            require(same_id(value["id"], env_id), "Radius environment identity differs")
+            compute = value["properties"]["compute"]
+            namespaces = (
+                {self.config.slot_name(slot), self.config.namespace(slot)}
+                if name == role
+                else {f"{self.config.stem}-p-{name.removeprefix('cluster-')}"}
+            )
+            require(
+                compute["kind"] == "kubernetes" and compute["namespace"] in namespaces,
+                "Radius compute scope differs",
+            )
+            self.environment_scope(slot, name, value["properties"])
+            bindings[name] = env_id
+        for item in resources:
+            kind, properties = item["type"], item["properties"]
+            require(
+                properties.get("provisioningState") in TERMINAL,
+                "Radius operation is incomplete; cleanup will not cancel it",
+            )
+            app = next(
+                (
+                    name
+                    for name in bindings
+                    if same_id(properties.get("application"), self.app_id(name))
+                ),
+                None,
+            )
+            require(app is not None, "Resource has no validated Radius application")
+            require(
+                same_id(properties.get("environment"), bindings[app])
+                or (
+                    kind == "Applications.Core/containers" and properties.get("environment") is None
+                ),
+                "Radius resource environment differs",
+            )
+            if kind == "Demo.Platform/clusters":
+                child = properties.get("slot")
+                require(
+                    slot == "management"
+                    and child in CHILDREN
+                    and item["name"] == child
+                    and app == "cluster-" + child
+                    and child not in owners,
+                    "Foreign or duplicate management-owned child cluster",
+                )
+                self.cluster_record(child, properties)
+                owners[child] = item
+            else:
+                require(
+                    kind in DEPENDENCIES | {"Applications.Core/containers"} and app == role,
+                    "Unknown Radius workload owner",
+                )
+            self.resource_scope(item)
+        return {"apps": apps, "resources": resources, "children": owners}
+
+    def app_id(self, name):
+        return f"{self.scope}/providers/Applications.Core/applications/{name}"
+
+    def environment_scope(self, slot, app, properties):
+        raise NotImplementedError
+
+    def resource_scope(self, item):
+        raise NotImplementedError
+
+    def cluster_record(self, slot, properties):
+        raise NotImplementedError
+
+    def note(self, action, identity):
+        self.steps.append({"action": action, "identity": identity})
+        print(f"{'execute' if self.execute else 'plan'} {action}: {identity}", file=sys.stderr)
+
+    def quiesce(self):
+        if self.namespace("management") is None:
+            return
+        namespace = self.config.namespace("management")
+        jobs = self.rows(self.kube_json("management", "get", "jobs", namespace=namespace))
+        require(
+            all(
+                any(
+                    c.get("type") in {"Complete", "Failed"} and c.get("status") == "True"
+                    for c in job.get("status", {}).get("conditions", [])
+                )
+                for job in jobs
+            ),
+            "Management Job is active; finish it before cleanup",
+        )
+        deployments = self.rows(
+            self.kube_json("management", "get", "deployments", namespace=namespace)
+        )
+        for value in deployments:
+            metadata = value["metadata"]
+            component = metadata.get("labels", {}).get("plane-demo/component")
+            if component not in {"management-api", "provisioner"}:
+                continue
+            require(
+                metadata["name"] == component
+                and metadata["namespace"] == namespace
+                and metadata["labels"].get("plane-demo/project") == self.config.project,
+                "Management Deployment ownership differs",
+            )
+            self.note("quiesce", namespace + "/" + component)
+            if self.execute:
+                patch = [
+                    {"op": "test", "path": "/metadata/uid", "value": metadata["uid"]},
+                    {"op": "test", "path": "/metadata/labels", "value": metadata["labels"]},
+                    {
+                        "op": "test",
+                        "path": "/spec/replicas",
+                        "value": value["spec"].get("replicas", 1),
+                    },
+                    {"op": "replace", "path": "/spec/replicas", "value": 0},
+                ]
+                self.kube(
+                    "management",
+                    "patch",
+                    "deployment",
+                    component,
+                    "--type=json",
+                    "-p",
+                    json.dumps(patch),
+                    namespace=namespace,
+                    mutation=True,
+                )
+                deadline = self.clock() + 180
+                while self.rows(
+                    self.kube_json(
+                        "management",
+                        "get",
+                        "pods",
+                        "-l",
+                        "plane-demo/component=" + component,
+                        namespace=namespace,
+                    )
+                ):
+                    require(self.clock() < deadline, "Management Pods did not terminate")
+                    self.sleep(2)
+
+    def delete_app(self, slot, app):
+        self.verify_cluster(slot)
+        expected = next(value for value in self.inventories[slot]["apps"] if value["name"] == app)
+        current = [
+            value for value in self.rows(self.rad(slot, "app", "list")) if value["name"] == app
+        ]
+        require(current == [expected], "Radius application changed since preflight")
+        self.note("radius-app", f"{slot}/{app}")
+        if not self.execute:
+            return
+        self.rad(slot, "app", "delete", app, "--yes", mutation=True)
+        require(
+            not any(value["name"] == app for value in self.rows(self.rad(slot, "app", "list"))),
+            "Radius application deletion is incomplete",
+        )
+        removed = self.removed.setdefault(slot, set())
+        removed.update(
+            item["id"].lower()
+            for item in self.inventories[slot]["resources"]
+            if same_id(item["properties"]["application"], self.app_id(app))
+        )
+        self.verify_remaining(slot)
+
+    def verify_remaining(self, slot):
+        expected = {item["id"].lower() for item in self.inventories[slot]["resources"]}
+        remaining = {item["id"].lower() for item in self.native_resources(slot)}
+        require(
+            remaining == expected - self.removed.get(slot, set()),
+            "Radius resources remain, changed, or appeared during cleanup",
+        )
+
+    def delete_cluster_owner(self, slot, record):
+        from kubernetes import config as kube_config
+        from kubernetes.client.exceptions import ApiException
+
+        self.verify_cluster("management")
+        current = [
+            item
+            for item in self.native_resources("management")
+            if same_id(item["id"], record["id"])
+        ]
+        require(current == [record], "Management Radius child owner changed")
+        self.note("radius-child", slot)
+        if not self.execute:
+            return
+        target = self.targets["management"]
+        self.current()
+        require(os.environ.get(self.confirmation) == "yes", "Cleanup confirmation was withdrawn")
+        try:
+            with kube_config.new_client_from_config(
+                config_file=str(target["kubeconfig"]), context=target["context"]
+            ) as client:
+                require(client.configuration.verify_ssl, "Radius DELETE requires verified TLS")
+                client.configuration.proxy = None
+                self.before_child_delete(slot, record)
+                _, status, _ = client.call_api(
+                    "/apis/api.ucp.dev/v1alpha3" + record["id"],
+                    "DELETE",
+                    query_params=[("api-version", "2025-08-01-preview")],
+                    header_params={
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                    },
+                    auth_settings=["BearerToken"],
+                    response_type="object",
+                    _request_timeout=(5, 60),
+                    _return_http_data_only=False,
+                )
+                require(status in {200, 202, 204}, "Radius child DELETE was not accepted")
+        except ApiException:
+            raise CleanupError(
+                "Radius child deletion failed; direct provider deletion is forbidden"
+            ) from None
+        deadline = self.clock() + 900
+        while any(
+            same_id(item["id"], record["id"]) for item in self.native_resources("management")
+        ):
+            require(self.clock() < deadline, "Radius child deletion did not complete")
+            self.sleep(3)
+        self.removed.setdefault("management", set()).add(record["id"].lower())
+        self.verify_remaining("management")
+
+    def before_child_delete(self, slot, record):
+        self.verify_cluster("management")
+
+    def fault_target(self, slot, namespace):
+        helpers = fault_helpers()
+        role = "management" if slot == "management" else slot.rsplit("-", 1)[1]
+        target = self.targets[slot]
+        return helpers.Target(
+            self.config.project,
+            slot,
+            target["context"],
+            target["kubeconfig"],
+            self.config.namespace(slot),
+            target["cluster_uid"],
+            namespace["metadata"]["uid"],
+            {
+                name: {"deployment": name, "container": name}
+                for name in (role + "-api", role + "-reconciler")
+            },
+            {},
+            ownership={
+                "plane-demo/project": self.config.project,
+                "plane-demo/deployment": self.config.deployment,
+                "plane-demo/environment": self.environment,
+            },
+        )
+
+    def check_journals(self, slot, namespace):
+        if namespace is None:
+            return None
+        helpers = fault_helpers()
+        target = self.fault_target(slot, namespace)
+        kube = helpers.Kubectl(
+            target,
+            runner=lambda argv, payload=None, timeout=30: self.call(
+                argv,
+                payload=payload,
+                timeout=timeout,
+                env={**self.env, "HOME": str(self.targets[slot]["home"])},
+            ),
+        )
+        for value in self.rows(kube.json("get", "configmaps")):
+            metadata = value["metadata"]
+            if (
+                not metadata["name"].startswith("plane-demo-fault-")
+                and metadata.get("labels", {}).get("plane-demo/journal-kind") != "fault"
+            ):
+                continue
+            journal = helpers.ConfigMapJournal(kube, metadata["name"], "fault")
+            record = journal.load()
+            require(
+                record.get("restored") is True and record.get("physical_restored") is True,
+                "Restore the owned fault journal before cleanup",
+            )
+            journal.check()
+        return kube
+
+    def clean_radius(self, clusters):
+        require(
+            "management" in clusters or not clusters,
+            "Management Radius is unavailable; direct child cleanup is forbidden",
+        )
+        if not clusters:
+            return
+        for slot in [*CHILDREN, "management"]:
+            if slot in clusters:
+                self.open_cluster(slot)
+                self.inventories[slot] = self.inventory(slot)
+                self.check_faults(slot)
+        owners = self.inventories["management"]["children"]
+        require(
+            set(clusters) - {"management"} <= set(owners),
+            "A child cluster lacks its management Radius owner",
+        )
+        self.preflight_dependencies(clusters, owners)
+        self.quiesce()
+        for slot in CHILDREN:
+            if slot in clusters:
+                for app in self.inventories[slot]["apps"]:
+                    self.delete_app(slot, app["name"])
+                if self.execute:
+                    self.child_apps_absent(slot)
+        for slot in CHILDREN:
+            if slot in owners:
+                if self.execute and slot in clusters:
+                    self.child_apps_absent(slot)
+                self.delete_cluster_owner(slot, owners[slot])
+                if self.execute:
+                    self.child_absent(slot, owners[slot])
+        for app in sorted(
+            self.inventories["management"]["apps"], key=lambda value: value["name"] == "management"
+        ):
+            self.delete_app("management", app["name"])
+        if self.execute:
+            require(
+                not self.native_resources("management")
+                and not self.rows(self.rad("management", "app", "list")),
+                "Management Radius owners remain",
+            )
+
+
+class LiveAzureCleanup(LiveClusterCleanup):
+    def __init__(self, **kwargs):
+        super().__init__(environment="azure", **kwargs)
+        self.platform = f"rg-{self.config.stem}-platform"
+        self.groups = [self.platform] + [
+            self.group_name(slot, kind) for slot in SLOTS for kind in ("app", "cluster", "nodes")
+        ]
+        require(
+            not any(name.startswith("rg-todolist-") for name in self.groups),
+            "Legacy rg-todolist resources are protected",
+        )
+        self.roles = {
+            key: f"/subscriptions/{self.config.subscription}/providers/Microsoft.Authorization/"
+            "roleDefinitions/"
+            + str(
+                uuid5(
+                    GUID_NAMESPACE,
+                    f"/subscriptions/{self.config.subscription}-{self.config.stem}-{value[0]}",
+                )
+            )
+            for key, value in ROLE_NAMES.items()
+        }
+        self.vault_id = (
+            self.gid(self.platform)
+            + "/providers/Microsoft.KeyVault/vaults/"
+            + self.config.vault_name
+            if self.config.key_vault is None
+            else None
+        )
+        self.external = None
+        self.group_resources = {}
+
+    def gid(self, name):
+        return f"/subscriptions/{self.config.subscription}/resourceGroups/{name}"
+
+    def group_name(self, slot, kind):
+        return f"rg-{self.config.slot_name(slot)}-{kind}"
+
+    def cluster_id(self, slot):
+        return self.gid(self.group_name(slot, "cluster")) + (
+            "/providers/Microsoft.ContainerService/managedClusters/aks-"
+            + self.config.slot_name(slot)
+        )
+
+    def tags(self, value):
+        return isinstance(value, dict) and all(
+            value.get(key) == expected
+            for key, expected in {
+                "project": self.config.project,
+                "deployment": self.config.deployment,
+                "environment": "azure",
+                "managedBy": "radius-todolist-app",
+                "SecurityControl": "Ignore",
+            }.items()
+        )
+
+    def owns(self, identifier):
+        return isinstance(identifier, str) and any(
+            same_id(identifier, self.gid(name))
+            or identifier.lower().startswith(self.gid(name).lower() + "/")
+            for name in self.groups
+        )
+
+    def az(self, *args, mutation=False):
+        raw = self.call(
+            [
+                "az",
+                *args,
+                "--subscription",
+                self.config.subscription,
+                "--only-show-errors",
+                "--output",
+                "none" if mutation else "json",
+            ],
+            mutation=mutation,
+            timeout=7200 if mutation else 180,
+        )
+        return None if mutation else json.loads(raw)
+
+    def external_vault(self):
+        if self.config.key_vault is None:
+            return []
+        candidates = [
+            value
+            for value in self.rows(self.az("keyvault", "list"))
+            if str(value.get("name", "")).lower() == self.config.vault_name
+        ]
+        require(len(candidates) == 1, "Selected external vault is missing or ambiguous")
+        value = candidates[0]
+        match = re.fullmatch(
+            rf"/subscriptions/{re.escape(self.config.subscription)}/resourceGroups/([^/]+)"
+            rf"/providers/Microsoft.KeyVault/vaults/{re.escape(self.config.vault_name)}",
+            value["id"],
+            re.IGNORECASE,
+        )
+        require(
+            match is not None and not match[1].lower().startswith(f"rg-{self.config.stem}-"),
+            "External vault overlaps deployment-owned groups or subscription",
+        )
+        self.vault_id = value["id"]
+        self.external = {"id": self.vault_id, "resourceGroup": match[1], "kind": "external-vault"}
+        return [self.external]
+
+    def group(self, name):
+        require(name in self.groups, "Unknown Azure group")
+        present = self.az("group", "exists", "--name", name)
+        require(type(present) is bool, "Invalid Azure existence response")
+        if not present:
+            return None
+        value = self.az("group", "show", "--name", name)
+        require(
+            value.get("name") == name
+            and same_id(value.get("id"), self.gid(name))
+            and self.tags(value.get("tags")),
+            "Azure group ownership differs",
+        )
+        resources = self.rows(self.az("resource", "list", "--resource-group", name))
+        for item in resources:
+            require(
+                isinstance(item.get("id"), str)
+                and item["id"].lower().startswith(self.gid(name).lower() + "/providers/")
+                and (
+                    self.tags(item.get("tags"))
+                    or (not item.get("tags") and item["type"].lower() in UNTAGGABLE)
+                ),
+                "Azure resource ownership differs; no group deletion is authorized",
+            )
+            if item["type"].lower() == "microsoft.keyvault/vaults":
+                require(
+                    self.config.key_vault is None and same_id(item["id"], self.vault_id),
+                    "Refusing deletion of an external or unexpected vault",
+                )
+            if item["type"].lower() == "microsoft.containerregistry/registries":
+                require(
+                    same_id(
+                        item["id"],
+                        self.gid(self.platform)
+                        + "/providers/Microsoft.ContainerRegistry/registries/"
+                        + self.config.registry_name,
+                    ),
+                    "Unexpected registry identity",
+                )
+        return resources
+
+    def unexpected(self):
+        groups = self.rows(self.az("group", "list", "--tag", "project=" + self.config.project))
+        resources = self.rows(
+            self.az("resource", "list", "--tag", "project=" + self.config.project)
+        )
+        selected_groups, selected_resources = [], []
+        for value in groups:
+            selected = (
+                value.get("tags", {}).get("deployment") == self.config.deployment
+                and value.get("tags", {}).get("environment") == "azure"
+            )
+            named = value.get("name", "").startswith("rg-" + self.config.stem + "-")
+            if selected or named:
+                require(
+                    value.get("name") in self.groups, "Unexpected deployment-owned group; retained"
+                )
+                require(self.tags(value.get("tags")), "Ambiguous deployment group ownership")
+                selected_groups.append(value)
+        for value in resources:
+            tags = value.get("tags") or {}
+            if (
+                tags.get("deployment") == self.config.deployment
+                and tags.get("environment") == "azure"
+            ):
+                require(self.owns(value.get("id")), "Unexpected deployment resource; retained")
+                selected_resources.append(value)
+        return selected_groups, selected_resources
+
+    def foundation(self):
+        value = self.az("deployment", "sub", "show", "--name", self.config.stem + "-bootstrap")
+        properties = value["properties"]
+        require(
+            properties.get("provisioningState") in TERMINAL, "Bootstrap deployment is nonterminal"
+        )
+        outputs = {key: item["value"] for key, item in properties["outputs"].items()}
+        foundation = outputs["foundation"]
+        require(
+            foundation.get("projectName") == self.config.project
+            and foundation.get("deploymentName") == self.config.deployment
+            and foundation.get("environment") == "azure"
+            and foundation.get("resourcePrefix") == self.config.stem
+            and foundation.get("radiusResourceGroup") == self.config.stem
+            and foundation.get("subscriptionId") == self.config.subscription
+            and foundation.get("vaultOwned") is (self.config.key_vault is None)
+            and same_id(foundation.get("vaultId"), self.vault_id)
+            and foundation.get("vaultResourceGroup")
+            == (self.external["resourceGroup"] if self.external else self.platform)
+            and same_id(
+                foundation.get("vaultPrivateEndpointId"),
+                self.gid(self.platform)
+                + f"/providers/Microsoft.Network/privateEndpoints/pe-{self.config.stem}-vault",
+            )
+            and foundation.get("roleDefinitionIds") == self.roles,
+            "Live bootstrap outputs differ from the selected identity",
+        )
+        allocations = outputs["allocations"]
+        require(
+            len(allocations) == len(SLOTS) and {item["slot"] for item in allocations} == set(SLOTS),
+            "Bootstrap allocations differ",
+        )
+        for item in allocations:
+            slot = item["slot"]
+            require(
+                item["clusterName"] == "aks-" + self.config.slot_name(slot)
+                and item["appResourceGroup"] == self.group_name(slot, "app")
+                and item["clusterResourceGroup"] == self.group_name(slot, "cluster")
+                and item["nodeResourceGroup"] == self.group_name(slot, "nodes"),
+                "Bootstrap group or cluster ownership differs",
+            )
+
+    def role_state(self):
+        found, retained, assignments = {}, [], []
+        definitions = self.rows(self.az("role", "definition", "list", "--custom-role-only", "true"))
+        for identifier in self.roles.values():
+            exact = self.rows(
+                self.az("role", "definition", "list", "--name", identifier.rsplit("/", 1)[1])
+            )
+            require(
+                all(same_id(value.get("id"), identifier) for value in exact),
+                "Exact role lookup returned a foreign role",
+            )
+            definitions.extend(exact)
+        for value in definitions:
+            key = next(
+                (
+                    key
+                    for key, identifier in self.roles.items()
+                    if same_id(value.get("id"), identifier)
+                ),
+                None,
+            )
+            if key is None:
+                require(
+                    not value.get("roleName", "").startswith(self.config.stem + " "),
+                    "Unknown deployment custom role; retained",
+                )
+                continue
+            expected_scopes = (
+                {self.gid(self.platform).lower(), self.vault_id.lower()}
+                if key in {"certificateImporter", "acmeStateWriter"}
+                else {self.gid(self.group_name(slot, "cluster")).lower() for slot in CHILDREN}
+            )
+            require(
+                value.get("roleType") == "CustomRole"
+                and value.get("roleName") == self.config.stem + ROLE_NAMES[key][1][len(PROJECT) :]
+                and {scope.lower() for scope in value["assignableScopes"]} == expected_scopes,
+                "Custom role ownership or scopes differ",
+            )
+            found[key] = value
+        for value in self.rows(
+            self.az("role", "assignment", "list", "--all", "--fill-principal-name", "false")
+        ):
+            scope = value.get("scope", "")
+            external = self.external and (
+                same_id(scope, self.vault_id)
+                or scope.lower().startswith(self.vault_id.lower() + "/")
+            )
+            own_role = next(
+                (
+                    key
+                    for key, identifier in self.roles.items()
+                    if same_id(value.get("roleDefinitionId"), identifier)
+                ),
+                None,
+            )
+            if external:
+                retained.append({"id": value["id"], "kind": "external-role-assignment"})
+                if own_role in found:
+                    retained.append(
+                        {"id": found[own_role]["id"], "kind": "retained-role-definition"}
+                    )
+                continue
+            if not self.owns(scope):
+                require(own_role is None, "Deployment custom role has an unowned assignment scope")
+                continue
+            prefix = scope.rstrip("/") + "/providers/Microsoft.Authorization/roleAssignments/"
+            require(
+                value.get("id", "").lower().startswith(prefix.lower())
+                and str(UUID(value["id"][len(prefix) :])) == value["id"][len(prefix) :].lower(),
+                "Role assignment ID differs from its owned scope",
+            )
+            assignments.append(value)
+        return found, assignments, list({item["id"]: item for item in retained}.values())
+
+    def clusters(self):
+        result = {}
+        for slot in SLOTS:
+            group = self.group_name(slot, "cluster")
+            if self.group_resources[group] is None:
+                continue
+            entries = self.rows(self.az("aks", "list", "--resource-group", group))
+            require(len(entries) <= 1, "Unexpected AKS in selected group")
+            listed_ids = {
+                item["id"].lower()
+                for item in self.group_resources[group]
+                if item["type"].lower() == "microsoft.containerservice/managedclusters"
+            }
+            require(
+                listed_ids == {item["id"].lower() for item in entries},
+                "Azure resource and AKS inventories disagree",
+            )
+            if entries:
+                value = entries[0]
+                require(
+                    same_id(value.get("id"), self.cluster_id(slot))
+                    and value.get("name") == "aks-" + self.config.slot_name(slot)
+                    and value.get("nodeResourceGroup") == self.group_name(slot, "nodes")
+                    and self.tags(value.get("tags"))
+                    and value.get("provisioningState") == "Succeeded",
+                    "AKS identity, ownership, or readiness differs",
+                )
+                result[slot] = value
+        return result
+
+    def environment_scope(self, slot, app, properties):
+        child = app.removeprefix("cluster-") if app.startswith("cluster-") else None
+        expected = self.gid(self.group_name(child or slot, "cluster" if child else "app"))
+        require(
+            same_id(properties["providers"]["azure"]["scope"], expected),
+            "Radius environment targets an unowned Azure group",
+        )
+
+    def resource_scope(self, value):
+        if isinstance(value, str) and value.lower().startswith("/subscriptions/"):
+            require(
+                self.owns(value)
+                or same_id(value, self.vault_id)
+                or same_id(value, "/subscriptions/" + self.config.subscription),
+                "Radius references an unowned Azure resource",
+            )
+        elif isinstance(value, dict):
+            for child in value.values():
+                self.resource_scope(child)
+        elif isinstance(value, list):
+            for child in value:
+                self.resource_scope(child)
+
+    def cluster_record(self, slot, properties):
+        require(
+            not properties.get("clusterId")
+            or same_id(properties["clusterId"], self.cluster_id(slot)),
+            "Radius child points at a different AKS",
+        )
+
+    def check_faults(self, slot):
+        namespace = self.namespace(slot)
+        kube = self.check_journals(slot, namespace)
+        if kube is not None:
+            kube.policies(reject_faults=True)
+
+    def preflight_dependencies(self, clusters, owners):
+        for slot in SLOTS:
+            require(
+                slot in clusters or not self.group_resources[self.group_name(slot, "app")],
+                "App resources lack a reachable Radius owner",
+            )
+            if self.group_resources[self.group_name(slot, "app")]:
+                role = "management" if slot == "management" else slot.rsplit("-", 1)[1]
+                require(
+                    any(app["name"] == role for app in self.inventories[slot]["apps"]),
+                    f"{slot}: app resources have no Radius application owner",
+                )
+
+    def child_apps_absent(self, slot):
+        require(
+            not self.rows(self.rad(slot, "app", "list")) and not self.native_resources(slot),
+            "Child Radius workloads remain",
+        )
+        remaining = self.group(self.group_name(slot, "app"))
+        require(
+            not remaining,
+            "Radius left app resources; direct deletion is forbidden: "
+            + ", ".join(item["id"] for item in remaining or []),
+        )
+
+    def child_absent(self, slot, record):
+        deadline = self.clock() + 900
+        while self.rows(
+            self.az("aks", "list", "--resource-group", self.group_name(slot, "cluster"))
+        ):
+            require(self.clock() < deadline, "Child AKS remains after Radius deletion")
+            self.sleep(3)
+
+    def delete_group(self, name):
+        resources = self.group(name)
+        if resources is None:
+            return
+        if self.execute:
+            require(
+                not any(
+                    value["type"].lower() == "microsoft.containerservice/managedclusters"
+                    for value in resources
+                ),
+                "A cluster remains; group deletion would bypass its owner",
+            )
+        self.note("bootstrap-group", name)
+        if self.execute:
+            self.az("group", "delete", "--name", name, "--yes", mutation=True)
+            require(
+                self.az("group", "exists", "--name", name) is False,
+                "Azure group deletion is incomplete",
+            )
+
+    def clean(self, *, radius_only=False):
+        self.external_vault()
+        self.unexpected()
+        self.group_resources = {name: self.group(name) for name in self.groups}
+        definitions, assignments, retained = self.role_state()
+        if any(value is not None for value in self.group_resources.values()):
+            self.foundation()
+        clusters = self.clusters()
+        if not clusters:
+            require(
+                not any(self.group_resources[self.group_name(slot, "app")] for slot in SLOTS),
+                "App resources remain without Radius; normal cleanup cannot bypass it",
+            )
+        self.clean_radius(clusters)
+        if self.execute:
+            remaining = self.group(self.group_name("management", "app"))
+            require(
+                not remaining,
+                "Radius left management app resources: "
+                + ", ".join(item["id"] for item in remaining or []),
+            )
+        if radius_only:
+            return {
+                "status": "radius_resources_removed" if self.execute else "planned",
+                "foundationRetained": True,
+                "steps": self.steps,
+            }
+        for slot in CHILDREN:
+            self.delete_group(self.group_name(slot, "app"))
+            self.delete_group(self.group_name(slot, "cluster"))
+            self.delete_group(self.group_name(slot, "nodes"))
+        self.delete_group(self.group_name("management", "app"))
+        if "management" in clusters:
+            self.note("bootstrap-management-aks", self.cluster_id("management"))
+            if self.execute:
+                self.verify_cluster("management")
+                current = self.rows(
+                    self.az(
+                        "aks", "list", "--resource-group", self.group_name("management", "cluster")
+                    )
+                )
+                require(
+                    len(current) == 1 and current[0] == clusters["management"],
+                    "Management AKS changed",
+                )
+                self.az(
+                    "aks",
+                    "delete",
+                    "--name",
+                    "aks-" + self.config.slot_name("management"),
+                    "--resource-group",
+                    self.group_name("management", "cluster"),
+                    "--yes",
+                    mutation=True,
+                )
+                require(
+                    not self.rows(
+                        self.az(
+                            "aks",
+                            "list",
+                            "--resource-group",
+                            self.group_name("management", "cluster"),
+                        )
+                    ),
+                    "Management AKS deletion is incomplete",
+                )
+        if self.execute or "management" not in clusters:
+            self.delete_group(self.group_name("management", "cluster"))
+            self.delete_group(self.group_name("management", "nodes"))
+        else:
+            self.note("bootstrap-group", self.group_name("management", "cluster"))
+            self.note("bootstrap-group", self.group_name("management", "nodes"))
+        self.delete_group(self.platform)
+        if self.execute:
+            definitions, assignments, retained = self.role_state()
+        for assignment in assignments:
+            self.note("owned-role-assignment", assignment["id"])
+            if self.execute:
+                self.az("role", "assignment", "delete", "--ids", assignment["id"], mutation=True)
+        retained_ids = {value["id"].lower() for value in retained}
+        for value in definitions.values():
+            if value["id"].lower() in retained_ids:
+                continue
+            self.note("bootstrap-role-definition", value["id"])
+            if self.execute:
+                self.az(
+                    "role",
+                    "definition",
+                    "delete",
+                    "--name",
+                    value["id"].rsplit("/", 1)[1],
+                    "--custom-role-only",
+                    "true",
+                    mutation=True,
+                )
+        return (
+            self.verify()
+            if self.execute
+            else {
+                "status": "planned",
+                "steps": self.steps,
+                "retainedExternalObjects": ([self.external] if self.external else []) + retained,
+            }
+        )
+
+    def verify(self):
+        retained = self.external_vault()
+        remaining = []
+        for name in self.groups:
+            exists = self.az("group", "exists", "--name", name)
+            require(type(exists) is bool, "Invalid Azure existence response")
+            if exists:
+                remaining.append(name)
+        require(not remaining, "Owned Azure groups remain: " + ", ".join(remaining))
+        definitions, assignments, external_roles = self.role_state()
+        retained.extend(external_roles)
+        allowed = {item["id"].lower() for item in retained}
+        require(
+            not assignments
+            and all(value["id"].lower() in allowed for value in definitions.values()),
+            "Owned custom roles or role assignments remain",
+        )
+        groups, resources = self.unexpected()
+        require(not groups and not resources, "Owned Azure resources remain")
+        tombstones = []
+        if self.config.key_vault is None:
+            for value in self.rows(self.az("keyvault", "list-deleted")):
+                if value.get("name") == self.config.vault_name:
+                    require(
+                        same_id(value["properties"].get("vaultId"), self.vault_id),
+                        "Soft-deleted vault identity differs",
+                    )
+                    tombstones.append(
+                        {
+                            "id": self.vault_id,
+                            "scheduledPurgeDate": value["properties"].get("scheduledPurgeDate"),
+                        }
+                    )
+        return {
+            "status": "clean",
+            "scope": "owned-active-resources",
+            "environment": "azure",
+            "subscriptionId": self.config.subscription,
+            "deployment": self.config.stem,
+            "retainedExternalObjects": retained,
+            "softDeletedVaults": tombstones,
+            "purged": False,
+        }
+
+
+def legacy_main(*, verify_only: bool = False) -> int:
     parser = argparse.ArgumentParser(
         description="Read-only verification of the exact Azure ownership manifest."
         if verify_only
@@ -970,6 +2157,44 @@ def main(*, verify_only: bool = False) -> int:
     ) as exc:
         print(f"Cleanup incomplete: {exc}", file=sys.stderr)
         return 1
+
+
+def main(argv=None, *, verify_only=False, engine_factory=LiveAzureCleanup):
+    parser = argparse.ArgumentParser(
+        description="Cleanup and verify the selected .env deployment using live owners."
+    )
+    parser.add_argument("--environment", choices=("azure",), default="azure")
+    if not verify_only:
+        parser.add_argument("--execute", action="store_true")
+        parser.add_argument("--radius-only", action="store_true")
+    args = parser.parse_args(argv)
+    engine = None
+    try:
+        engine = engine_factory(execute=not verify_only and args.execute)
+        result = engine.verify() if verify_only else engine.clean(radius_only=args.radius_only)
+        print(json.dumps(result, indent=2))
+        return 0
+    except KeyboardInterrupt:
+        print(
+            "Cleanup incomplete: interrupted; verify live ownership before retrying.",
+            file=sys.stderr,
+        )
+        return 130
+    except (
+        CleanupError,
+        ConfigError,
+        ProvisioningError,
+        fault_helpers().AcceptanceError,
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+    ) as error:
+        print(f"Cleanup incomplete: {error}", file=sys.stderr)
+        return 1
+    finally:
+        if engine is not None:
+            engine.close()
 
 
 if __name__ == "__main__":

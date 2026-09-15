@@ -3,8 +3,11 @@ param location string
 @description('Ordered roles, including management at index zero. Address allocations must not be reordered after deployment.')
 param slots array
 param tags object
-@description('Use a run-unique salt when a purge-protected vault from a previous run is still soft-deleted.')
-param nameSalt string
+param registryName string
+@description('Existing owned registries are read-only here so bootstrap cannot erase ARM-owned build proofs or unrelated tags.')
+param registryExists bool = false
+param vaultName string
+param externalVaultResourceGroup string = ''
 
 resource egressIp 'Microsoft.Network/publicIPAddresses@2024-07-01' = {
   name: 'pip-${prefix}-egress'
@@ -167,8 +170,8 @@ resource links 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2024-06-01
   }
 }]
 
-resource registry 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
-  name: 'acr${replace(prefix, '-', '')}${uniqueString(subscription().id, nameSalt)}'
+resource registry 'Microsoft.ContainerRegistry/registries@2025-11-01' = if (!registryExists) {
+  name: registryName
   location: location
   tags: tags
   sku: {
@@ -176,12 +179,18 @@ resource registry 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
   }
   properties: {
     adminUserEnabled: false
+    anonymousPullEnabled: false
+    roleAssignmentMode: 'AbacRepositoryPermissions'
     publicNetworkAccess: 'Enabled'
   }
 }
 
-resource vault 'Microsoft.KeyVault/vaults@2024-11-01' = {
-  name: 'kv-${take(prefix, 7)}-${uniqueString(subscription().id, nameSalt)}'
+resource retainedRegistry 'Microsoft.ContainerRegistry/registries@2025-11-01' existing = {
+  name: registryName
+}
+
+resource vault 'Microsoft.KeyVault/vaults@2024-11-01' = if (empty(externalVaultResourceGroup)) {
+  name: vaultName
   location: location
   tags: tags
   properties: {
@@ -204,6 +213,12 @@ resource vault 'Microsoft.KeyVault/vaults@2024-11-01' = {
   }
 }
 
+resource suppliedVault 'Microsoft.KeyVault/vaults@2024-11-01' existing = {
+  name: vaultName
+  scope: resourceGroup(empty(externalVaultResourceGroup) ? resourceGroup().name : externalVaultResourceGroup)
+}
+var selectedVaultId = empty(externalVaultResourceGroup) ? vault!.id : suppliedVault.id
+
 resource vaultEndpoint 'Microsoft.Network/privateEndpoints@2024-07-01' = {
   name: 'pe-${prefix}-vault'
   location: location
@@ -217,7 +232,7 @@ resource vaultEndpoint 'Microsoft.Network/privateEndpoints@2024-07-01' = {
       {
         name: 'vault'
         properties: {
-          privateLinkServiceId: vault.id
+          privateLinkServiceId: selectedVaultId
           groupIds: [
             'vault'
           ]
@@ -261,12 +276,16 @@ output foundation object = {
   virtualNetworkName: vnet.name
   egressIp: egressIp.properties.ipAddress
   egressIpId: egressIp.id
-  registryId: registry.id
-  registryName: registry.name
-  registryLoginServer: registry.properties.loginServer
-  vaultId: vault.id
-  vaultName: vault.name
-  vaultUri: vault.properties.vaultUri
+  registryId: registryExists ? retainedRegistry.id : registry!.id
+  registryName: registryName
+  registryLoginServer: registryExists ? retainedRegistry.properties.loginServer : registry!.properties.loginServer
+  registryRoleAssignmentMode: registryExists ? retainedRegistry.properties.roleAssignmentMode : registry!.properties.roleAssignmentMode
+  vaultId: selectedVaultId
+  vaultName: vaultName
+  vaultUri: empty(externalVaultResourceGroup) ? vault!.properties.vaultUri : suppliedVault.properties.vaultUri
+  vaultOwned: empty(externalVaultResourceGroup)
+  vaultResourceGroup: empty(externalVaultResourceGroup) ? resourceGroup().name : externalVaultResourceGroup
+  vaultPrivateEndpointId: vaultEndpoint.id
   postgresqlDnsZoneId: zones[0].id
   redisDnsZoneId: zones[1].id
   vaultDnsZoneId: zones[2].id
@@ -274,8 +293,8 @@ output foundation object = {
 
 output allocations array = [for (slot, i) in slots: {
   slot: slot
-  certificateName: 'gateway-${slot}'
-  acmeStateSecretName: 'acme-${slot}'
+  certificateName: 'gateway-${prefix}-${slot}'
+  acmeStateSecretName: 'acme-${prefix}-${slot}'
   nodeSubnetId: resourceId('Microsoft.Network/virtualNetworks/subnets', vnet.name, 'snet-${slot}-nodes')
   nodeSubnetName: 'snet-${slot}-nodes'
   gatewaySubnetId: resourceId('Microsoft.Network/virtualNetworks/subnets', vnet.name, 'snet-${slot}-gateway')

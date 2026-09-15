@@ -1,12 +1,31 @@
 targetScope = 'subscription'
 
+@minLength(1)
+@maxLength(16)
+param projectName string
+@minLength(1)
+@maxLength(16)
+param deploymentName string
+@allowed(['azure'])
+param environment string = 'azure'
+param location string
+@description('Deterministic global registry name derived from the selected deployment identity.')
+@minLength(5)
+@maxLength(50)
+param registryName string
+param registryExists bool = false
 @minLength(3)
-@maxLength(12)
-param projectName string = 'radplanes'
-@description('Central US passed the parent preflight; East US 2 PostgreSQL is subscription-restricted.')
-param location string = 'centralus'
-@description('Run-unique non-secret naming salt. Retain for redeployments; change after vault teardown.')
-param nameSalt string
+@maxLength(24)
+param vaultName string
+@description('Empty for a demo-owned vault. Otherwise the live-discovered resource group of an existing private RBAC vault in this subscription.')
+param externalVaultResourceGroup string = ''
+@minLength(20)
+@maxLength(20)
+param deploymentHash string
+@description('Exact CredentialScope secret names for the five logical slots. Grants never target a whole vault.')
+@minLength(15)
+@maxLength(15)
+param applicationCredentialNames array
 @description('Validated bare public operator IPv4 address. The template authorizes only its /32, never a broad CIDR.')
 @minLength(7)
 @maxLength(15)
@@ -29,16 +48,21 @@ param childSlots array = [
   'isolated-1-control'
   'isolated-1-data'
 ]
-param coordinatorServiceAccountSubject string = 'system:serviceaccount:radplanes-management-management:provisioner'
-param certificateIssuerServiceAccountSubject string = 'system:serviceaccount:radplanes-system:certificate-issuer'
+param coordinatorServiceAccountSubject string = 'system:serviceaccount:${projectName}-${deploymentName}-${environment}-management-management:provisioner'
+param certificateIssuerServiceAccountSubject string = 'system:serviceaccount:${projectName}-${deploymentName}-${environment}-system:certificate-issuer'
+param harnessServiceAccountSubject string = 'system:serviceaccount:${projectName}-${deploymentName}-${environment}-management-management:harness'
 param tags object = {}
 
-var prefix = projectName
+var prefix = '${projectName}-${deploymentName}-${environment}'
+var vaultResourceGroup = empty(externalVaultResourceGroup) ? 'rg-${prefix}-platform' : externalVaultResourceGroup
+var selectedVaultId = resourceId(subscription().subscriptionId, vaultResourceGroup, 'Microsoft.KeyVault/vaults', vaultName)
 var operatorIpCidr = '${operatorIp}/32'
 var operatorRanges = union([operatorIpCidr], map(additionalOperatorIps, ip => '${ip}/32'))
 var requiredTags = union(tags, {
   SecurityControl: 'Ignore'
-  project: 'radplanes'
+  project: projectName
+  deployment: deploymentName
+  environment: environment
   managedBy: 'radius-todolist-app'
 })
 var slots = concat(['management'], childSlots)
@@ -78,6 +102,7 @@ resource issuerRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
     type: 'CustomRole'
     assignableScopes: [
       subscriptionResourceId('Microsoft.Resources/resourceGroups', 'rg-${prefix}-platform')
+      selectedVaultId
     ]
     permissions: [
       {
@@ -94,6 +119,7 @@ resource issuerRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
   }
   dependsOn: [
     platformGroup
+    network
   ]
 }
 
@@ -101,10 +127,11 @@ resource acmeStateRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
   name: guid(subscription().id, prefix, 'acme-state-writer')
   properties: {
     roleName: '${prefix} ACME state writer'
-    description: 'Read and set only the ACME state secret named by an object-scoped assignment.'
+    description: 'Read metadata, get, and set only an ACME state or application credential secret named by an exact object-scoped assignment.'
     type: 'CustomRole'
     assignableScopes: [
       subscriptionResourceId('Microsoft.Resources/resourceGroups', 'rg-${prefix}-platform')
+      selectedVaultId
     ]
     permissions: [
       {
@@ -121,6 +148,7 @@ resource acmeStateRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
   }
   dependsOn: [
     platformGroup
+    network
   ]
 }
 
@@ -216,13 +244,23 @@ module harness './coordinator.bicep' = {
     clusterGroups
   ]
 }
+module coordinatorBootstrapRead './coordinator-bootstrap-read.bicep' = {
+  name: '${prefix}-bootstrap-read'
+  params: {
+    bootstrapDeploymentName: '${prefix}-bootstrap'
+    coordinatorPrincipalId: coordinator.outputs.identity.principalId
+  }
+}
 module network './network.bicep' = {
   name: 'network'
   scope: resourceGroup('rg-${prefix}-platform')
   params: {
     prefix: prefix
     location: location
-    nameSalt: nameSalt
+    registryName: registryName
+    registryExists: registryExists
+    vaultName: vaultName
+    externalVaultResourceGroup: externalVaultResourceGroup
     slots: slots
     tags: requiredTags
   }
@@ -241,8 +279,6 @@ module platformAccess './platform-access.bicep' = {
     })]
     coordinatorPrincipalId: coordinator.outputs.identity.principalId
     operatorObjectId: operatorObjectId
-    certificateIssuerRoleId: issuerRole.id
-    acmeStateRoleId: acmeStateRole.id
   }
   dependsOn: [
     platformGroup
@@ -408,6 +444,52 @@ module coordinatorFederation './federation.bicep' = {
   ]
 }
 
+module gatewaySecrets './vault-object-access.json' = [for (slot, i) in slots: {
+  name: 'kv-gateway-${deploymentHash}-${slot}'
+  scope: resourceGroup(vaultResourceGroup)
+  params: {
+    objectScope: '${selectedVaultId}/secrets/${network.outputs.allocations[i].certificateName}'
+    principalId: identity[i].outputs.identity.gateway.principalId
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')
+  }
+}]
+module issuerCertificates './vault-object-access.json' = [for (slot, i) in slots: {
+  name: 'kv-certificate-${deploymentHash}-${slot}'
+  scope: resourceGroup(vaultResourceGroup)
+  params: {
+    objectScope: '${selectedVaultId}/certificates/${network.outputs.allocations[i].certificateName}'
+    principalId: identity[i].outputs.identity.certificateIssuer.principalId
+    roleDefinitionId: issuerRole.id
+  }
+}]
+module issuerCertificateSecrets './vault-object-access.json' = [for (slot, i) in slots: {
+  name: 'kv-cert-secret-${deploymentHash}-${slot}'
+  scope: resourceGroup(vaultResourceGroup)
+  params: {
+    objectScope: '${selectedVaultId}/secrets/${network.outputs.allocations[i].certificateName}'
+    principalId: identity[i].outputs.identity.certificateIssuer.principalId
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')
+  }
+}]
+module issuerStateSecrets './vault-object-access.json' = [for (slot, i) in slots: {
+  name: 'kv-acme-${deploymentHash}-${slot}'
+  scope: resourceGroup(vaultResourceGroup)
+  params: {
+    objectScope: '${selectedVaultId}/secrets/${network.outputs.allocations[i].acmeStateSecretName}'
+    principalId: identity[i].outputs.identity.certificateIssuer.principalId
+    roleDefinitionId: acmeStateRole.id
+  }
+}]
+module applicationCredentials './vault-object-access.json' = [for name in applicationCredentialNames: {
+  name: 'kv-credential-${deploymentHash}-${uniqueString(name)}'
+  scope: resourceGroup(vaultResourceGroup)
+  params: {
+    objectScope: '${selectedVaultId}/secrets/${name}'
+    principalId: coordinator.outputs.identity.principalId
+    roleDefinitionId: acmeStateRole.id
+  }
+}]
+
 module harnessPlatformAccess './resource-group-access.bicep' = {
   name: 'harness-platform-read'
   scope: resourceGroup('rg-${prefix}-platform')
@@ -433,7 +515,7 @@ module harnessFederation './federation.bicep' = {
     bindings: [
       {
         name: 'demo-harness'
-        subject: 'system:serviceaccount:radplanes-management-management:harness'
+        subject: harnessServiceAccountSubject
       }
     ]
   }
@@ -444,6 +526,11 @@ module harnessFederation './federation.bicep' = {
 
 output foundation object = union(network.outputs.foundation, {
   projectName: projectName
+  deploymentName: deploymentName
+  deploymentHash: deploymentHash
+  environment: environment
+  resourcePrefix: prefix
+  radiusResourceGroup: prefix
   subscriptionId: subscription().subscriptionId
   tenantId: subscription().tenantId
   location: location
@@ -464,6 +551,7 @@ output foundation object = union(network.outputs.foundation, {
   tags: requiredTags
 })
 output allocations array = [for (slot, i) in slots: union(network.outputs.allocations[i], {
+  namespace: '${prefix}-${slot}-${slot == 'management' ? 'management' : last(split(slot, '-'))}'
   clusterName: 'aks-${prefix}-${slot}'
   clusterResourceGroup: 'rg-${prefix}-${slot}-cluster'
   clusterResourceGroupId: subscriptionResourceId('Microsoft.Resources/resourceGroups', 'rg-${prefix}-${slot}-cluster')

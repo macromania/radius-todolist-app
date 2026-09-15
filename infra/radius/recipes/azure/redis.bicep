@@ -13,7 +13,6 @@ param tags object = {}
 var cacheName = 'amr-${uniqueString(context.resource.id, resourceGroup().id)}'
 var requiredTags = union(tags, {
   SecurityControl: 'Ignore'
-  project: 'radplanes'
   managedBy: 'radius-todolist-app'
   'radapp.io-environment': context.environment.id
   'radapp.io-application': context.application == null ? '' : context.application.id

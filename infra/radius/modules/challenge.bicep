@@ -1,6 +1,9 @@
 param application string
 param environment string
 param image string
+param ownershipLabels object = {
+  'plane-demo/project': 'radplanes'
+}
 
 module challenge './workload.bicep' = {
   name: 'challenge-workload'
@@ -9,6 +12,7 @@ module challenge './workload.bicep' = {
     environment: environment
     name: 'challenge'
     image: image
+    ownershipLabels: ownershipLabels
     entrypoint: 'plane_demo.setup.acme_responder'
     serviceAccount: 'challenge'
     api: true

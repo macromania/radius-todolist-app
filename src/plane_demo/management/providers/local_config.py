@@ -117,7 +117,8 @@ class LocalConfig:
         for role in ("api", "provisioner"):
             image = data["images"][role]
             reference, image_id = image["reference"], image["imageId"]
-            match = re.fullmatch(rf"localhost/radplanes-plane-{role}:([a-f0-9]{{40}})", reference)
+            image_name = f"{identity.stem}-{role}" if identity else f"radplanes-plane-{role}"
+            match = re.fullmatch(rf"localhost/{re.escape(image_name)}:([a-f0-9]{{40}})", reference)
             if not match or not DIGEST.fullmatch(image_id):
                 raise ValueError("local images require committed tags and inspected image IDs")
             revisions.add(match[1])

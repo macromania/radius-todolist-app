@@ -14,7 +14,7 @@ RUN case "$TARGETARCH" in \
         BICEP_ARCH=arm64; BICEP_SHA=b01ac3bb5259096dfbe548138a538d1c4e4a55e6f87f3827e2299fbc2d4e6796 ;; \
       *) echo "Unsupported architecture" >&2; exit 1 ;; \
     esac && \
-    mkdir -p /home/plane/.rad/bin /app/.state && \
+    mkdir -p /home/plane/.rad/bin && \
     curl -fL --retry 3 "https://github.com/radius-project/radius/releases/download/v0.60.2/rad_linux_$TARGETARCH" -o /usr/local/bin/rad && \
     echo "$RAD_SHA  /usr/local/bin/rad" | sha256sum -c - && \
     curl -fL --retry 3 "https://dl.k8s.io/release/v1.35.7/bin/linux/$TARGETARCH/kubectl" -o /usr/local/bin/kubectl && \
@@ -22,7 +22,7 @@ RUN case "$TARGETARCH" in \
     curl -fL --retry 3 "https://github.com/Azure/bicep/releases/download/v0.42.1/bicep-linux-$BICEP_ARCH" -o /home/plane/.rad/bin/bicep && \
     echo "$BICEP_SHA  /home/plane/.rad/bin/bicep" | sha256sum -c - && \
     chmod 0755 /usr/local/bin/rad /usr/local/bin/kubectl /home/plane/.rad/bin/bicep && \
-    chown -R 10001:10001 /home/plane /app/.state
+    chown -R 10001:10001 /home/plane
 COPY src/plane_demo/management/provisioner.py src/plane_demo/management/provisioning.py /app/src/plane_demo/management/
 COPY src/plane_demo/management/providers /app/src/plane_demo/management/providers
 COPY infra/radius/apps/*.bicep /app/infra/radius/apps/
@@ -37,6 +37,8 @@ COPY scripts/operations/__init__.py scripts/operations/config.py scripts/operati
     scripts/operations/register-radius.py scripts/operations/issue-certificate.py scripts/operations/acme-hook.py \
     scripts/operations/run-certificate-job.py /app/scripts/operations/
 COPY scripts/operations/install-radius.sh /app/scripts/operations/
+COPY scripts/operations/management_job.py /app/scripts/operations/
+COPY scripts/operations/azure/registry_policy.py scripts/operations/azure/registry-policy.json /app/scripts/operations/azure/
 COPY scripts/operations/local /app/scripts/operations/local
 COPY scripts/recipes/local/cluster/*.sh /app/scripts/recipes/local/cluster/
 ENV HOME=/home/plane

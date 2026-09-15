@@ -587,7 +587,7 @@ def test_previously_deleted_resource_reappearance_blocks_bootstrap_deletion(
             fake.resources[slot].append(removed)
 
     monkeypatch.setattr(cleanup.Cleanup, "delete_app", delete)
-    assert cleanup.main(["--execute"]) == 1
+    assert cleanup.legacy_main(["--execute"]) == 1
     assert not any(action == "kind-management" for action, _ in fake.mutations)
 
 
@@ -603,7 +603,7 @@ def test_unbound_resource_is_not_hidden_by_application_inventory(scenario):
             },
         }
     )
-    assert cleanup.main(["--execute"]) == 1
+    assert cleanup.legacy_main(["--execute"]) == 1
     assert not fake.mutations
 
 
@@ -634,7 +634,7 @@ def test_orphan_after_app_deletion_blocks_child_destruction(scenario, monkeypatc
                 }
 
     monkeypatch.setattr(cleanup.Cleanup, "delete_app", delete)
-    assert cleanup.main(["--execute"]) == 1
+    assert cleanup.legacy_main(["--execute"]) == 1
     assert not any(action in {"radius-cluster", "kind-management"} for action, _ in fake.mutations)
 
 
@@ -673,7 +673,7 @@ def test_native_inventory_refuses_incomplete_or_foreign_results(scenario, monkey
 
 def test_preview_real_entrypoint_never_mutates(scenario, capsys):
     state, _, fake = scenario
-    assert cleanup.main([]) == 0
+    assert cleanup.legacy_main([]) == 0
     assert not fake.mutations
     assert not list(state.glob("evidence/cleanup-*.json"))
     assert json.loads(capsys.readouterr().out)["result"] == "preview"
@@ -694,7 +694,7 @@ def test_full_cleanup_uses_owners_and_independent_read_only_verify(scenario, cap
         return result.replace("resourceGroups", wire_casing) if isinstance(result, str) else result
 
     fake.run = wire_response
-    assert cleanup.main(["--execute"]) == 0
+    assert cleanup.legacy_main(["--execute"]) == 0
     expected = (
         [("quiesce", name) for name in ("management-api", "provisioner")]
         + [("radius-app", slot) for slot in cleanup.CHILDREN]
@@ -715,7 +715,7 @@ def test_full_cleanup_uses_owners_and_independent_read_only_verify(scenario, cap
     fake.mutations.clear()
     fake.calls.clear()
     fake.nodes["e" * 64] = {"Id": "e" * 64, "Name": "/new-other", "Config": {"Labels": {}}}
-    assert cleanup.main(["--verify", str(record_path)]) == 0
+    assert cleanup.legacy_main(["--verify", str(record_path)]) == 0
     assert not fake.mutations
     assert all(call[0] == "docker" and call[3] in ("ps", "inspect") for call in fake.calls)
     assert "synthetic-key" not in capsys.readouterr().out
@@ -723,7 +723,7 @@ def test_full_cleanup_uses_owners_and_independent_read_only_verify(scenario, cap
 
 def test_verify_accepts_documented_repository_relative_record(scenario, monkeypatch):
     old_state, _, fake = scenario
-    assert cleanup.main(["--execute"]) == 0
+    assert cleanup.legacy_main(["--execute"]) == 0
     (original,) = old_state.glob("evidence/cleanup-*.json")
     record = json.loads(original.read_text())
     root = old_state.parent / "project"
@@ -735,10 +735,10 @@ def test_verify_accepts_documented_repository_relative_record(scenario, monkeypa
     common.write_private(state / "evidence" / original.name, record)
     fake.calls.clear()
     fake.mutations.clear()
-    assert cleanup.main(["--verify", ".state/local/evidence/" + original.name]) == 0
+    assert cleanup.legacy_main(["--verify", ".state/local/evidence/" + original.name]) == 0
     assert not fake.mutations
     assert all(call[0] == "docker" for call in fake.calls)
-    assert cleanup.main(["--verify", ".state/local/../outside.json"]) == 1
+    assert cleanup.legacy_main(["--verify", ".state/local/../outside.json"]) == 1
     assert not fake.mutations
 
 
@@ -815,7 +815,7 @@ def test_all_ownership_checked_before_any_mutation(scenario, failure):
         else:
             cluster["server"] = "https://172.18.0.99:6443"
         stored["data"]["kubeconfig"] = encoded(yaml.safe_dump(value))
-    assert cleanup.main(["--execute"]) == 1
+    assert cleanup.legacy_main(["--execute"]) == 1
     assert not fake.mutations
     (evidence,) = state.glob("evidence/cleanup-*.json")
     assert json.loads(evidence.read_text())["result"] == "failed"
@@ -826,14 +826,14 @@ def test_explicit_foreign_container_environment_is_not_treated_as_implicit(scena
     fake.resources["shared-control"][0]["properties"]["environment"] = (
         f"{cleanup.SCOPE}/Applications.Core/environments/management"
     )
-    assert cleanup.main(["--execute"]) == 1
+    assert cleanup.legacy_main(["--execute"]) == 1
     assert not fake.mutations
 
 
 def test_zero_cli_exit_with_remaining_app_stops_before_cluster_delete(scenario):
     state, _, fake = scenario
     fake.app_sticks = True
-    assert cleanup.main(["--execute"]) == 1
+    assert cleanup.legacy_main(["--execute"]) == 1
     assert fake.mutations == [
         ("quiesce", "management-api"),
         ("quiesce", "provisioner"),
@@ -847,7 +847,7 @@ def test_radius_delete_failure_retains_evidence_and_never_falls_through(scenario
     state, _, fake = scenario
     fake.delete_fails = True
     common.write_private(state / "evidence/old-failed.json", {"result": "failed"})
-    assert cleanup.main(["--execute"]) == 1
+    assert cleanup.legacy_main(["--execute"]) == 1
     assert not any(action == "kind-management" for action, _ in fake.mutations)
     assert (state / "evidence/old-failed.json").read_text() == '{\n  "result": "failed"\n}\n'
     (evidence,) = state.glob("evidence/cleanup-*.json")
@@ -863,7 +863,7 @@ def test_lost_unrelated_container_fails_final_proof_without_deleting_others(scen
             del fake.nodes["f" * 64]
 
     monkeypatch.setattr(cleanup.Cleanup, "native_delete", delete)
-    assert cleanup.main(["--execute"]) == 1
+    assert cleanup.legacy_main(["--execute"]) == 1
     (evidence,) = state.glob("evidence/cleanup-*.json")
     assert "unrelated Docker container disappeared" in json.loads(evidence.read_text())["error"]
     assert not any("rm" in call or "rmi" in call for call in fake.calls)
@@ -891,7 +891,7 @@ def test_renamed_child_id_is_not_mistaken_for_deletion(scenario, monkeypatch):
         fake.nodes[node_id] = {"Id": node_id, "Name": "/renamed", "Config": {"Labels": None}}
 
     monkeypatch.setattr(cleanup.Cleanup, "native_delete", delete)
-    assert cleanup.main(["--execute"]) == 1
+    assert cleanup.legacy_main(["--execute"]) == 1
     assert ("radius-cluster", "shared-data") in fake.mutations
     assert ("radius-app", "cluster-shared-data") not in fake.mutations
     assert not any(action == "kind-management" for action, _ in fake.mutations)
@@ -901,7 +901,7 @@ def test_missing_export_blocks_without_a_command(local_state, monkeypatch):
     monkeypatch.setattr(cleanup, "STATE", local_state)
     fake = type("Unused", (), {"calls": []})()
     monkeypatch.setattr(cleanup, "Commands", lambda: fake)
-    assert cleanup.main(["--execute"]) == 1
+    assert cleanup.legacy_main(["--execute"]) == 1
     assert not fake.calls
 
 
@@ -1033,7 +1033,7 @@ def test_real_entrypoint_validates_protected_runtime_export_and_bootstrap(scenar
     state, targets, _ = scenario
     real_inputs(state, targets)
     monkeypatch.setattr(cleanup, "load_inputs", LOAD_INPUTS)
-    assert cleanup.main(["--execute"]) == 0
+    assert cleanup.legacy_main(["--execute"]) == 0
     (record,) = state.glob("evidence/cleanup-*.json")
     value = json.loads(record.read_text())
     assert value["configSHA256"] == cleanup.digest((state / "provisioning.json").read_bytes())
@@ -1064,7 +1064,7 @@ def test_input_provenance_failures_precede_all_live_commands(
     data[field] = value
     common.write_private(state / name, data)
     monkeypatch.setattr(cleanup, "load_inputs", LOAD_INPUTS)
-    assert cleanup.main(["--execute"]) == 1
+    assert cleanup.legacy_main(["--execute"]) == 1
     assert not fake.calls
 
 
@@ -1231,7 +1231,7 @@ def test_fault_restoration_is_checked_from_real_runpath(
     )
     monkeypatch.setattr(cleanup, "fault_support", lambda: support)
     monkeypatch.setattr(cleanup.Cleanup, "check_faults", CHECK_FAULTS)
-    assert cleanup.main(["--execute"]) == (1 if should_fail else 0)
+    assert cleanup.legacy_main(["--execute"]) == (1 if should_fail else 0)
     if should_fail:
         assert not fake.mutations
     else:
@@ -1302,7 +1302,7 @@ def test_full_recipe_image_owner_must_match_before_any_mutation(scenario, change
     elif change == "tainted":
         instance["status"] = "tainted"
     secret["data"]["tfstate"] = base64.b64encode(gzip.compress(json.dumps(state).encode())).decode()
-    assert cleanup.main(["--execute"]) == 1
+    assert cleanup.legacy_main(["--execute"]) == 1
     assert fake.mutations == []
     (evidence,) = state_path.glob("evidence/cleanup-*.json")
     assert json.loads(evidence.read_text())["result"] == "failed"
@@ -1332,7 +1332,7 @@ def test_application_bound_backend_names_cover_all_cleanup_runpaths(scenario):
                 "labels": {"tfstate": "true", "app.kubernetes.io/managed-by": "terraform"},
             },
         }
-    assert cleanup.main(["--execute"]) == 0
+    assert cleanup.legacy_main(["--execute"]) == 0
     (path,) = state.glob("evidence/cleanup-*.json")
     record = json.loads(path.read_text())
     for slot, _, _, state_name in APP_STATE_CASES:
@@ -1364,5 +1364,5 @@ def test_old_or_legacy_backend_names_are_refused_without_adoption(scenario, vari
     if variant != "legacy-alongside":
         del fake.objects[current]
     fake.objects["management", "radius-system", "secret", old_name] = old
-    assert cleanup.main(["--execute"]) == 1
+    assert cleanup.legacy_main(["--execute"]) == 1
     assert fake.mutations == []
