@@ -1,10 +1,45 @@
+import ast
+import collections
 import re
 import subprocess
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
+SURVIVORS = ("README.md", "RUN_AZURE_SCENARIOS.md", "RUN_LOCAL_SCENARIOS.md", "AGENTS.md")
+
+
+def prose(text):
+    return re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+
+
+def anchors(text):
+    seen = collections.Counter()
+    result = set()
+    for heading in re.findall(r"^#{1,6}\s+(.+)$", prose(text), re.MULTILINE):
+        slug = re.sub(r"[^\w -]", "", heading.lower()).replace(" ", "-")
+        result.add(f"{slug}-{seen[slug]}" if seen[slug] else slug)
+        seen[slug] += 1
+    return result
+
+
+@pytest.mark.parametrize("name", SURVIVORS)
+def test_surviving_document_links_are_self_contained_and_resolve(name):
+    path = ROOT / name
+    text = path.read_text()
+    for link in re.findall(r"\[[^\]]+\]\(([^)\s]+)\)", prose(text)):
+        parsed = urlsplit(link)
+        if parsed.scheme or parsed.netloc:
+            continue
+        target = (path.parent / unquote(parsed.path)).resolve() if parsed.path else path
+        assert target.is_relative_to(ROOT), link
+        assert target.exists(), f"{name}: {link}"
+        if target.suffix == ".md":
+            assert target.relative_to(ROOT).as_posix() in SURVIVORS, f"{name}: {link}"
+            if parsed.fragment:
+                assert unquote(parsed.fragment) in anchors(target.read_text()), f"{name}: {link}"
 
 
 @pytest.mark.parametrize("environment", ["AZURE", "LOCAL"])
@@ -27,3 +62,54 @@ def test_manual_guide_shell_blocks_parse_and_use_current_targets(environment):
     assert "plane-demo-fault-$2" in text and '.data["record.json"] | fromjson' in text
     assert "shared-clusters-before.txt" in text and "shared-clusters-after.txt" in text
     assert "make verify-clean" in text
+
+
+@pytest.mark.parametrize(
+    ("environment", "source", "class_name"),
+    [
+        ("AZURE", "scripts/operations/clean-azure.py", "LiveAzureCleanup"),
+        ("LOCAL", "scripts/operations/local/cleanup.py", "LiveLocalCleanup"),
+    ],
+)
+def test_cleanup_checkpoint_matches_the_live_entrypoint(environment, source, class_name):
+    tree = ast.parse((ROOT / source).read_text())
+    engine = next(
+        node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name
+    )
+    verify = next(
+        node for node in engine.body if isinstance(node, ast.FunctionDef) and node.name == "verify"
+    )
+    returned = next(node.value for node in verify.body if isinstance(node, ast.Return))
+    constants = {
+        key.value: value.value
+        for key, value in zip(returned.keys, returned.values, strict=True)
+        if isinstance(key, ast.Constant) and isinstance(value, ast.Constant)
+    }
+    guide = (ROOT / f"RUN_{environment}_SCENARIOS.md").read_text()
+    for key in ("status", "scope"):
+        assert f"{key}: {constants[key]}" in guide
+    assert "`resources_removed`" not in guide
+
+
+@pytest.mark.parametrize("environment", ["AZURE", "LOCAL"])
+def test_busy_check_precedes_waiting_for_provisioning(environment):
+    text = (ROOT / f"RUN_{environment}_SCENARIOS.md").read_text()
+    section = text.split("### A.", 1)[1].split("### B.", 1)[0]
+    assert section.index('"tenant_id":"busy-check"') < section.index("#### Follow provisioning")
+    assert "--prompt-demo-key" not in text
+    assert "--demo-key-from-env SLOT=VARIABLE" in text
+
+
+def test_local_prerequisites_cover_native_stage_tools():
+    guide = (ROOT / "RUN_LOCAL_SCENARIOS.md").read_text()
+    prerequisites = guide.split("## 1. Prepare the workspace", 1)[1].split(
+        "### Select operator configuration", 1
+    )[0].lower()
+    aliases = {"rad": "radius", "docker": "docker desktop"}
+    for script in ("build.sh", "bootstrap.sh"):
+        source = (ROOT / "scripts/operations/local" / script).read_text()
+        declaration = re.search(r"for tool in ([^\n;]+); do", source)
+        assert declaration is not None
+        for tool in declaration[1].split():
+            name = aliases.get(tool, tool)
+            assert re.search(rf"\b{re.escape(name)}\b", prerequisites), f"{script}: {tool}"

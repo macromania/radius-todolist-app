@@ -1,14 +1,12 @@
 # Run Azure scenarios
 
-Run this demo one step at a time. You will create tenants, inspect each plane,
-change configuration, disconnect parent databases, and restore the system.
-Use the checkpoints as stopping points when learning or presenting to a team.
-The focus is Radius provisioning, the boundaries between planes, and their
-behavior during configuration changes and outages.
+Run each block from a Bash terminal at the repository root. This walkthrough
+creates an Azure deployment, onboards shared and isolated tenants, changes
+configuration, and tests what happens when a parent database becomes unreachable.
+Stop at each checkpoint before continuing.
 
-The state-removal refactor still needs a fresh end-to-end run. The checkpoints
-below are requirements to verify, not claims that the current revision passed.
-See [FINDINGS.md](FINDINGS.md) for revision-specific results.
+A fresh live end-to-end verification run of the current implementation remains
+outstanding. The checkpoints describe expected results to verify.
 
 Run this guide from the repository root. The order is:
 
@@ -17,11 +15,9 @@ Run this guide from the repository root. The order is:
 3. [Run the manual scenarios](#3-run-the-manual-scenarios).
 4. [Clean up Azure](#4-clean-up-azure).
 
-You will use individual operations and a few harness utilities, not the
-all-in-one acceptance runner. Do not run `make test-e2e` or `test-e2e.py --mode all`
-alongside the manual demo: they create the same tenants and change their state.
-For the separate Docker Desktop walkthrough, use
-[RUN_LOCAL_SCENARIOS.md](RUN_LOCAL_SCENARIOS.md).
+Do not run the [automated alternative](#automated-checks) alongside these manual
+requests; it uses the same tenant names. The
+[local guide](RUN_LOCAL_SCENARIOS.md) runs the equivalent demo on Docker Desktop.
 
 ## What the three planes do
 
@@ -35,9 +31,15 @@ Configuration -> control API    -> control PostgreSQL
 Application   -> data API       -> local ConfigMap + Redis
 ```
 
-Management's separate provisioner asks Radius to create control/data clusters.
-Each child has its own Radius installation. Shared tenants reuse a pair;
-isolated tenants get a separate pair.
+The management API saves requests; a separate provisioner asks management
+Radius to create control/data clusters. A Recipe is the provider-specific
+template Radius executes. The provisioner installs Radius in each child,
+then that child's Radius deploys its applications and dependencies.
+
+Each plane has its own cluster. Shared tenants reuse a control/data pair;
+an isolated tenant gets another pair. Reconciler processes poll their parent
+databases and report local progress. An API request does not push configuration
+through all three planes.
 
 | Check | Meaning |
 |---|---|
@@ -49,12 +51,10 @@ isolated tenants get a separate pair.
 
 ## 1. Prepare the workspace
 
-You prepare the tools and choose the deployment identity before creating resources.
-Use committed source. A fresh checkout does not need a previous `.state` folder:
+Use a clean checkout of committed source. Keep that source revision unchanged
+through build, deployment, and the scenarios.
 
 ```bash
-git worktree add --detach ../plane-demo-azure HEAD &&
-  cd ../plane-demo-azure || exit 1
 bash
 set -o pipefail
 umask 077
@@ -71,10 +71,11 @@ ShellCheck, and the following tools installed:
 | kubectl | 1.35.7 |
 | Terraform for offline checks | 1.14-1.15; CI/runtime use 1.15.8 |
 
-Azure also needs `az`, `helm`, `kubelogin`, and a login with the required access
-to the project's configured subscription. The operator must be able to reach
-the AKS APIs. Check [Azure prerequisites](docs/azure-infrastructure.md) before
-creating resources.
+Azure also needs `az`, `helm`, and `kubelogin`. Sign in with an interactive
+Azure user account, not a service principal. The operator needs permission to
+create the project's resource groups, resources, managed identities, custom
+roles, and scoped role assignments. The workstation must reach the AKS APIs.
+Docker Desktop is used to inspect built images.
 
 ```bash
 uv sync --locked
@@ -82,81 +83,83 @@ git status --short
 make check-bicep
 ```
 
-Expect a clean worktree. `make check-bicep` compiles the infrastructure and
-generates the Radius extensions needed by the images. To explore the unit and
-infrastructure tests separately, run `make check`; it creates no clusters.
+`git status` should be clean. `make check-bicep` compiles infrastructure and
+generates type extensions; it does not deploy resources. `make check` runs the
+full source checks if you want that checkpoint before deploying.
 
 ### Select operator configuration
 
-The root Makefile is the public command entrypoint. Operator and demo utilities
-live under `scripts/operations/` and `scripts/harness/`.
+Choose the subscription and a short project/deployment name:
 
 ```bash
 make init ENV=azure
 make show-config
 ```
 
-Initialization creates or replaces the checkout's private `.env`. It may read
-the active Azure subscription as a suggestion but does not deploy resources.
-Supply nonsecret options through `ARGS` to avoid the account lookup:
+Initialization writes or replaces the private, git-ignored `.env`. The default
+uses the active Azure subscription, project `radplanes`, deployment `learning`,
+and location `centralus`. To supply the selection explicitly:
 
 ```bash
 make init ENV=azure \
   ARGS='--subscription <subscription-uuid> --location centralus --project demo --deployment team'
 ```
 
-`make show-config` reads `.env` without executing its contents and redacts demo
-keys. For demo keys, forward `--prompt-demo-key SLOT` or
-`--demo-key-from-env SLOT=VARIABLE`, never the key value itself.
+Check `make show-config` before creating resources. It treats `.env` as data and
+redacts keys. To supply a demo key, add `--demo-key-from-env SLOT=VARIABLE` to
+the initialization arguments, with the value already set privately in that
+environment variable. Never put the key itself in `ARGS` or shell history.
 
-The commands below use this `.env`. `ENV` selects the environment only when
-initializing it; it does not override an existing selection. Azure credentials
-belong in the shared Key Vault. Access, endpoints and deployment outputs are
-queried from current APIs. Do not copy an old endpoint or credential inventory.
+By default, bootstrap creates the deployment's shared Key Vault. To use an
+existing vault, add `--key-vault NAME` during initialization. It must belong to
+the selected subscription/tenant, sit outside this deployment's resource groups,
+and already use RBAC, private access, soft delete and purge protection. Its
+firewall must deny public access while allowing `AzureServices` for Application
+Gateway certificates. Bootstrap checks compatibility without changing the vault.
 
-Keep source unchanged during the demo. Image and export checks bind the
-deployment to the committed source.
+Later commands read `.env`; passing a different `ENV` does not retarget them.
+Stable application credentials belong in Key Vault. Each process receives only
+its own runtime settings. Access and endpoints come from current APIs, and
+temporary CLI files are discarded. PostgreSQL owns tenant and operation records;
+Radius and Kubernetes own infrastructure and fault progress.
 
 ## 2. Deploy Azure management
 
-You create the platform that accepts tenant requests and provisions child planes.
-
-The stages are foundation, build, then management deployment. Artifact inspection
-and deployment-input assembly are part of the normal commands, not manual file
-handoffs.
+The order is bootstrap, build, then management deployment. The commands discover
+their inputs and inspect artifacts; you do not assemble an inventory by hand.
 
 ### Create the foundation
 
-You create management AKS, the Azure foundation and management Radius.
-Bootstrap checks the selected account and existing resource ownership.
+Bootstrap creates management AKS, networking, registry, vault integration and
+the preassigned identities, then installs management Radius. It reserves the
+child scopes and permissions but does not create tenant clusters or databases.
 
 ```bash
 make bootstrap CONFIRM_AZURE=yes
 ```
 
-Checkpoint: bootstrap completed and management AKS and Radius exist. There are
-no tenant clusters or management application yet. Azure owns the deployment
-outputs; no `bootstrap.outputs.json` file is required on the workstation.
+Checkpoint: bootstrap completed and management AKS and Radius exist. The
+management application and tenant clusters have not been deployed yet.
 
 ### Build and inspect artifacts
 
-You publish the Recipes and build the two runtime images. The normal build
-checks actual filesystem contents and trusted build provenance, not only tags.
+Build publishes Recipes and the API/provisioner images. Inspection checks image
+contents and build provenance, rather than treating a changed tag as proof.
 
 ```bash
 make build CONFIRM_AZURE=yes
 make inspect-build
 ```
 
-Require successful artifact inspection. The API image excludes provider code,
-administrative tools and deployment credentials. The privileged provisioner is
-separate. Recipe publication verifies the registry's repository-permission
-boundary. See [provisioning](docs/provisioning.md) for these contracts.
+Require successful inspection before deployment. The API image excludes
+provider tools and deployment credentials. The separate provisioner image has
+those administrative tools. Recipe publication checks registry permissions;
+do not overwrite a tag or bypass an inspection failure to continue.
 
 ### Deploy management and wait for completion
 
-You start management's API, database, and provisioner, then confirm the Job
-finished rather than treating submission as success.
+This starts management PostgreSQL, its API and the provisioner through an
+owned deployment Job.
 
 Inspect the discovered inputs and proposed Job without submitting it:
 
@@ -177,19 +180,15 @@ The command waits for the Job and workloads. Require `Complete=True`;
 The Job owns its temporary inputs; Key Vault and PostgreSQL own credentials
 and initialization progress.
 
-Checkpoint: management's API, PostgreSQL, and provisioner are ready.
-There are no tenant clusters yet. Deployment already registers management's
-Radius resources; a separate `register-radius` command is unnecessary.
+Checkpoint: management's API, PostgreSQL and provisioner are ready, with no
+tenant clusters yet. Radius registration is part of this deployment command.
 
 ## 3. Run the manual scenarios
 
-Run each scenario in order against the Azure management deployment.
-
 ### Load the shell controls
 
-You obtain verified access and give each command an explicit plane and cluster.
-
-In your main terminal, from the demo checkout:
+These helpers keep requests short while discovering access for each command.
+Run them in your main terminal:
 
 ```bash
 set -o pipefail
@@ -226,12 +225,13 @@ These shortcuts keep the commands below short:
 Initially the report contains only the management endpoint and no tenants.
 Require `provisioner_ready` and HTTP 200 before onboarding. Reports fail nonzero
 on observation errors. `$NOTES` holds only your optional response comparisons.
-No command discovers infrastructure or credentials from those notes.
+No command discovers infrastructure or credentials from those notes. The worker
+has no credential-seed file or working-state PVC.
 
-Every successful observation must show HTTP 200. The API helper prints HTTP
-status to stderr and JSON to stdout; non-2xx requests return nonzero.
-Negative examples below deliberately return 401, 404, 409, or 503.
-Do not mistake two matching error responses for unchanged application state.
+Successful reads return HTTP 200; tenant acceptance returns 202. The helper
+prints status to stderr and JSON to stdout. Expected 401/404/409/422/503 checks
+return nonzero, so run the blocks individually rather than as one unattended
+script. Two matching error responses do not prove unchanged application state.
 
 For a new terminal/session, return to this checkout and reload these controls.
 Resume with checkpoint reads, not deployment commands or tenant POSTs.
@@ -253,12 +253,37 @@ Expect 200, then 404. Send the request once:
 api management POST /tenants \
   '{"tenant_id":"shared-a","isolation":"shared","initial_message":"alpha"}' \
   > "$NOTES/shared-a-request.json"
-OP_A=$(jq -er '.operation_id' "$NOTES/shared-a-request.json")
+OP_A=$(jq -er '.operation_id' "$NOTES/shared-a-request.json") || exit 1
 api management GET "/operations/$OP_A"
 ```
 
-Expect HTTP 202 with an operation ID. While the operation is `pending` or
-`running`, inspect it and repeat these reads:
+Expect HTTP 202 and an operation ID.
+
+#### Optional admission checks
+
+Duplicate requests must return 409 without creating another operation:
+
+```bash
+api management POST /tenants \
+  '{"tenant_id":"shared-a","isolation":"shared","initial_message":"alpha"}'
+```
+
+While the first operation is still `pending` or `running`, you can also test
+the single-active-operation rule. Skip these two calls if it already finished:
+
+```bash
+api management POST /tenants \
+  '{"tenant_id":"busy-check","isolation":"shared","initial_message":"not accepted"}'
+api management GET /tenants/busy-check
+```
+
+Expect 503 `provisioner_busy`, then 404. If you get 202, you accepted another
+tenant: wait for that operation too and do not count this as a successful busy
+check.
+
+#### Follow provisioning
+
+Repeat these reads while the first operation is pending or running:
 
 ```bash
 api management GET /tenants/shared-a \
@@ -293,30 +318,10 @@ for slot in shared-control shared-data; do
 done > "$NOTES/shared-clusters-before.txt"
 ```
 
-#### Optional admission checks
-
-You distinguish duplicate requests from temporary provisioning capacity limits.
-
-Repeat the `shared-a` POST: expect 409 `duplicate_tenant` pointing to the
-original status URL, without overwriting configuration or creating an operation.
-
-While the first operation is still pending/running, a different tenant request
-should receive 503 `provisioner_busy`:
-
-```bash
-api management POST /tenants \
-  '{"tenant_id":"busy-check","isolation":"shared","initial_message":"not accepted"}'
-api management GET /tenants/busy-check
-```
-
-Expect 503 and 404. Skip this check after the first operation finishes.
-If you get 202, you submitted another real tenant; wait for it too and do not
-claim that the busy check passed.
-
 ### B. Reuse the pair while data reconciliation is paused
 
-You prove that shared tenants reuse infrastructure and that management readiness
-does not depend on the data reconciler finishing its work.
+This separates management readiness from data configuration application while
+checking that the same cluster pair is reused.
 
 Pause only the shared data reconciler:
 
@@ -366,8 +371,8 @@ not another cluster pair.
 
 ### C. Provision an isolated tenant
 
-You compare shared placement with a dedicated cluster pair and verify that each
-pair serves only its assigned records.
+This tenant should get its own control/data pair. The two pairs must not serve
+each other's tenant records.
 
 ```bash
 api management POST /tenants \
@@ -406,8 +411,8 @@ not production tenant authentication.
 
 ### D. Update configuration and compare counters
 
-You change application behavior through control without redeploying data, while
-checking that tenant counters stay independent.
+Change tenant configuration through control, then check that data applies it
+without resetting counters.
 
 ```bash
 api data:shared GET /tenants/shared-a
@@ -440,8 +445,8 @@ Management supplied the initial message; control owns subsequent changes.
 
 ### E. Observe polling, history, and access
 
-You verify that unchanged polling preserves control-owned updates, that reports
-can be followed in order, and that the API has limited access.
+Check that repeated polling preserves control's changes, then inspect paginated
+events and API access.
 
 Capture a baseline after updates have applied:
 
@@ -519,8 +524,8 @@ The full in-Pod/named-permission check is available as
 
 ### F. Block the management database link
 
-You show that an existing control/data pair can keep changing configuration and
-serving requests without reaching management's database.
+An existing control/data pair should keep accepting configuration changes and
+serving requests while management PostgreSQL is unreachable.
 
 Finish onboarding and inspect all five endpoints before faults. Open a second
 terminal in the same checkout. It reads the same `.env`; no export is needed.
@@ -582,8 +587,8 @@ control poll after restoration. Recovery must not add a duplicate
 
 ### G. Block control, queue updates, and restart data
 
-You show that data can serve its last applied state even after an API restart,
-then catch up to the newest configuration when control becomes reachable.
+Data should keep serving its applied configuration through the outage and an
+API restart, then apply the newest control version after reconnection.
 
 Start only after the preceding fault is restored. Save the current data response:
 
@@ -674,39 +679,110 @@ clear a fault. Do not proceed until the original link is confirmed restored.
 
 ## 4. Clean up Azure
 
-You prove the ownership model in reverse: children and their applications are
-removed before their management foundation.
-
-Save your observations under `$NOTES`. Restore paused workloads and all
-faults; no helper or provisioning operation may still be running.
+Cleanup destroys the selected demo's application data. Save any response
+comparisons you need, restore faults and paused workloads, and finish or inspect
+active provisioning before proceeding. Check that `.env` still selects Azure:
 
 ```bash
+make show-config
 make clean-plan
 make clean CONFIRM_AZURE=yes
 make verify-clean
 ```
 
-Review the plan before executing it. Cleanup reads current Azure, Radius and
-Kubernetes owners. It does not require an export, local cleanup record, or live
-management database. It removes applications and child clusters through Radius
-before deleting the foundation. Do not substitute direct AKS deletion.
-See [Azure cleanup](docs/cleanup.md).
+Review the deletion plan before `make clean`. The cleaner quiesces management,
+deletes data/control applications through child Radius, deletes the children
+through management Radius, then removes management and its foundation. It reads
+current Azure, Radius and Kubernetes owners; a healthy management API/database
+or saved cleanup report is not required.
 
-Keep soft-deleted vault retention and unrelated resources distinct from active
-deployment removal. An externally selected Key Vault and its retained objects
-are reported, not deleted or purged.
+Checkpoint: `make verify-clean` returns `status: clean` for
+`scope: owned-active-resources`. Review retained objects and soft-deleted vaults
+separately. An external vault, its unrelated objects and assignments, and any
+roles still needed by them remain. An owned vault's recovery record can remain
+until its retention period ends; `purged: false` is not active-deployment residue.
 
-## References for the walkthrough
+If an owner is unavailable or a Recipe left orphaned resources, stop and inspect
+the failure. Do not substitute direct AKS deletion, edit ownership records, or
+reset database rows to force cleanup.
 
-| Topic | Source |
+### Optional: retain the foundation
+
+To remove applications and child clusters but keep management AKS, registry,
+networking and identities, use the normal cleaner's narrower mode:
+
+```bash
+uv run --no-sync python scripts/operations/clean-azure.py --radius-only
+CONFIRM_AZURE=yes uv run --no-sync python scripts/operations/clean-azure.py --radius-only --execute
+```
+
+Its success is `radius_resources_removed`, not a clean whole environment.
+Full `make verify-clean` is only appropriate after full cleanup.
+
+## Troubleshooting
+
+| Where the run stops | What to inspect |
 |---|---|
-| How the planes connect | [Architecture](docs/architecture.md), [API/database contracts](docs/contracts.md) |
-| How Azure child clusters are provisioned | [Provisioning run path](docs/provisioning.md), [Azure infrastructure](docs/azure-infrastructure.md) |
-| Runtime | `src/plane_demo/{management,control,data,shared,setup}`, `sql/` |
-| Infrastructure | `infra/radius/apps/` declares planes; `types/` defines APIs; `recipes/` implements them; `environments/` selects Recipes |
-| Administration | `scripts/operations/`, [Azure operations](docs/azure.md) |
-| Harness pieces to inspect | `scripts/harness/api.py`, exporters, [`Runner.scenario`, `management_outage`, `control_outage`](scripts/harness/test-e2e.py), [harness reference](tests/harness/README.md) |
-| Results and limits | [Findings](FINDINGS.md), [decisions](DECISIONS.md), [limitations](docs/limitations.md) |
+| Bootstrap or access | Check `.env`, Azure login, permissions and AKS reachability. Do not broaden database access or change global contexts. |
+| Artifact inspection | Check the source revision and selected registry. Do not overwrite/unlock artifacts to bypass a mismatch. |
+| Management deployment | Read `job/deploy-management` status and logs with `make kube`. A failed or interrupted Job is not automatically replayed. |
+| Tenant stays pending | Read its operation and management provisioner logs. Management readiness still requires a control record. |
+| Control is ready but data is stale | Read the control data report, data-reconciler logs and tenant ConfigMap. Check for a paused reconciler or active fault. |
+| SQL observation fails | Preserve credentials and the database. Missing/drifted schema metadata does not authorize reinitialization. |
+| Cleanup refuses an owner or journal | Inspect the named resource and restore its fault first. Do not remove guards or force-delete children. |
 
-Use synthetic data. Shared demo keys keep the API examples simple; production
-tenant authentication is outside this POC. Keep credentials separate from source.
+For any slot, inspect without dumping runtime Secrets:
+
+```bash
+k shared-data get pods
+k shared-data logs deployment/data-reconciler --tail=40
+k shared-data get configmap tenant-shared-a -o json
+```
+
+## Automated checks
+
+Use these instead of the manual scenarios on a prepared deployment with no demo
+tenants. The harness must use the source revision that built the inspected images.
+
+```bash
+make test-e2e CONFIRM_AZURE=yes
+make test-outages CONFIRM_AZURE=yes
+```
+
+The first command creates the tenants and checks reuse, isolation, configuration,
+counters and access. The second checks the parent outages and recovery. A single
+`all` run is another option:
+
+```bash
+uv run --no-sync python scripts/harness/test-e2e.py --environment azure --mode all --execute
+```
+
+After a manual run, `--mode verify-existing` observes existing tenants and runs
+the remaining checks without claiming fresh onboarding proof. It still performs
+live mutations. Reports go to stdout and exclude API keys, passwords and DSNs.
+The [harness source](scripts/harness/test-e2e.py) contains the individual checks
+used by these modes.
+
+If an interrupted first admission provides a continuation handle, only that
+bounded continuation is supported. Keep the same source and `.env` selection
+and use the exact handle from the run:
+
+```bash
+uv run --no-sync python scripts/harness/test-e2e.py --environment azure --mode all \
+  --continue-first-from NAME@UID@RUN_ID --execute
+```
+
+This is not general replay of failed provisioning. For an interrupted fault,
+use the [journal restoration procedure](#interrupted-fault).
+
+## Limits to keep in mind
+
+Use synthetic data. Per-plane demo keys do not provide production tenant
+authentication. The singleton provisioner has no HA scheduler or automatic
+replay of interrupted infrastructure work; tenant migration and deletion APIs
+are outside the demo.
+
+PostgreSQL and Redis use private Azure connectivity and verified TLS. Certificate
+issuance is implemented, but automatic certificate renewal is not. Parent
+outages demonstrate configuration independence, not disaster recovery or
+reconstruction of lost clusters/databases.

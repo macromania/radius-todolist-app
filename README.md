@@ -1,8 +1,7 @@
 # Radius three-plane demo
 
-This POC demonstrates tenant provisioning and configuration across three
-independent planes. The focus is Radius, the boundaries between planes, and
-their behavior during configuration changes and outages.
+This demo uses Radius to provision tenants across management, control, and data
+planes. Run it on Azure, then run the same scenarios locally with Docker Desktop.
 
 | Plane | Responsibility |
 |---|---|
@@ -10,64 +9,79 @@ their behavior during configuration changes and outages.
 | Control | Own tenant configuration in PostgreSQL and report control-record creation |
 | Data | Apply local ConfigMaps and serve Redis-backed requests without querying parent databases |
 
-Shared tenants reuse a control/data pair. An isolated tenant receives a
-separate pair. Children pull configuration from their parent and report their
-own progress; readiness is not transitive dependency health.
+Each plane runs in its own cluster. Two shared tenants use the same control/data
+pair; an isolated tenant gets a separate pair. The complete demo has five
+clusters: management, shared control/data, and isolated control/data.
+
+Control pulls tenant records from management PostgreSQL. Data pulls configuration
+from control PostgreSQL and writes local ConfigMaps. Data API requests use only
+those ConfigMaps, Redis, and the data API's key, so they can continue during a
+parent outage.
 
 ## Run the scenarios
 
-Each guide is a standalone, self-paced walkthrough with setup, short explanations,
-manual API calls, checkpoints, outage/recovery experiments, and cleanup.
+Each guide is self-contained. Work through one step at a time; each step explains
+what changes and what to check before continuing.
 
-1. [RUN_AZURE_SCENARIOS.md](RUN_AZURE_SCENARIOS.md): Azure foundation, management
-   deployment, shared/isolated tenants, configuration, parent outages, and teardown.
-2. [RUN_LOCAL_SCENARIOS.md](RUN_LOCAL_SCENARIOS.md): Docker Desktop and kind setup,
-   the same manual scenarios, datastore Pod-replacement persistence, and cleanup.
+1. [Run Azure scenarios](RUN_AZURE_SCENARIOS.md): bootstrap Azure, deploy management,
+   onboard tenants, change configuration, test outages, and clean up.
+2. [Run local scenarios](RUN_LOCAL_SCENARIOS.md): prepare Docker Desktop and kind,
+   run the same scenarios without Azure, check datastore persistence, and clean up.
 
-Use individual operations and harness utilities as shown in the guides rather
-than running the all-in-one acceptance runner alongside your manual requests.
-The normal commands inspect image contents and assemble deployment inputs from
-current APIs. No saved endpoint inventory or workstation credential bundle is
-required. The state-removal refactor still needs fresh live proof; see
-[FINDINGS.md](FINDINGS.md) for the verified revision scopes.
+Use either the manual scenarios or the automated harness for a run. They use the
+same tenant names, so do not run both concurrently. Each guide includes the
+automated alternative.
 
-Run `make` or `make help` for commands grouped by workflow, usage examples, and
-safety requirements. Use `make help GROUP=azure`, `GROUP=local`, `GROUP=checks`,
-or `GROUP=setup` to focus on one area. Help and stage headings use separators,
-generous section spacing, single-spaced command rows, bold text, and blue accents.
-Supporting guidance and document references appear in separate `[info]` blocks.
-Styling is automatic on supported terminals. Use
-`COLOR=always` to force styling, or `COLOR=never` or `NO_COLOR=1` to disable it.
-Redirected output stays plain by default. Command runs preserve tool diagnostics
-and machine-readable stdout.
+Run `make help` for commands, or narrow it with `GROUP=azure`, `GROUP=local`,
+`GROUP=setup`, or `GROUP=checks`. `COLOR=never` or `NO_COLOR=1` disables styling;
+redirected output is plain.
 
-## Repository map
+## Configuration and state
 
-| Location | Purpose |
+`make init ENV=azure` or `make init ENV=local` writes the private, git-ignored
+`.env`. Later commands read that selection. Changing `ENV` on another command
+does not retarget the deployment.
+
+| Information | Owner |
 |---|---|
-| `src/plane_demo/` and `sql/` | APIs, provisioner, reconcilers, and database contracts |
-| `infra/radius/apps/` | Management, control, and data application declarations |
-| `infra/radius/types/`, `recipes/`, `environments/` | Resource APIs, provider implementations, and Recipe selection |
-| `scripts/operations/` | Infrastructure and deployment administration |
-| `scripts/harness/` and `tests/` | Individual demo utilities and automated checks |
+| Starting identity | `.env`: environment, project/deployment name, and Azure selection when applicable |
+| Stable application credentials | Key Vault on Azure; Kubernetes Secrets locally |
+| Endpoints and cluster access | Current Azure, Radius, Kubernetes, or Docker APIs |
+| Tenant configuration and provisioning progress | PostgreSQL |
+| Infrastructure and fault progress | Resource owners and Kubernetes journals |
 
-For the design, read [architecture](docs/architecture.md) and
-[application contracts](docs/contracts.md). [DECISIONS.md](DECISIONS.md) records
-choices; [FINDINGS.md](FINDINGS.md) records results and their source revisions.
-[Limitations](docs/limitations.md) describe the POC's scope.
+Commands create temporary access files and generated inputs when needed.
+Deployment access and cleanup do not depend on workstation `.state` files.
+Source checks may create disposable `.state/check` files and Bicep extensions.
+The services still need their databases, Secrets, and persistent volumes.
 
-The [provisioning walkthrough](HOW_PROVISIONING_WORKS.md) explains current Radius
-and Azure deployment ownership. [Provisioning durability](PROVISIONING_DURABILITY.md)
-records the proposed management-local and Azure-managed scheduler direction,
-including the unverified local backend requirements.
+## Checks
 
-The [recovery design direction](RECOVERY.md) captures the external Radius
-PostgreSQL preference, availability-first recovery model, and unresolved
-execution and recovery questions. It is design exploration, not implemented
-recovery behavior.
+Install the tools listed in your chosen guide. On macOS, complete any Command
+Line Tools or Xcode first-use prompts before running Make. Then run from the
+repository root:
 
-The [state-removal ExecPlan](docs/plans/remove-state-dependency.md) describes the
-`.env` configuration, live discovery, service-owned credentials and progress,
-and the remaining verification work.
+```bash
+uv sync --locked
+make check
+```
 
-Use synthetic data and keep credentials separate from source.
+This runs Ruff, Bicep compilation, offline tests, Terraform mock-provider
+validation, and ShellCheck. It does not create clusters, build images, or contact
+deployed databases. `make test-integration` is separate and requires explicitly
+configured disposable dependencies.
+
+The current implementation has source and mock-test coverage. A fresh live
+end-to-end verification run remains outstanding. The guides describe results
+to check; they are not a record of a passing deployment.
+
+## Demo boundaries
+
+Use synthetic data and a trusted operator. Shared demo keys are simple per-plane
+API access, not production tenant authentication. There is one provisioner,
+with no automatic replay of interrupted infrastructure work or tenant
+migration/deletion API.
+
+Management readiness means control created a tenant record. Control's `applied`
+report means data applied a ConfigMap. Neither report asserts that every
+downstream dependency is healthy.

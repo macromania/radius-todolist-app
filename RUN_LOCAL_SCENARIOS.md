@@ -1,12 +1,11 @@
 # Run local scenarios
 
-Run the three-plane demo on Docker Desktop one step at a time. You will create
-tenants, inspect each plane, change configuration, disconnect parent databases,
-and restore the system. Each step explains what it demonstrates.
+Run each block from a Bash terminal at the repository root. This walkthrough
+uses Docker Desktop and kind to run the three-plane demo without Azure.
+Stop at each checkpoint before continuing.
 
-The state-removal refactor still needs a fresh end-to-end run. The checkpoints
-below are requirements to verify, not claims that the current revision passed.
-See [FINDINGS.md](FINDINGS.md) for revision-specific results.
+A fresh live end-to-end verification run of the current implementation remains
+outstanding. The checkpoints describe expected results to verify.
 
 Run this guide from the repository root. The order is:
 
@@ -16,10 +15,9 @@ Run this guide from the repository root. The order is:
 4. [Check datastore persistence](#4-check-datastore-persistence).
 5. [Clean up local](#5-clean-up-local).
 
-This guide includes its own setup and shell controls; it does not require an
-Azure deployment or another walkthrough. Do not run `make local-test` or
-`test-e2e.py --mode all` alongside these requests: they create the same tenants
-and change their state.
+This guide includes its own setup and shell controls. Do not run the
+[automated alternative](#automated-checks) alongside these manual requests;
+it uses the same tenant names.
 
 ## What the three planes do
 
@@ -33,9 +31,14 @@ Configuration -> control API    -> control PostgreSQL
 Application   -> data API       -> local ConfigMap + Redis
 ```
 
-Management's separate provisioner asks Radius to create control/data clusters.
-Each child has its own Radius installation. Shared tenants reuse a pair;
-isolated tenants get a separate pair.
+Each plane runs in its own kind cluster, backed by Docker containers.
+Management's provisioner asks management Radius to create children using the
+kind Recipe, its provider-specific template. Each child gets its own Radius
+installation to deploy its applications and dependencies.
+
+Shared tenants reuse a control/data pair; an isolated tenant gets another pair.
+Reconciler processes poll their parent databases and report local progress.
+The application declarations are the same ones used for Azure.
 
 | Check | Meaning |
 |---|---|
@@ -47,19 +50,17 @@ isolated tenants get a separate pair.
 
 ## 1. Prepare the workspace
 
-You prepare the tools and choose the deployment identity before creating resources.
-Use committed source. A fresh checkout does not need a previous `.state` folder:
+Use a clean checkout of committed source. Keep that revision unchanged through
+build, deployment and the scenarios.
 
 ```bash
-git worktree add --detach ../plane-demo-local HEAD &&
-  cd ../plane-demo-local || exit 1
 bash
 set -o pipefail
 umask 077
 ```
 
-Use Bash for the commands below. Have Git, `uv`, `jq`, `curl`, Docker Desktop,
-ShellCheck, and the following tools installed:
+Use Bash for the commands below. Have Git, `uv`, `jq`, `curl`, `tar`, `helm`,
+Docker Desktop, ShellCheck, and the following tools installed:
 
 | Tool | Version |
 |---|---|
@@ -77,36 +78,41 @@ make check-bicep
 docker --context desktop-linux version
 ```
 
-Expect a clean worktree. `make check-bicep` compiles the infrastructure and
-generates the Radius extensions needed by the images. To explore the unit and
-infrastructure tests separately, run `make check`; it creates no clusters.
+`git status` should be clean and Docker Desktop should respond.
+`make check-bicep` compiles infrastructure and generates type extensions without
+creating resources. `make check` runs the full source checks if you want that
+checkpoint before deploying.
 
 ### Select operator configuration
 
-The root Makefile is the public command entrypoint. Operator and demo utilities
-live under `scripts/operations/` and `scripts/harness/`.
+Choose the local deployment identity:
 
 ```bash
 make init ENV=local
 make show-config
 ```
 
-Initialization creates or replaces the checkout's private `.env`. It does not
-create resources. `make show-config` reads that file without executing its
-contents and redacts demo keys. Optional nonsecret arguments are forwarded with
-`ARGS`, for example `make init ENV=local ARGS='--project demo --deployment team'`.
-For demo keys, forward `--prompt-demo-key SLOT` or
-`--demo-key-from-env SLOT=VARIABLE`, never the key value itself.
+Initialization writes or replaces the private, git-ignored `.env`; it creates
+no resources. The defaults are project `radplanes` and deployment `learning`.
+For another selection, use
+`make init ENV=local ARGS='--project demo --deployment team'`.
+`make show-config` treats the file as data and redacts keys.
 
-The commands below use this `.env`. `ENV` selects the environment only when
-initializing it; it does not override an existing selection. Local credentials
-belong to Kubernetes. No Azure login, subscription, Key Vault or cloud registry
-is needed.
+To supply a demo key, add `--demo-key-from-env SLOT=VARIABLE` to initialization,
+with the value already set privately in that environment variable. Never put
+the key itself in `ARGS` or shell history.
+
+Later commands read `.env`; a different `ENV` argument does not retarget them.
+Credentials belong in Kubernetes Secrets, business/operation records in
+PostgreSQL, and infrastructure/fault progress with their resource owners.
+Temporary CLI access files are discarded. No Azure login, subscription,
+Key Vault or cloud registry is needed.
 
 Local commands resolve Docker Desktop's `desktop-linux` context and pin its
 local Unix socket. They do not change the global Docker context or use another
-container runtime. Keep source unchanged during the demo; image and export
-checks bind the deployment to the committed source.
+container runtime. Management Radius needs Docker daemon access to create kind
+children; this grants it whole-daemon authority. Use a trusted operator.
+API and provisioner containers do not receive that socket.
 
 Never run two local deployments concurrently: deployment-specific names still
 use the same reserved loopback host ports:
@@ -121,8 +127,7 @@ use the same reserved loopback host ports:
 
 ## 2. Deploy local management
 
-You create the platform that accepts tenant requests and provisions the child
-planes through local Recipes.
+The order is build, bootstrap, then management deployment.
 
 ### Build and inspect the images
 
@@ -142,9 +147,13 @@ trusting a tag. Existing immutable image tags are not overwritten.
 make bootstrap CONFIRM_LOCAL=yes
 ```
 
-Checkpoint: only management exists. Bootstrap verifies management Secret
-encryption. Child clusters will be created by management Radius, not by
-host-side `kind create`.
+Checkpoint: only management exists, with Radius installed and management Secret
+encryption verified. The encryption key belongs to the kind node, not a mounted
+checkout file. Child creation belongs to management Radius.
+
+### Deploy the management application
+
+Start PostgreSQL, the API and the provisioner:
 
 ```bash
 make deploy-management CONFIRM_LOCAL=yes
@@ -160,13 +169,9 @@ or host credential bundle is required.
 
 ## 3. Run the manual scenarios
 
-Run each scenario in order against the local management deployment.
-
 ### Load the shell controls
 
-You obtain verified access and give each command an explicit plane and cluster.
-
-In your main terminal, from the demo checkout:
+These helpers discover access for each command. Run them in your main terminal:
 
 ```bash
 set -o pipefail
@@ -206,10 +211,10 @@ The provisioner has no working-state PVC. Reports fail nonzero on observation
 errors. `$NOTES` holds only your optional response comparisons. No command
 discovers infrastructure or credentials from those notes.
 
-Every successful observation must show HTTP 200. The API helper prints HTTP
-status to stderr and JSON to stdout; non-2xx requests return nonzero.
-Negative examples below deliberately return 401, 404, 409, or 503.
-Do not mistake two matching error responses for unchanged application state.
+Successful reads return HTTP 200; tenant acceptance returns 202. The helper
+prints status to stderr and JSON to stdout. Expected 401/404/409/422/503 checks
+return nonzero, so run the blocks individually rather than as one unattended
+script. Two matching error responses do not prove unchanged application state.
 
 For a new terminal/session, return to this checkout and reload these controls.
 Resume with checkpoint reads, not deployment commands or tenant POSTs.
@@ -231,12 +236,37 @@ Expect 200, then 404. Send the request once:
 api management POST /tenants \
   '{"tenant_id":"shared-a","isolation":"shared","initial_message":"alpha"}' \
   > "$NOTES/shared-a-request.json"
-OP_A=$(jq -er '.operation_id' "$NOTES/shared-a-request.json")
+OP_A=$(jq -er '.operation_id' "$NOTES/shared-a-request.json") || exit 1
 api management GET "/operations/$OP_A"
 ```
 
-Expect HTTP 202 with an operation ID. While the operation is `pending` or
-`running`, inspect it and repeat these reads:
+Expect HTTP 202 and an operation ID.
+
+#### Optional admission checks
+
+Duplicate requests must return 409 without creating another operation:
+
+```bash
+api management POST /tenants \
+  '{"tenant_id":"shared-a","isolation":"shared","initial_message":"alpha"}'
+```
+
+While the first operation is still `pending` or `running`, you can also test
+the single-active-operation rule. Skip these two calls if it already finished:
+
+```bash
+api management POST /tenants \
+  '{"tenant_id":"busy-check","isolation":"shared","initial_message":"not accepted"}'
+api management GET /tenants/busy-check
+```
+
+Expect 503 `provisioner_busy`, then 404. If you get 202, you accepted another
+tenant: wait for that operation too and do not count this as a successful busy
+check.
+
+#### Follow provisioning
+
+Repeat these reads while the first operation is pending or running:
 
 ```bash
 api management GET /tenants/shared-a \
@@ -271,30 +301,10 @@ for slot in shared-control shared-data; do
 done > "$NOTES/shared-clusters-before.txt"
 ```
 
-#### Optional admission checks
-
-You distinguish duplicate requests from temporary provisioning capacity limits.
-
-Repeat the `shared-a` POST: expect 409 `duplicate_tenant` pointing to the
-original status URL, without overwriting configuration or creating an operation.
-
-While the first operation is still pending/running, a different tenant request
-should receive 503 `provisioner_busy`:
-
-```bash
-api management POST /tenants \
-  '{"tenant_id":"busy-check","isolation":"shared","initial_message":"not accepted"}'
-api management GET /tenants/busy-check
-```
-
-Expect 503 and 404. Skip this check after the first operation finishes.
-If you get 202, you submitted another real tenant; wait for it too and do not
-claim that the busy check passed.
-
 ### B. Reuse the pair while data reconciliation is paused
 
-You prove that shared tenants reuse infrastructure and that management readiness
-does not depend on the data reconciler finishing its work.
+This separates management readiness from data configuration application while
+checking that the same cluster pair is reused.
 
 Pause only the shared data reconciler:
 
@@ -344,8 +354,8 @@ not another cluster pair.
 
 ### C. Provision an isolated tenant
 
-You compare shared placement with a dedicated cluster pair and verify that each
-pair serves only its assigned records.
+This tenant should get its own control/data pair. The two pairs must not serve
+each other's tenant records.
 
 ```bash
 api management POST /tenants \
@@ -384,8 +394,8 @@ not production tenant authentication.
 
 ### D. Update configuration and compare counters
 
-You change application behavior through control without redeploying data, while
-checking that tenant counters stay independent.
+Change tenant configuration through control, then check that data applies it
+without resetting counters.
 
 ```bash
 api data:shared GET /tenants/shared-a
@@ -418,8 +428,8 @@ Management supplied the initial message; control owns subsequent changes.
 
 ### E. Observe polling, history, and access
 
-You verify that unchanged polling preserves control-owned updates, that reports
-can be followed in order, and that the API has limited access.
+Check that repeated polling preserves control's changes, then inspect paginated
+events and API access.
 
 Capture a baseline after updates have applied:
 
@@ -497,8 +507,8 @@ The full in-Pod/named-permission check is available as
 
 ### F. Block the management database link
 
-You show that an existing control/data pair can keep changing configuration and
-serving requests without reaching management's database.
+An existing control/data pair should keep accepting configuration changes and
+serving requests while management PostgreSQL is unreachable.
 
 Finish onboarding and inspect all five endpoints before faults. Open a second
 terminal in the same checkout. It reads the same `.env`; no export is needed.
@@ -560,8 +570,8 @@ control poll after restoration. Recovery must not add a duplicate
 
 ### G. Block control, queue updates, and restart data
 
-You show that data can serve its last applied state even after an API restart,
-then catch up to the newest configuration when control becomes reachable.
+Data should keep serving its applied configuration through the outage and an
+API restart, then apply the newest control version after reconnection.
 
 Start only after the preceding fault is restored. Save the current data response:
 
@@ -652,8 +662,8 @@ clear a fault. Do not proceed until the original link is confirmed restored.
 
 ## 4. Check datastore persistence
 
-You separate Pod lifetime from stored data by replacing database and Redis Pods
-while retaining their storage and application state.
+Replace datastore Pods while retaining their PVCs to separate process lifetime
+from stored data.
 
 After all faults are restored and operations completed, replace one datastore
 at a time. Start with the shared pair:
@@ -703,36 +713,98 @@ or HA.
 
 ## 5. Clean up local
 
-You remove the local deployment through Radius and independently check that the
-owned clusters are gone.
-
-Restore all faults and paused workloads, then:
+Cleanup destroys the selected demo's PostgreSQL, Redis and node-local volume
+data. Restore faults and paused workloads, finish or inspect active provisioning,
+and check that `.env` still selects local:
 
 ```bash
+make show-config
 make clean-plan
 make clean CONFIRM_LOCAL=yes
 make verify-clean
 ```
 
-Cleanup reads current Docker, Kubernetes, Radius and Terraform ownership.
-It does not require all five slots to have been created or a saved export.
-Incomplete or contradictory ownership stops deletion; it does not authorize
-direct child-cluster deletion. Verification needs no cleanup record path.
+Review the plan before `make clean`. The cleaner quiesces management, removes
+data/control applications through child Radius, deletes children through
+management Radius, then removes management. It checks Docker, Kubernetes,
+Radius and the actual Terraform state, not just resource names. Partial
+topologies can be inspected without a saved export.
 
-Require `resources_removed`. Images/cache and the shared kind network are
-retained intentionally. Historical workstation records are not consulted or
-bulk-deleted. See [local cleanup](docs/local-cleanup.md).
+Checkpoint: `make verify-clean` returns `status: clean` for
+`scope: owned-active-resources`. Images/build cache, the shared kind network,
+unrelated containers, local files and global contexts remain untouched.
+Verification needs no previous cleanup record.
 
-## References for the walkthrough
+An active or interrupted `management-bootstrap` Lease blocks cleanup; do not
+delete or take it over to force progress. Missing or contradictory owners,
+remaining faults and changed Terraform state also stop deletion. Inspect the
+reported resources rather than directly deleting child kind clusters or
+flushing network rules. Terraform state can contain child administrator
+credentials; do not dump it into reports.
 
-| Topic | Source |
+## Troubleshooting
+
+| Where the run stops | What to inspect |
 |---|---|
-| How the planes connect | [Architecture](docs/architecture.md), [API/database contracts](docs/contracts.md) |
-| Runtime | `src/plane_demo/{management,control,data,shared,setup}`, `sql/` |
-| Infrastructure | `infra/radius/apps/` declares planes; `types/` defines APIs; `recipes/` implements them; `environments/` selects Recipes |
-| Administration | `scripts/operations/`, [local provider](docs/local-provider.md) |
-| Harness pieces to inspect | `scripts/harness/api.py`, exporters, [`Runner.scenario`, `management_outage`, `control_outage`](scripts/harness/test-e2e.py), [harness reference](tests/harness/README.md) |
-| Results and limits | [Findings](FINDINGS.md), [decisions](DECISIONS.md), [limitations](docs/limitations.md) |
+| Docker or bootstrap | Check Docker Desktop, the reserved ports and the selected `.env`. Do not switch to another runtime or cloud deployment. |
+| Artifact inspection | Check the committed revision and prepared image set. Do not overwrite immutable tags or substitute uninspected dependencies. |
+| Management deployment | Read management Pods and provisioner logs. An existing bootstrap Lease needs investigation, not automatic takeover. |
+| Tenant stays pending | Read its operation and management provisioner logs. A failed/interrupted operation is not automatically replayed. |
+| Control is ready but data is stale | Read the control data report, data-reconciler logs and tenant ConfigMap. Check for a paused reconciler or active fault. |
+| SQL observation fails | Preserve credentials, the database and its metadata. Do not reset passwords or rerun initialization to bypass drift. |
+| Cleanup refuses an owner or journal | Restore the fault and inspect the named owner/state. Do not delete a child directly or alter Terraform state to bypass the check. |
 
-Use synthetic data. Shared demo keys keep the API examples simple; production
-tenant authentication is outside this POC. Keep credentials separate from source.
+For example:
+
+```bash
+k shared-data get pods
+k shared-data logs deployment/data-reconciler --tail=40
+k shared-data get configmap tenant-shared-a -o json
+```
+
+## Automated checks
+
+Use the harness instead of the manual scenarios on a prepared deployment with
+no demo tenants. Keep the source revision used to build the inspected images:
+
+```bash
+make local-test CONFIRM_LOCAL=yes
+```
+
+This covers fresh admissions, reuse, isolation, configuration, counters,
+authentication, timelines and both parent outages. Reports go to stdout and
+exclude credentials. The [harness source](scripts/harness/test-e2e.py) contains
+the individual checks.
+
+After a manual run, existing tenants can be verified without claiming fresh
+onboarding proof:
+
+```bash
+uv run --no-sync python scripts/harness/test-e2e.py --environment local \
+  --mode verify-existing --execute
+```
+
+This still performs live mutations. If an interrupted first admission provides
+a continuation handle, keep the same source and `.env` and use that exact handle:
+
+```bash
+uv run --no-sync python scripts/harness/test-e2e.py --environment local --mode all \
+  --continue-first-from NAME@UID@RUN_ID --execute
+```
+
+Continuation is limited to that first-admission scope. It is not general replay
+of failed provisioning. For an interrupted fault, use the
+[journal restoration procedure](#interrupted-fault).
+
+## Limits to keep in mind
+
+Use synthetic data and a trusted operator. Management Radius has Docker daemon
+authority; names and labels are not a hostile-tenant isolation boundary.
+Management Secret encryption is checked, but encryption at rest for child
+datastore Secrets, Terraform state and PVCs is not claimed.
+
+Local PostgreSQL and Redis use explicit non-TLS transport on internal paths.
+HTTP gateways bind only the reserved loopback ports. The singleton provisioner
+has no HA scheduler or automatic replay, and there is no tenant migration or
+deletion API. Pod-replacement persistence does not establish backup/restore,
+forced-crash durability or disaster recovery.
