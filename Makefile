@@ -34,7 +34,7 @@ printf '\n\n%s== %s ==%s\n%s%s%s\n\n' \
   "$$bold$$accent" '$@' "$$reset" "$$accent" "$(SEPARATOR)" "$$reset" >&2
 endef
 
-.PHONY: help init show-config endpoints api kube fault check lint test test-integration check-bicep check-shell check-terraform check-work \
+.PHONY: help init show-config endpoints report api kube fault fault-status check lint test test-integration check-bicep check-shell check-terraform check-work \
         require-azure confirm-azure build inspect-build bootstrap deploy-management \
         deploy-management-preview export-state test-e2e test-outages clean-plan clean clean-azure verify-clean \
         confirm-local local-build local-inspect-build local-bootstrap \
@@ -113,6 +113,10 @@ endpoints: ## Discover live endpoints; ARGS=<slot> or ARGS=all
 	$(SECTION)
 	@bash scripts/operations/endpoints.sh $(ARGS)
 
+report: ## Print current endpoints and tenant status from .env
+	$(SECTION)
+	@$(RUN) python scripts/harness/export-state.py --once
+
 api: ## Call ARGS='TARGET METHOD /path'; optional JSON on stdin
 	$(SECTION)
 	@bash scripts/operations/api.sh $(ARGS)
@@ -124,6 +128,10 @@ kube: ## Run kubectl with fresh access; ARGS='SLOT get pods'
 fault: ## Run or restore a parent-link fault; pass helper options through ARGS
 	$(SECTION)
 	@$(STAGE) fault $(ARGS)
+
+fault-status: ## Read a fault journal; ARGS='SLOT COMPONENT'
+	$(SECTION)
+	@bash scripts/operations/fault-status.sh $(ARGS)
 
 check-work:
 	@mkdir -p "$(CHECK_TMP)" .state/check infra/radius/types/.build

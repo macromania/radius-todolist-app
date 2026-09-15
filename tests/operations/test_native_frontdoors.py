@@ -77,6 +77,30 @@ ROUTES = {
 }
 
 
+def test_make_report_invokes_the_live_exporter_without_confirmation(tmp_path):
+    recorder = tmp_path / "record.py"
+    recorder.write_text("import json,sys; print(json.dumps(sys.argv[1:]))\n")
+    result = subprocess.run(
+        [
+            "make",
+            "--no-print-directory",
+            "-f",
+            str(ROOT / "Makefile"),
+            "report",
+            f"RUN={sys.executable} {recorder}",
+            "CONFIRM_AZURE=",
+            "CONFIRM_LOCAL=",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == ["python", "scripts/harness/export-state.py", "--once"]
+    assert not (tmp_path / ".state").exists()
+
+
 @pytest.fixture
 def stages(tmp_path):
     for relative in ("scripts/lib/env.sh", "scripts/operations/stage.sh"):

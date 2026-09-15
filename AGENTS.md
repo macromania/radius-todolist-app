@@ -46,6 +46,7 @@ child Radius owns its apps. Do not replace this with direct Python cluster creat
 - `Makefile` and `scripts/operations/stage.sh` route commands from the selected `.env`.
 - `scripts/operations/init.sh` writes starting configuration, not discovered inventory.
 - `scripts/operations/{api,endpoints,kube}.sh` discover current access per invocation.
+- `make report` prints live observations; `fault-status.sh` reads a selected fault journal.
 - `scripts/operations/azure/` and `local/` contain native bootstrap/build operations.
 - `scripts/operations/run-management-job.py` and `deploy-plane.py` own the Azure Job path.
 - `scripts/operations/local/deploy-demo.py` uses the guarded local operator factory.

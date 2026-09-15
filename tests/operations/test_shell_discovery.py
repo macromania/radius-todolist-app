@@ -86,6 +86,20 @@ elif tool=="kubectl":
     elif "secret" in args:
         name=args[args.index("secret")+1]
         print(name+"\n"+namespace+"\n"+base64.b64encode(spec["api_key"].encode()).decode())
+    elif "configmap" in args:
+        name=args[args.index("configmap")+1]
+        assert name.startswith("plane-demo-fault-")
+        if mode=="missing-journal": raise SystemExit("journal not found")
+        record=spec.get("fault_record", {
+            "slot":slot,"component":name.removeprefix("plane-demo-fault-"),
+            "outcome":"blocked_verified","restored":False,
+        })
+        print(json.dumps({
+            "kind":"ConfigMap",
+            "metadata":{"name":"foreign" if mode=="wrong-journal" else name,"namespace":namespace},
+            "data":{"record.json":
+                "invalid json" if mode=="malformed-journal" else json.dumps(record)}
+        }))
     elif "get" in args and "pods" in args:
         if mode=="command-failed": raise SystemExit(23)
         print(json.dumps({"items":[]}))
@@ -111,6 +125,7 @@ def checkout(tmp_path):
         "scripts/operations/endpoints.sh",
         "scripts/operations/api.sh",
         "scripts/operations/kube.sh",
+        "scripts/operations/fault-status.sh",
     ):
         destination = tmp_path / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -165,6 +180,146 @@ def configure(root, environment, slot="management", mode=None):
     }
     (root / "spec.json").write_text(json.dumps(spec))
     return spec
+
+
+@pytest.mark.parametrize("environment", ["azure", "local"])
+@pytest.mark.parametrize("slot", ["shared-control", "isolated-1-data"])
+def test_make_fault_status_reads_only_the_selected_live_journal(checkout, environment, slot):
+    configure(checkout, environment, slot)
+    shutil.copyfile(ROOT / "Makefile", checkout / "Makefile")
+    component = "control-reconciler" if slot.endswith("control") else "data-reconciler"
+    result = subprocess.run(
+        ["make", "--no-print-directory", "fault-status", f"ARGS={slot} {component}"],
+        cwd=checkout,
+        env={
+            **os.environ,
+            "PATH": str(checkout / "bin") + os.pathsep + os.environ["PATH"],
+            "TMPDIR": str(checkout / "work"),
+            "FAKE_SPEC": str(checkout / "spec.json"),
+            "FAKE_LOG": str(checkout / "calls.jsonl"),
+            "CONFIRM_AZURE": "",
+            "CONFIRM_LOCAL": "",
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "slot": slot,
+        "component": component,
+        "outcome": "blocked_verified",
+        "restored": False,
+    }
+    calls = [json.loads(line) for line in (checkout / "calls.jsonl").read_text().splitlines()]
+    assert not any(
+        set(call["args"]) & {"create", "apply", "patch", "delete", "secret"} for call in calls
+    )
+    assert not (checkout / ".state").exists()
+    assert list((checkout / "work").iterdir()) == []
+    if environment == "local":
+        assert not any(call["tool"] in {"az", "kubelogin"} for call in calls)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "missing-journal",
+        "malformed-journal",
+        "wrong-journal",
+        "foreign-namespace",
+        "target",
+        "shape",
+    ],
+)
+def test_fault_status_reports_read_or_record_failures(checkout, failure):
+    spec = configure(checkout, "local", "shared-data", mode=failure)
+    if failure in {"target", "shape"}:
+        spec["fault_record"] = (
+            []
+            if failure == "shape"
+            else {"slot": "shared-control", "component": "control-reconciler"}
+        )
+        (checkout / "spec.json").write_text(json.dumps(spec))
+    result = subprocess.run(
+        [
+            "bash",
+            str(checkout / "scripts/operations/fault-status.sh"),
+            "shared-data",
+            "data-reconciler",
+        ],
+        env={
+            **os.environ,
+            "PATH": str(checkout / "bin") + os.pathsep + os.environ["PATH"],
+            "TMPDIR": str(checkout / "work"),
+            "FAKE_SPEC": str(checkout / "spec.json"),
+            "FAKE_LOG": str(checkout / "calls.jsonl"),
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode != 0 and result.stderr
+    assert not result.stdout
+    assert list((checkout / "work").iterdir()) == []
+
+
+def test_fault_status_rejects_mismatched_slot_before_discovery(checkout):
+    result = subprocess.run(
+        [
+            "bash",
+            str(checkout / "scripts/operations/fault-status.sh"),
+            "shared-data",
+            "control-reconciler",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode != 0
+    assert "matching control/data slot" in result.stderr
+    assert not (checkout / "calls.jsonl").exists()
+
+
+@pytest.mark.parametrize("environment", ["azure", "local"])
+@pytest.mark.parametrize("method", ["GET", "PUT"])
+def test_make_api_preserves_query_arguments_and_json_stdin(checkout, environment, method):
+    spec = configure(checkout, environment, "shared-control")
+    shutil.copyfile(ROOT / "Makefile", checkout / "Makefile")
+    route = (
+        "/tenants/alpha?limit=2&after_event_id=7"
+        if method == "GET"
+        else "/tenants/alpha/configuration"
+    )
+    body = {"message": "$(touch should-not-exist) | quoted ' text & spaces"}
+    result = subprocess.run(
+        [
+            "make",
+            "--no-print-directory",
+            "api",
+            f"ARGS=control:shared {method} '{route}'",
+        ],
+        cwd=checkout,
+        env={
+            **os.environ,
+            "PATH": str(checkout / "bin") + os.pathsep + os.environ["PATH"],
+            "TMPDIR": str(checkout / "work"),
+            "FAKE_SPEC": str(checkout / "spec.json"),
+            "FAKE_LOG": str(checkout / "calls.jsonl"),
+        },
+        input=json.dumps(body) if method == "PUT" else "",
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    calls = [json.loads(line) for line in (checkout / "calls.jsonl").read_text().splitlines()]
+    curl = next(call["args"] for call in calls if call["tool"] == "curl")
+    assert curl[curl.index("--url") + 1] == spec["url"] + route
+    if method == "PUT":
+        assert json.loads(result.stdout)["received"] == body
+    assert not (checkout / "should-not-exist").exists()
+    assert list((checkout / "work").iterdir()) == []
 
 
 def discover(root, slot):

@@ -36,6 +36,10 @@ Run `make help` for commands, or narrow it with `GROUP=azure`, `GROUP=local`,
 `GROUP=setup`, or `GROUP=checks`. `COLOR=never` or `NO_COLOR=1` disables styling;
 redirected output is plain.
 
+Use `make report` for current endpoints and tenant status.
+`make fault-status ARGS='SLOT COMPONENT'` reads a fault journal without changing
+the fault. The guides use Make directly, without shell function setup.
+
 ## Configuration and state
 
 `make init ENV=azure` or `make init ENV=local` writes the private, git-ignored

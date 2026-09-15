@@ -71,7 +71,12 @@ def test_manual_guide_shell_blocks_parse_and_use_current_targets(environment):
         assert "acceptance.json" not in block
         assert "LOCAL_CLEANUP_RECORD" not in block
         assert "--config " not in block
-    assert "plane-demo-fault-$2" in text and '.data["record.json"] | fromjson' in text
+        assert not re.search(r"\b(?:api|k|report|journal|endpoint)\(\)\s*\{", block)
+        assert not re.search(r"^\s*(?:api|k|report|journal|endpoint)\s", block, re.MULTILINE)
+    assert "make fault-status" in text and "make report" in text
+    assert "git worktree add" not in text
+    assert ".state/azure/provisioning.json" not in text
+    assert "Assemble protected" not in text
     assert "shared-clusters-before.txt" in text and "shared-clusters-after.txt" in text
     assert "make verify-clean" in text
 
@@ -114,9 +119,11 @@ def test_busy_check_precedes_waiting_for_provisioning(environment):
 
 def test_local_prerequisites_cover_native_stage_tools():
     guide = (ROOT / "RUN_LOCAL_SCENARIOS.md").read_text()
-    prerequisites = guide.split("## 1. Prepare the workspace", 1)[1].split(
-        "### Select operator configuration", 1
-    )[0].lower()
+    prerequisites = (
+        guide.split("## 1. Prepare the workspace", 1)[1]
+        .split("### Select operator configuration", 1)[0]
+        .lower()
+    )
     aliases = {"rad": "radius", "docker": "docker desktop"}
     for script in ("build.sh", "bootstrap.sh"):
         source = (ROOT / "scripts/operations/local" / script).read_text()

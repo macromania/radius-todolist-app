@@ -54,12 +54,6 @@ through all three planes.
 Use a clean checkout of committed source. Keep that source revision unchanged
 through build, deployment, and the scenarios.
 
-```bash
-bash
-set -o pipefail
-umask 077
-```
-
 Use Bash for the commands below. Have Git, `uv`, `jq`, `curl`, Docker Desktop,
 ShellCheck, and the following tools installed:
 
@@ -185,55 +179,48 @@ tenant clusters yet. Radius registration is part of this deployment command.
 
 ## 3. Run the manual scenarios
 
-### Load the shell controls
+### Inspect management
 
-These helpers keep requests short while discovering access for each command.
-Run them in your main terminal:
+The Make commands read `.env` and discover current access. They manage their own
+shells, temporary kubeconfigs and credential permissions:
+
+```bash
+make report
+make kube ARGS='management get pods,pvc'
+make kube ARGS='management logs deployment/provisioner --tail=20'
+make api ARGS='management GET /healthz'
+```
+
+Initially the report contains only the management endpoint and no tenants.
+Require `provisioner_ready` and HTTP 200 before onboarding. There are no shell
+functions to define, detached worktrees to create, or provisioning files to
+assemble. `make fault-status ARGS='SLOT COMPONENT'` reads a fault's Kubernetes
+journal; the running fault helper performs the network checks.
+
+### Prepare response comparisons
+
+The later examples compare API responses. Create a private temporary directory
+for those notes, and enable failure reporting for shell pipelines:
 
 ```bash
 set -o pipefail
-umask 077
 NOTES=$(mktemp -d "${TMPDIR:-/tmp}/plane-manual.XXXXXX")
-
-api() { bash scripts/operations/api.sh "$@"; }
-k() { bash scripts/operations/kube.sh "$@"; }
-endpoint() { bash scripts/operations/endpoints.sh "$1" | jq -er '.url'; }
-
-report() {
-  uv run --no-sync python scripts/harness/export-state.py --environment azure --once
-}
-
-journal() {
-  k "$1" get configmap "plane-demo-fault-$2" -o json | jq -er '.data["record.json"] | fromjson'
-}
-
-report
-k management get pods,pvc
-k management logs deployment/provisioner --tail=20
-api management GET /healthz
 ```
 
-These shortcuts keep the commands below short:
+`$NOTES` is only for your comparisons. Deployment, discovery, credentials and
+cleanup never read it. You can discard the notes after the demo.
 
-| Command | What it does |
-|---|---|
-| `api management GET ...` | Discovers the endpoint/key and sends one HTTP request |
-| `k shared-data get ...` | Uses fresh scoped access, then discards its temporary kubeconfig |
-| `report` | Prints current topology and tenant status; creates no tenants or inventory file |
-| `journal SLOT COMPONENT` | Reads the fault record from its owning Kubernetes ConfigMap |
-
-Initially the report contains only the management endpoint and no tenants.
-Require `provisioner_ready` and HTTP 200 before onboarding. Reports fail nonzero
-on observation errors. `$NOTES` holds only your optional response comparisons.
-No command discovers infrastructure or credentials from those notes. The worker
-has no credential-seed file or working-state PVC.
+Pass the target, method and path through `ARGS`. Pipe JSON request bodies into
+`make api` so message text is not interpreted by Make. Keep the inner quotes
+shown around query URLs and variable arguments.
 
 Successful reads return HTTP 200; tenant acceptance returns 202. The helper
 prints status to stderr and JSON to stdout. Expected 401/404/409/422/503 checks
 return nonzero, so run the blocks individually rather than as one unattended
 script. Two matching error responses do not prove unchanged application state.
 
-For a new terminal/session, return to this checkout and reload these controls.
+For a new terminal, return to this checkout and run `make show-config`. Create
+a new notes directory if you need comparisons, then capture fresh baselines.
 Resume with checkpoint reads, not deployment commands or tenant POSTs.
 Restore any active fault or paused workload before taking a break.
 
@@ -243,18 +230,17 @@ You follow one request from acceptance to infrastructure creation and a working
 data response.
 
 ```bash
-api management GET /healthz
-api management GET /tenants/shared-a
+make api ARGS='management GET /healthz'
+make api ARGS='management GET /tenants/shared-a'
 ```
 
 Expect 200, then 404. Send the request once:
 
 ```bash
-api management POST /tenants \
-  '{"tenant_id":"shared-a","isolation":"shared","initial_message":"alpha"}' \
-  > "$NOTES/shared-a-request.json"
+printf '%s\n' '{"tenant_id":"shared-a","isolation":"shared","initial_message":"alpha"}' | \
+  make api ARGS='management POST /tenants' > "$NOTES/shared-a-request.json"
 OP_A=$(jq -er '.operation_id' "$NOTES/shared-a-request.json") || exit 1
-api management GET "/operations/$OP_A"
+make api ARGS="management GET '/operations/$OP_A'"
 ```
 
 Expect HTTP 202 and an operation ID.
@@ -264,17 +250,17 @@ Expect HTTP 202 and an operation ID.
 Duplicate requests must return 409 without creating another operation:
 
 ```bash
-api management POST /tenants \
-  '{"tenant_id":"shared-a","isolation":"shared","initial_message":"alpha"}'
+printf '%s\n' '{"tenant_id":"shared-a","isolation":"shared","initial_message":"alpha"}' | \
+  make api ARGS='management POST /tenants'
 ```
 
 While the first operation is still `pending` or `running`, you can also test
 the single-active-operation rule. Skip these two calls if it already finished:
 
 ```bash
-api management POST /tenants \
-  '{"tenant_id":"busy-check","isolation":"shared","initial_message":"not accepted"}'
-api management GET /tenants/busy-check
+printf '%s\n' '{"tenant_id":"busy-check","isolation":"shared","initial_message":"not accepted"}' | \
+  make api ARGS='management POST /tenants'
+make api ARGS='management GET /tenants/busy-check'
 ```
 
 Expect 503 `provisioner_busy`, then 404. If you get 202, you accepted another
@@ -286,9 +272,8 @@ check.
 Repeat these reads while the first operation is pending or running:
 
 ```bash
-api management GET /tenants/shared-a \
-  | jq '{pair_id, provisioning_status, provisioning_stage, onboarding_status, control_record}'
-k management logs deployment/provisioner --tail=20
+make api ARGS='management GET /tenants/shared-a' | jq '{pair_id, provisioning_status, provisioning_stage, onboarding_status, control_record}'
+make kube ARGS='management logs deployment/provisioner --tail=20'
 ```
 
 Management Radius should create the shared control/data clusters. The provisioner
@@ -297,10 +282,10 @@ installs child Radius and deploys their applications. Require both
 Stop on `failed` or `interrupted`; do not reset state to force a retry.
 
 ```bash
-report
-api control:shared GET /tenants/shared-a
-api data:shared GET /tenants/shared-a
-k shared-data get configmap tenant-shared-a -o json | jq .data
+make report
+make api ARGS='control:shared GET /tenants/shared-a'
+make api ARGS='data:shared GET /tenants/shared-a'
+make kube ARGS='shared-data get configmap tenant-shared-a -o json' | jq .data
 ```
 
 Expect three discovered endpoints. Control should become `applied`; data should
@@ -311,10 +296,9 @@ Save the logical placement for the reuse check. Management does not store or
 return endpoint URLs; endpoint and cluster discovery use provider APIs.
 
 ```bash
-api management GET /tenants/shared-a \
-  | jq '{pair_id}' > "$NOTES/shared-pair.json"
+make api ARGS='management GET /tenants/shared-a' | jq '{pair_id}' > "$NOTES/shared-pair.json"
 for slot in shared-control shared-data; do
-  k "$slot" get namespace kube-system -o jsonpath='{.metadata.uid}{"\n"}'
+  make kube ARGS="'$slot' get namespace kube-system -o json" | jq -er .metadata.uid
 done > "$NOTES/shared-clusters-before.txt"
 ```
 
@@ -326,18 +310,18 @@ checking that the same cluster pair is reused.
 Pause only the shared data reconciler:
 
 ```bash
-k shared-data scale deployment/data-reconciler --current-replicas=1 --replicas=0
-k shared-data get pods -l plane-demo/component=data-reconciler
+make kube ARGS='shared-data scale deployment/data-reconciler --current-replicas=1 --replicas=0'
+make kube ARGS='shared-data get pods -l plane-demo/component=data-reconciler'
 ```
 
 Wait until no matching Pods remain, including terminating Pods. Then:
 
 ```bash
-api management POST /tenants \
-  '{"tenant_id":"shared-b","isolation":"shared","initial_message":"bravo"}'
-api management GET /tenants/shared-b
-api control:shared GET /tenants/shared-b
-api data:shared GET /tenants/shared-b
+printf '%s\n' '{"tenant_id":"shared-b","isolation":"shared","initial_message":"bravo"}' | \
+  make api ARGS='management POST /tenants'
+make api ARGS='management GET /tenants/shared-b'
+make api ARGS='control:shared GET /tenants/shared-b'
+make api ARGS='data:shared GET /tenants/shared-b'
 ```
 
 Wait for management readiness and provisioning success. Control should have
@@ -347,21 +331,20 @@ Wait for management readiness and provisioning success. Control should have
 Restore the reconciler before leaving this section, even after an error:
 
 ```bash
-k shared-data scale deployment/data-reconciler --current-replicas=0 --replicas=1
-k shared-data rollout status deployment/data-reconciler --timeout=60s
-api control:shared GET /tenants/shared-b
-api data:shared GET /tenants/shared-b
+make kube ARGS='shared-data scale deployment/data-reconciler --current-replicas=0 --replicas=1'
+make kube ARGS='shared-data rollout status deployment/data-reconciler --timeout=60s'
+make api ARGS='control:shared GET /tenants/shared-b'
+make api ARGS='data:shared GET /tenants/shared-b'
 ```
 
 Wait for `applied` and the `bravo` response, then compare placement:
 
 ```bash
-api management GET /tenants/shared-b \
-  | jq '{pair_id}' > "$NOTES/shared-b-pair.json"
+make api ARGS='management GET /tenants/shared-b' | jq '{pair_id}' > "$NOTES/shared-b-pair.json"
 diff -u "$NOTES/shared-pair.json" "$NOTES/shared-b-pair.json"
-report | jq '.endpoints | keys'
+make report | jq '.endpoints | keys'
 for slot in shared-control shared-data; do
-  k "$slot" get namespace kube-system -o jsonpath='{.metadata.uid}{"\n"}'
+  make kube ARGS="'$slot' get namespace kube-system -o json" | jq -er .metadata.uid
 done > "$NOTES/shared-clusters-after.txt"
 diff -u "$NOTES/shared-clusters-before.txt" "$NOTES/shared-clusters-after.txt"
 ```
@@ -375,21 +358,21 @@ This tenant should get its own control/data pair. The two pairs must not serve
 each other's tenant records.
 
 ```bash
-api management POST /tenants \
-  '{"tenant_id":"isolated-c","isolation":"isolated","initial_message":"charlie"}'
-api management GET /tenants/isolated-c
-k management logs deployment/provisioner --tail=20
+printf '%s\n' '{"tenant_id":"isolated-c","isolation":"isolated","initial_message":"charlie"}' | \
+  make api ARGS='management POST /tenants'
+make api ARGS='management GET /tenants/isolated-c'
+make kube ARGS='management logs deployment/provisioner --tail=20'
 ```
 
 Wait for provisioning success and management readiness:
 
 ```bash
-report
-api control:isolated-1 GET /tenants/isolated-c
-api data:isolated-1 GET /tenants/isolated-c
+make report
+make api ARGS='control:isolated-1 GET /tenants/isolated-c'
+make api ARGS='data:isolated-1 GET /tenants/isolated-c'
 for slot in management shared-control shared-data isolated-1-control isolated-1-data; do
   printf '%s ' "$slot"
-  k "$slot" get namespace kube-system -o jsonpath='{.metadata.uid}{"\n"}'
+  make kube ARGS="'$slot' get namespace kube-system -o json" | jq -er .metadata.uid
 done
 ```
 
@@ -400,10 +383,10 @@ Wait for `charlie`, version 1, on data.
 Check that the wrong pair does not host the records:
 
 ```bash
-api control:shared GET /tenants/isolated-c
-api data:shared GET /tenants/isolated-c
-api control:isolated-1 GET /tenants/shared-a
-api data:isolated-1 GET /tenants/shared-a
+make api ARGS='control:shared GET /tenants/isolated-c'
+make api ARGS='data:shared GET /tenants/isolated-c'
+make api ARGS='control:isolated-1 GET /tenants/shared-a'
+make api ARGS='data:isolated-1 GET /tenants/shared-a'
 ```
 
 Expect 404 for each. These use valid plane keys and demonstrate placement,
@@ -415,11 +398,11 @@ Change tenant configuration through control, then check that data applies it
 without resetting counters.
 
 ```bash
-api data:shared GET /tenants/shared-a
-api data:shared GET /tenants/shared-b
-api data:isolated-1 GET /tenants/isolated-c
-api data:shared POST /tenants/shared-a/counter
-api data:shared POST /tenants/shared-a/counter
+make api ARGS='data:shared GET /tenants/shared-a'
+make api ARGS='data:shared GET /tenants/shared-b'
+make api ARGS='data:isolated-1 GET /tenants/isolated-c'
+make api ARGS='data:shared POST /tenants/shared-a/counter'
+make api ARGS='data:shared POST /tenants/shared-a/counter'
 ```
 
 Each POST must increment only `shared-a` by one. GET must not increment.
@@ -429,14 +412,17 @@ Use the values you observed, rather than assuming zero after repeated commands.
 Update each tenant through control:
 
 ```bash
-api control:shared PUT /tenants/shared-a/configuration '{"message":"alpha-v2"}'
-api control:shared PUT /tenants/shared-b/configuration '{"message":"bravo-v2"}'
-api control:isolated-1 PUT /tenants/isolated-c/configuration '{"message":"charlie-v2"}'
-api control:shared GET /tenants/shared-a
-api data:shared GET /tenants/shared-a
-api data:shared GET /tenants/shared-b
-api data:isolated-1 GET /tenants/isolated-c
-k shared-data get configmap tenant-shared-a -o json | jq .data
+printf '%s\n' '{"message":"alpha-v2"}' | \
+  make api ARGS='control:shared PUT /tenants/shared-a/configuration'
+printf '%s\n' '{"message":"bravo-v2"}' | \
+  make api ARGS='control:shared PUT /tenants/shared-b/configuration'
+printf '%s\n' '{"message":"charlie-v2"}' | \
+  make api ARGS='control:isolated-1 PUT /tenants/isolated-c/configuration'
+make api ARGS='control:shared GET /tenants/shared-a'
+make api ARGS='data:shared GET /tenants/shared-a'
+make api ARGS='data:shared GET /tenants/shared-b'
+make api ARGS='data:isolated-1 GET /tenants/isolated-c'
+make kube ARGS='shared-data get configmap tenant-shared-a -o json' | jq .data
 ```
 
 Each PUT creates the next desired version. Wait for matching data messages and
@@ -453,15 +439,14 @@ Capture a baseline after updates have applied:
 ```bash
 POLL_FROM=$(uv run --no-sync python -c \
   'from datetime import UTC, datetime; print(datetime.now(UTC).isoformat())')
-api management GET /tenants/shared-a > "$NOTES/m-before.json"
-api control:shared GET /tenants/shared-a > "$NOTES/c-before.json"
-api data:shared GET /tenants/shared-a > "$NOTES/d-before.json"
+make api ARGS='management GET /tenants/shared-a' > "$NOTES/m-before.json"
+make api ARGS='control:shared GET /tenants/shared-a' > "$NOTES/c-before.json"
+make api ARGS='data:shared GET /tenants/shared-a' > "$NOTES/d-before.json"
 sleep 15
-k shared-control logs deployment/control-reconciler \
-  --since-time="$POLL_FROM" --timestamps=true --tail=20
-api management GET /tenants/shared-a > "$NOTES/m-after.json"
-api control:shared GET /tenants/shared-a > "$NOTES/c-after.json"
-api data:shared GET /tenants/shared-a > "$NOTES/d-after.json"
+make kube ARGS="shared-control logs deployment/control-reconciler '--since-time=$POLL_FROM' --timestamps=true --tail=20"
+make api ARGS='management GET /tenants/shared-a' > "$NOTES/m-after.json"
+make api ARGS='control:shared GET /tenants/shared-a' > "$NOTES/c-after.json"
+make api ARGS='data:shared GET /tenants/shared-a' > "$NOTES/d-after.json"
 diff -u "$NOTES/m-before.json" "$NOTES/m-after.json"
 diff -u "$NOTES/c-before.json" "$NOTES/c-after.json"
 diff -u "$NOTES/d-before.json" "$NOTES/d-after.json"
@@ -474,11 +459,11 @@ its updates while polling management. No successful poll means no proof yet.
 Read a timeline in small pages:
 
 ```bash
-api control:shared GET '/tenants/shared-a?limit=2' > "$NOTES/page.json"
+make api ARGS="control:shared GET '/tenants/shared-a?limit=2'" > "$NOTES/page.json"
 jq '{timeline, next_after_event_id}' "$NOTES/page.json"
 CURSOR=$(jq -r '.next_after_event_id' "$NOTES/page.json")
 if [ "$CURSOR" != null ]; then
-  api control:shared GET "/tenants/shared-a?limit=2&after_event_id=$CURSOR"
+  make api ARGS="control:shared GET '/tenants/shared-a?limit=2&after_event_id=$CURSOR'"
 fi
 ```
 
@@ -489,13 +474,13 @@ configuration changes and data application.
 Check rejected requests:
 
 ```bash
-curl -q -sS -o /dev/null -w 'HTTP %{http_code}\n' "$(endpoint management)/tenants/shared-a"
+curl -q -sS -o /dev/null -w 'HTTP %{http_code}\n' "$(make endpoints ARGS=management | jq -er '.url')/tenants/shared-a"
 curl -q -sS -o /dev/null -w 'HTTP %{http_code}\n' \
-  -H 'X-Demo-Key: wrong' "$(endpoint management)/tenants/shared-a"
-api management POST /tenants \
-  '{"tenant_id":"Bad ID","isolation":"shared","initial_message":"invalid"}'
-api management POST /tenants \
-  '{"tenant_id":"shared-a","isolation":"shared","initial_message":"must not replace alpha"}'
+  -H 'X-Demo-Key: wrong' "$(make endpoints ARGS=management | jq -er '.url')/tenants/shared-a"
+printf '%s\n' '{"tenant_id":"Bad ID","isolation":"shared","initial_message":"invalid"}' | \
+  make api ARGS='management POST /tenants'
+printf '%s\n' '{"tenant_id":"shared-a","isolation":"shared","initial_message":"must not replace alpha"}' | \
+  make api ARGS='management POST /tenants'
 ```
 
 Expect 401, 401, 422, and 409. The duplicate must not reset control's configuration
@@ -508,13 +493,12 @@ make endpoints ARGS=all
 Inspect the data API identity without displaying Secrets:
 
 ```bash
-k shared-data get deployment data-api \
-  -o jsonpath='{.spec.template.spec.serviceAccountName}{"\n"}'
-DATA_NS=$(k shared-data get deployment data-api -o jsonpath='{.metadata.namespace}')
+make kube ARGS='shared-data get deployment data-api -o json' | jq -er .spec.template.spec.serviceAccountName
+DATA_NS=$(make kube ARGS='shared-data get deployment data-api -o json' | jq -er '.metadata.namespace')
 API_ID="system:serviceaccount:$DATA_NS:data-api-runtime"
-k shared-data auth can-i get configmaps --as="$API_ID"
-k shared-data auth can-i get secret/data-reconciler-runtime --as="$API_ID"
-k shared-data auth can-i list secrets --as="$API_ID"
+make kube ARGS="shared-data auth can-i get configmaps '--as=$API_ID'"
+make kube ARGS="shared-data auth can-i get secret/data-reconciler-runtime '--as=$API_ID'"
+make kube ARGS="shared-data auth can-i list secrets '--as=$API_ID'"
 ```
 
 Expect `data-api-runtime`, then `yes`, `no`, `no`. A denial exits nonzero.
@@ -549,24 +533,25 @@ In the main terminal:
 ```bash
 FAULT_SLOT=shared-control
 FAULT_COMPONENT=control-reconciler
-journal "$FAULT_SLOT" "$FAULT_COMPONENT" | jq '{slot, component, outcome, blocked_at, restored}'
+make fault-status ARGS="'$FAULT_SLOT' '$FAULT_COMPONENT'" | jq '{slot, component, outcome, blocked_at, restored}'
 ```
 
 Require `shared-control`, `control-reconciler`, and `blocked_verified` before
 continuing. While the helper holds the fault:
 
 ```bash
-api management GET /tenants/shared-a > "$NOTES/m-blocked-before.json"
-api control:shared PUT /tenants/shared-a/configuration '{"message":"without-management"}'
-api data:shared GET /tenants/shared-a
-api data:shared POST /tenants/shared-a/counter
+make api ARGS='management GET /tenants/shared-a' > "$NOTES/m-blocked-before.json"
+printf '%s\n' '{"message":"without-management"}' | \
+  make api ARGS='control:shared PUT /tenants/shared-a/configuration'
+make api ARGS='data:shared GET /tenants/shared-a'
+make api ARGS='data:shared POST /tenants/shared-a/counter'
 ```
 
 The new message should reach data through control's own database. Keep reading
 and incrementing for at least 60 seconds, then:
 
 ```bash
-api management GET /tenants/shared-a > "$NOTES/m-blocked-after.json"
+make api ARGS='management GET /tenants/shared-a' > "$NOTES/m-blocked-after.json"
 diff -u "$NOTES/m-blocked-before.json" "$NOTES/m-blocked-after.json"
 ```
 
@@ -574,11 +559,9 @@ Expect no new management reports during blockage. After the fault terminal
 finishes:
 
 ```bash
-journal "$FAULT_SLOT" "$FAULT_COMPONENT" \
-  | jq '{outcome, restored, physical_restored, restoration_started_at, restored_at}'
-RESTORE_FROM=$(journal "$FAULT_SLOT" "$FAULT_COMPONENT" | jq -er '.restoration_started_at')
-k shared-control logs deployment/control-reconciler \
-  --since-time="$RESTORE_FROM" --timestamps=true --tail=20
+make fault-status ARGS="'$FAULT_SLOT' '$FAULT_COMPONENT'" | jq '{outcome, restored, physical_restored, restoration_started_at, restored_at}'
+RESTORE_FROM=$(make fault-status ARGS="$FAULT_SLOT $FAULT_COMPONENT" | jq -er '.restoration_started_at')
+make kube ARGS="shared-control logs deployment/control-reconciler '--since-time=$RESTORE_FROM' --timestamps=true --tail=20"
 ```
 
 Require `verified_and_restored`, both restoration flags true, and a successful
@@ -593,7 +576,7 @@ API restart, then apply the newest control version after reconnection.
 Start only after the preceding fault is restored. Save the current data response:
 
 ```bash
-api data:shared GET /tenants/shared-a > "$NOTES/outage-baseline.json"
+make api ARGS='data:shared GET /tenants/shared-a' > "$NOTES/outage-baseline.json"
 jq . "$NOTES/outage-baseline.json"
 ```
 
@@ -609,18 +592,20 @@ In the main terminal, select the owning journal:
 ```bash
 FAULT_SLOT=shared-data
 FAULT_COMPONENT=data-reconciler
-journal "$FAULT_SLOT" "$FAULT_COMPONENT" | jq '{slot, component, outcome, blocked_at, restored}'
+make fault-status ARGS="'$FAULT_SLOT' '$FAULT_COMPONENT'" | jq '{slot, component, outcome, blocked_at, restored}'
 ```
 
 Require `shared-data`, `data-reconciler`, and `blocked_verified`. Now data cannot
 read control PostgreSQL.
 
 ```bash
-api control:shared PUT /tenants/shared-a/configuration '{"message":"queued-first"}'
-api control:shared PUT /tenants/shared-a/configuration '{"message":"queued-latest"}'
-api control:shared GET /tenants/shared-a
-api data:shared GET /tenants/shared-a
-api data:shared POST /tenants/shared-a/counter
+printf '%s\n' '{"message":"queued-first"}' | \
+  make api ARGS='control:shared PUT /tenants/shared-a/configuration'
+printf '%s\n' '{"message":"queued-latest"}' | \
+  make api ARGS='control:shared PUT /tenants/shared-a/configuration'
+make api ARGS='control:shared GET /tenants/shared-a'
+make api ARGS='data:shared GET /tenants/shared-a'
+make api ARGS='data:shared POST /tenants/shared-a/counter'
 ```
 
 Control should report the latest version as `pending`. Data must keep returning
@@ -629,13 +614,11 @@ the baseline message/version while its counter still works.
 Replace only the data API while the link remains blocked:
 
 ```bash
-k shared-data get pods -l plane-demo/component=data-api \
-  -o custom-columns=NAME:.metadata.name,UID:.metadata.uid
-k shared-data rollout restart deployment/data-api
-k shared-data rollout status deployment/data-api --timeout=30s
-k shared-data get pods -l plane-demo/component=data-api \
-  -o custom-columns=NAME:.metadata.name,UID:.metadata.uid
-api data:shared GET /tenants/shared-a
+make kube ARGS='shared-data get pods -l plane-demo/component=data-api -o custom-columns=NAME:.metadata.name,UID:.metadata.uid'
+make kube ARGS='shared-data rollout restart deployment/data-api'
+make kube ARGS='shared-data rollout status deployment/data-api --timeout=30s'
+make kube ARGS='shared-data get pods -l plane-demo/component=data-api -o custom-columns=NAME:.metadata.name,UID:.metadata.uid'
+make api ARGS='data:shared GET /tenants/shared-a'
 ```
 
 Require a new Pod UID and the old applied message/version with the current
@@ -645,10 +628,10 @@ Do not replace the data reconciler during the fault; the helper checks its Pod i
 After restoration:
 
 ```bash
-journal "$FAULT_SLOT" "$FAULT_COMPONENT" | jq '{outcome, restored, physical_restored}'
-api control:shared GET /tenants/shared-a
-api data:shared GET /tenants/shared-a
-k shared-data get configmap tenant-shared-a -o json | jq .data
+make fault-status ARGS="'$FAULT_SLOT' '$FAULT_COMPONENT'" | jq '{outcome, restored, physical_restored}'
+make api ARGS='control:shared GET /tenants/shared-a'
+make api ARGS='data:shared GET /tenants/shared-a'
+make kube ARGS='shared-data get configmap tenant-shared-a -o json' | jq .data
 ```
 
 Require `queued-latest` and control `applied`. Both queued versions should have
@@ -671,7 +654,7 @@ the journal. If the process has stopped without confirmed restoration:
 ```bash
 make fault CONFIRM_AZURE=yes \
   ARGS="--slot $FAULT_SLOT --component $FAULT_COMPONENT --restore"
-journal "$FAULT_SLOT" "$FAULT_COMPONENT" | jq '{outcome, restored, physical_restored}'
+make fault-status ARGS="'$FAULT_SLOT' '$FAULT_COMPONENT'" | jq '{outcome, restored, physical_restored}'
 ```
 
 Do not use `kill -9`, replace the faulted reconciler, or delete its cluster to
@@ -734,9 +717,9 @@ Full `make verify-clean` is only appropriate after full cleanup.
 For any slot, inspect without dumping runtime Secrets:
 
 ```bash
-k shared-data get pods
-k shared-data logs deployment/data-reconciler --tail=40
-k shared-data get configmap tenant-shared-a -o json
+make kube ARGS='shared-data get pods'
+make kube ARGS='shared-data logs deployment/data-reconciler --tail=40'
+make kube ARGS='shared-data get configmap tenant-shared-a -o json'
 ```
 
 ## Automated checks
