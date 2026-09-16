@@ -1,0 +1,86 @@
+{
+  "layout": "plane-v2",
+  "deploymentActions": [
+    "Microsoft.Resources/subscriptions/resourceGroups/read",
+    "Microsoft.Resources/subscriptions/resources/read",
+    "Microsoft.Resources/deployments/read",
+    "Microsoft.Resources/deployments/write",
+    "Microsoft.Resources/deployments/delete",
+    "Microsoft.Resources/deployments/validate/action",
+    "Microsoft.Resources/deployments/operations/read",
+    "Microsoft.Resources/deployments/operationStatuses/read"
+  ],
+  "gatewayActions": [
+    "Microsoft.Network/applicationGateways/read",
+    "Microsoft.Network/applicationGateways/write",
+    "Microsoft.Network/applicationGateways/delete",
+    "Microsoft.Network/publicIPAddresses/read",
+    "Microsoft.Network/publicIPAddresses/write",
+    "Microsoft.Network/publicIPAddresses/delete",
+    "Microsoft.Network/publicIPAddresses/join/action",
+    "Microsoft.Network/locations/operations/read",
+    "Microsoft.Network/locations/operationResults/read"
+  ],
+  "roles": {
+    "postgresApplication": {
+      "purpose": "postgres-application",
+      "name": "PostgreSQL application provisioner",
+      "actions": [
+        "Microsoft.DBforPostgreSQL/flexibleServers/read",
+        "Microsoft.DBforPostgreSQL/flexibleServers/write",
+        "Microsoft.DBforPostgreSQL/flexibleServers/delete",
+        "Microsoft.DBforPostgreSQL/flexibleServers/databases/read",
+        "Microsoft.DBforPostgreSQL/flexibleServers/databases/write",
+        "Microsoft.DBforPostgreSQL/flexibleServers/databases/delete",
+        "Microsoft.DBforPostgreSQL/flexibleServers/configurations/read",
+        "Microsoft.DBforPostgreSQL/flexibleServers/configurations/write",
+        "Microsoft.DBforPostgreSQL/locations/operationResults/read",
+        "Microsoft.DBforPostgreSQL/locations/azureAsyncOperation/read"
+      ]
+    },
+    "redisApplication": {
+      "purpose": "redis-application",
+      "name": "Redis application provisioner",
+      "actions": [
+        "Microsoft.Cache/redisEnterprise/read",
+        "Microsoft.Cache/redisEnterprise/write",
+        "Microsoft.Cache/redisEnterprise/delete",
+        "Microsoft.Cache/redisEnterprise/databases/read",
+        "Microsoft.Cache/redisEnterprise/databases/write",
+        "Microsoft.Cache/redisEnterprise/databases/delete",
+        "Microsoft.Cache/redisEnterprise/databases/listKeys/action",
+        "Microsoft.Cache/redisEnterprise/databases/operationResults/read",
+        "Microsoft.Cache/redisEnterprise/operationResults/read",
+        "Microsoft.Cache/redisEnterprise/PrivateEndpointConnectionsApproval/action",
+        "Microsoft.Cache/redisEnterprise/privateLinkResources/read",
+        "Microsoft.Cache/redisEnterprise/privateEndpointConnections/read",
+        "Microsoft.Cache/redisEnterprise/privateEndpointConnections/write",
+        "Microsoft.Cache/locations/operationsStatus/read",
+        "Microsoft.Cache/locations/operationResults/read",
+        "Microsoft.Network/privateEndpoints/read",
+        "Microsoft.Network/privateEndpoints/write",
+        "Microsoft.Network/privateEndpoints/delete",
+        "Microsoft.Network/privateEndpoints/privateDnsZoneGroups/read",
+        "Microsoft.Network/privateEndpoints/privateDnsZoneGroups/write",
+        "Microsoft.Network/privateEndpoints/privateDnsZoneGroups/delete",
+        "Microsoft.Network/networkInterfaces/read",
+        "Microsoft.Network/networkInterfaces/write"
+      ],
+      "sources": [
+        "https://learn.microsoft.com/en-us/azure/role-based-access-control/permissions/databases",
+        "https://learn.microsoft.com/en-us/azure/role-based-access-control/permissions/networking",
+        "https://learn.microsoft.com/en-us/azure/role-based-access-control/permissions/containers",
+        "https://learn.microsoft.com/en-us/graph/api/serviceprincipal-list-transitivememberof?view=graph-rest-1.0",
+        "https://raw.githubusercontent.com/Azure/azure-rest-api-specs/main/specification/network/resource-manager/Microsoft.Network/Network/stable/2024-07-01/networkInterface.json"
+      ]
+    }
+  },
+  "clusterActions": [
+    "Microsoft.ContainerService/managedClusters/read",
+    "Microsoft.ContainerService/managedClusters/write",
+    "Microsoft.ContainerService/managedClusters/delete",
+    "Microsoft.ContainerService/locations/operations/read",
+    "Microsoft.ContainerService/locations/operationResults/read",
+    "Microsoft.ManagedIdentity/userAssignedIdentities/read"
+  ]
+}

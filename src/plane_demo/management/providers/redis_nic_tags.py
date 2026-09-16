@@ -103,7 +103,9 @@ class Target:
                 "redis_nic_input_invalid",
             )
             require(
-                target.resource_group == f"rg-{target.resource_prefix}-{target.slot}-app",
+                target.resource_group
+                == f"rg-{target.resource_prefix}-{target.slot}"
+                + ("-app" if target.resource_prefix == "radplanes" else ""),
                 "redis_nic_input_invalid",
             )
             prefix = f"/planes/radius/local/resourceGroups/{target.resource_prefix}/providers/"
@@ -332,16 +334,16 @@ def tag_nic(target: Target, arm: Arm, *, pause: Callable[[float], None] = time.s
         and same_id(interfaces[0].get("id"), nic_id)
     )
 
-    def read_nic() -> tuple[dict, dict]:
+    def read_nic() -> tuple[dict, dict, dict]:
         nic = arm.get(nic_id, "2024-07-01")
         props = check_resource(nic, nic_id, "Microsoft.Network/networkInterfaces", target)
         require(
             isinstance(props.get("privateEndpoint"), dict)
             and same_id(props["privateEndpoint"].get("id"), pe_id)
         )
-        return props, tag_values(nic.get("tags"))
+        return props, tag_values(nic.get("tags")), nic.get("tags") or {}
 
-    original_properties, existing = read_nic()
+    original_properties, existing, original_tags = read_nic()
     require(
         all(key not in existing or existing[key] == value for key, value in required.items()),
         "redis_nic_tag_conflict",
@@ -349,19 +351,25 @@ def tag_nic(target: Target, arm: Arm, *, pause: Callable[[float], None] = time.s
     result = {"cacheId": cache_id, "privateEndpointId": pe_id, "nicId": nic_id}
     if all(existing.get(key) == value for key, value in required.items()):
         return result
-    merge = {key: value for key, value in cache["tags"].items() if key.casefold() in required}
+    properties, current_tags, _ = read_nic()
+    require(
+        current_tags == existing
+        and network_properties(properties) == network_properties(original_properties),
+        "redis_nic_tag_conflict",
+    )
+    merged = {key: value for key, value in original_tags.items() if key.casefold() not in required}
+    merged.update(
+        {key: value for key, value in cache["tags"].items() if key.casefold() in required}
+    )
     arm.request(
         "PATCH",
-        nic_id + "/providers/Microsoft.Resources/tags/default",
-        "2021-04-01",
-        {
-            "operation": "Merge",
-            "properties": {"tags": merge},
-        },
+        nic_id,
+        "2024-07-01",
+        {"tags": merged},
     )
     expected = {**existing, **required}
     for attempt in range(3):
-        properties, verified = read_nic()
+        properties, verified, _ = read_nic()
         require(
             network_properties(properties) == network_properties(original_properties),
             "redis_nic_verification_failed",

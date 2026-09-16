@@ -13,7 +13,12 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from plane_demo.management.providers.identity import PUBLIC_KEYS, DemoConfig
+from plane_demo.management.providers.identity import (
+    AZURE_GROUP_LAYOUT,
+    IDENTITY_PURPOSES,
+    PUBLIC_KEYS,
+    DemoConfig,
+)
 from plane_demo.shared.db import PendingOperation
 
 SLUG = re.compile(r"[a-z][a-z0-9-]{0,47}")
@@ -144,6 +149,8 @@ class OperatorConfig:
             identity = identity or saved_identity
         foundation = data["foundation"]
         if identity is not None:
+            if foundation.get("resourceGroupLayout") != AZURE_GROUP_LAYOUT:
+                raise ValueError("unsupported resource group layout; use a fresh deployment")
             if identity.environment != "azure" or any(
                 foundation.get(key) != value
                 for key, value in {
@@ -190,11 +197,12 @@ class OperatorConfig:
                 name = identity.slot_name(slot)
                 expected_names = {
                     "clusterName": f"aks-{name}",
-                    "clusterResourceGroup": f"rg-{name}-cluster",
-                    "appResourceGroup": f"rg-{name}-app",
+                    "clusterResourceGroup": identity.plane_group(slot),
+                    "appResourceGroup": identity.plane_group(slot),
                     "namespace": identity.namespace(slot),
-                    "clusterResourceGroupId": prefix + f"rg-{name}-cluster",
-                    "appResourceGroupId": prefix + f"rg-{name}-app",
+                    "clusterResourceGroupId": identity.plane_group_id(slot),
+                    "appResourceGroupId": identity.plane_group_id(slot),
+                    "nodeResourceGroup": f"rg-{name}-nodes",
                 }
                 if any(allocation.get(key) != value for key, value in expected_names.items()):
                     raise ValueError("allocation does not match the selected deployment")
@@ -212,6 +220,14 @@ class OperatorConfig:
                 UUID(managed_identity["clientId"])
                 if not managed_identity["id"].startswith(prefix):
                     raise ValueError("identity is outside the configured subscription")
+            if identity is not None:
+                if set(allocation["identities"]) != set(IDENTITY_PURPOSES):
+                    raise ValueError("allocated identity purposes differ")
+                for key, purpose in IDENTITY_PURPOSES.items():
+                    selected = allocation["identities"][key]
+                    if selected["id"] != identity.managed_identity_id(slot, purpose):
+                        raise ValueError("identity does not match the selected plane")
+                    UUID(selected["principalId"])
             certificate_slot = f"{identity.stem}-{slot}" if identity else slot
             if (
                 allocation.get("certificateName") != f"gateway-{certificate_slot}"

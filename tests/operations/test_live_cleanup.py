@@ -80,6 +80,15 @@ class Platform:
             ]:
                 self.groups[name] = {"id": self.gid(name), "name": name, "tags": dict(self.tags)}
                 self.azure_resources[name] = []
+            for slot in shared.SLOTS:
+                for purpose in shared.IDENTITY_PURPOSES.values():
+                    self.azure_resources[self.group(slot, "plane")].append(
+                        {
+                            "id": config.managed_identity_id(slot, purpose),
+                            "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+                            "tags": dict(self.tags),
+                        }
+                    )
         for slot in slots:
             context = config.slot_name(slot)
             role = "management" if slot == "management" else slot.rsplit("-", 1)[1]
@@ -115,19 +124,29 @@ class Platform:
                     "tags": dict(self.tags),
                 }
                 self.clusters[slot] = cluster
-                self.azure_resources[self.group(slot, "cluster")] = [
+                self.azure_resources[self.group(slot, "cluster")] += [
                     {
                         "id": cluster["id"],
                         "type": "Microsoft.ContainerService/managedClusters",
                         "tags": dict(self.tags),
                     }
                 ]
-                self.azure_resources[self.group(slot, "app")] = [
+                gateway = self.add_resource(slot, role, slot, "Demo.Platform/gateways", "gateway")
+                gateway_id = (
+                    self.gid(self.group(slot, "app"))
+                    + "/providers/Microsoft.Network/applicationGateways/agw-abcdefghijklm"
+                )
+                gateway["properties"]["gatewayId"] = gateway_id
+                self.azure_resources[self.group(slot, "app")] += [
                     {
-                        "id": self.gid(self.group(slot, "app"))
-                        + "/providers/Microsoft.Network/applicationGateways/gateway",
+                        "id": gateway_id,
                         "type": "Microsoft.Network/applicationGateways",
-                        "tags": dict(self.tags),
+                        "tags": {
+                            **self.tags,
+                            "radapp.io-resource": gateway["id"],
+                            "radapp.io-application": gateway["properties"]["application"],
+                            "radapp.io-environment": gateway["properties"]["environment"],
+                        },
                     }
                 ]
         for slot in slots:
@@ -163,7 +182,7 @@ class Platform:
                     f"/subscriptions/{config.subscription}-{config.stem}-{value[0]}",
                 )
             )
-            for key, value in shared.ROLE_NAMES.items()
+            for key, value in shared.PLANE_ROLE_NAMES.items()
         }
         if config.environment == "azure":
             platform = f"rg-{config.stem}-platform"
@@ -171,13 +190,14 @@ class Platform:
                 scopes = (
                     [self.gid(platform), self.vault_id]
                     if key in {"certificateImporter", "acmeStateWriter"}
-                    else [self.gid(self.group(slot, "cluster")) for slot in shared.CHILDREN]
+                    else [self.gid(self.group(slot, "plane")) for slot in shared.role_slots(key)]
                 )
                 self.roles.append(
                     {
                         "id": identifier,
                         "roleType": "CustomRole",
-                        "roleName": config.stem + shared.ROLE_NAMES[key][1][len(shared.PROJECT) :],
+                        "roleName": config.stem
+                        + shared.PLANE_ROLE_NAMES[key][1][len(shared.PROJECT) :],
                         "assignableScopes": scopes,
                     }
                 )
@@ -218,7 +238,16 @@ class Platform:
         return f"/subscriptions/{self.config.subscription}/resourceGroups/{name}"
 
     def group(self, slot, kind):
-        return f"rg-{self.config.slot_name(slot)}-{kind}"
+        return f"rg-{self.config.slot_name(slot)}" + ("-nodes" if kind == "nodes" else "")
+
+    def remove_native(self, slot, *, apps=False):
+        group = self.group(slot, "plane")
+        self.azure_resources[group] = [
+            item
+            for item in self.azure_resources[group]
+            if item["type"] == "Microsoft.ManagedIdentity/userAssignedIdentities"
+            or (apps and item["type"] == "Microsoft.ContainerService/managedClusters")
+        ]
 
     def cluster_id(self, slot):
         return (
@@ -529,7 +558,7 @@ class Platform:
                 )
                 self.mutations.append(("management-aks", "management"))
                 del self.clusters["management"]
-                self.azure_resources[self.group("management", "cluster")] = []
+                self.remove_native("management")
                 value = None
             elif args[:2] == ["group", "delete"]:
                 name = args[args.index("--name") + 1]
@@ -554,6 +583,7 @@ class Platform:
                     "projectName": self.config.project,
                     "deploymentName": self.config.deployment,
                     "environment": "azure",
+                    "resourceGroupLayout": "plane-v2",
                     "resourcePrefix": self.config.stem,
                     "radiusResourceGroup": self.config.stem,
                     "subscriptionId": self.config.subscription,
@@ -628,7 +658,7 @@ class Platform:
                     "properties": {
                         "compute": {
                             "kind": "kubernetes",
-                            "namespace": f"{self.config.stem}-p-{child}"
+                            "namespace": shared.provisioning_namespace(self.config.stem, child)
                             if child
                             else self.config.namespace(slot),
                         },
@@ -674,7 +704,7 @@ class Platform:
                         and not name.startswith("cluster-")
                         and not (name == "management" and self.leave_management_app_resources)
                     ):
-                        self.azure_resources[self.group(slot, "app")] = []
+                        self.remove_native(slot, apps=True)
                 value = None
             else:
                 raise AssertionError(args)
@@ -929,7 +959,7 @@ class Platform:
                 }
                 self.clusters.pop(child, None)
                 if self.config.environment == "azure":
-                    self.azure_resources[self.group(child, "cluster")] = []
+                    self.remove_native(child)
             return {}, 202, {}
 
         from types import SimpleNamespace
@@ -993,6 +1023,53 @@ def test_normal_cleanup_obeys_radius_owners_without_saved_files(world):
         assert result["softDeletedVaults"] and result["purged"] is False
 
 
+@pytest.mark.parametrize("world", ["azure"], indirect=True)
+def test_radius_only_then_fresh_full_cleanup_retains_exact_foundation(world):
+    engine, platform, _ = world
+    assert engine.clean(radius_only=True)["status"] == "radius_resources_removed"
+    assert set(platform.clusters) == {"management"}
+    assert all(platform.group(slot, "plane") in platform.groups for slot in shared.SLOTS)
+    assert all(not engine.application_resources(slot) for slot in shared.SLOTS)
+    with pytest.raises(shared.CleanupError, match="groups remain"):
+        engine.verify()
+    fresh = shared.LiveAzureCleanup(
+        execute=True,
+        runner=platform,
+        clock=lambda: platform.clock,
+        sleep=lambda seconds: setattr(platform, "clock", platform.clock + seconds),
+    )
+    try:
+        assert fresh.clean()["status"] == "clean"
+    finally:
+        fresh.close()
+    deleted = [name for kind, name in platform.mutations if kind == "group"]
+    assert len(deleted) == len(set(deleted))
+
+
+@pytest.mark.parametrize("world", ["azure"], indirect=True)
+@pytest.mark.parametrize(
+    "kind,name",
+    [
+        ("Microsoft.ManagedIdentity/userAssignedIdentities", "unexpected"),
+        ("Microsoft.Network/applicationGateways", "agw-unowned"),
+        ("Microsoft.Resources/deployments", "unexpected"),
+    ],
+)
+def test_matching_group_tags_do_not_authorize_unowned_resources(world, kind, name):
+    engine, platform, _ = world
+    group = platform.group("shared-data", "plane")
+    platform.azure_resources[group].append(
+        {
+            "id": platform.gid(group) + "/providers/" + kind + "/" + name,
+            "type": kind,
+            "tags": dict(platform.tags),
+        }
+    )
+    with pytest.raises(shared.CleanupError, match="exact Radius owner"):
+        engine.clean()
+    assert not platform.mutations
+
+
 def failed_bootstrap(platform, state="Failed", outputs=None):
     config = platform.config
     return {
@@ -1030,23 +1107,25 @@ def remove_clusters_and_apps(platform):
 @pytest.mark.parametrize("world", ["azure"], indirect=True)
 @pytest.mark.parametrize("state", ["Failed", "Canceled"])
 @pytest.mark.parametrize("outputs", [None, {}, {"foundation": {"value": None}}])
-def test_partial_bootstrap_cleans_owned_foundation_without_radius(world, state, outputs):
+def test_partial_bootstrap_without_layout_proof_retains_resources(world, state, outputs):
     engine, platform, _ = world
     remove_clusters_and_apps(platform)
     platform.bootstrap_response = failed_bootstrap(platform, state, outputs)
     engine.execute = False
-    preview = engine.clean()
-    assert preview["status"] == "planned" and platform.mutations == []
-    engine.execute = True
-    assert engine.clean()["status"] == "clean"
+    for execute in (False, True):
+        engine.execute = execute
+        with pytest.raises(shared.CleanupError, match="verified plane-v2 outputs"):
+            engine.clean()
+    assert platform.mutations == []
     assert not any(argv[0] in {"rad", "kubectl", "bash"} for argv, _ in platform.calls)
-    assert engine.clean()["status"] == "clean"
 
 
 @pytest.mark.parametrize("world", ["azure"], indirect=True)
 def test_failed_bootstrap_rerun_still_deletes_existing_apps_through_radius(world):
     engine, platform, _ = world
-    platform.bootstrap_response = failed_bootstrap(platform)
+    response = engine.az("deployment", "sub", "show", "--name", platform.config.stem + "-bootstrap")
+    response["properties"]["provisioningState"] = "Failed"
+    platform.bootstrap_response = response
     assert engine.clean()["status"] == "clean"
     kinds = [kind for kind, _ in platform.mutations]
     assert kinds.index("app") < kinds.index("radius-child") < kinds.index("management-aks")
@@ -1086,7 +1165,7 @@ def test_partial_bootstrap_refuses_orphaned_nodes(world):
             "tags": platform.tags,
         }
     ]
-    with pytest.raises(shared.CleanupError, match="without their application/AKS owner"):
+    with pytest.raises(shared.CleanupError, match="verified plane-v2 outputs"):
         engine.clean()
     assert platform.mutations == []
 
@@ -1095,7 +1174,9 @@ def test_partial_bootstrap_refuses_orphaned_nodes(world):
 def test_bootstrap_restarting_between_inventory_and_delete_blocks_mutation(world):
     engine, platform, _ = world
     remove_clusters_and_apps(platform)
-    platform.bootstrap_response = failed_bootstrap(platform)
+    platform.bootstrap_response = engine.az(
+        "deployment", "sub", "show", "--name", platform.config.stem + "-bootstrap"
+    )
     reads = 0
 
     def runner(argv, **kwargs):
@@ -1115,8 +1196,8 @@ def test_bootstrap_restarting_between_inventory_and_delete_blocks_mutation(world
 @pytest.mark.parametrize(
     "target,confirmed,expected",
     [
-        ("clean-plan", False, "planned"),
-        ("clean-azure", True, "clean"),
+        ("clean-plan", False, None),
+        ("clean-azure", True, None),
         ("clean-azure", False, None),
     ],
 )
@@ -1173,7 +1254,11 @@ def test_real_make_cleanup_path_handles_null_outputs_offline(tmp_path, target, c
         assert json.loads(result.stdout)["status"] == expected
         assert "\033[" in result.stderr and "\033" not in result.stdout
     else:
-        assert "CONFIRM_AZURE" in result.stderr
+        assert (
+            "verified plane-v2 outputs" in result.stderr
+            if target == "clean-plan" or confirmed
+            else "CONFIRM_AZURE" in result.stderr
+        )
     assert "Traceback" not in result.stderr
 
 
@@ -1494,9 +1579,9 @@ def test_radius_only_checks_management_provider_resource_absence_before_success(
     if remaining_type:
         platform.leave_management_app_resources = True
         identifier = platform.gid(group) + "/providers/" + remaining_type + "/leftover"
-        platform.azure_resources[group] = [
+        platform.azure_resources[group].append(
             {"id": identifier, "type": remaining_type, "tags": dict(platform.tags)}
-        ]
+        )
     result = shared.main(["--radius-only", "--execute"], engine_factory=lambda **_: engine)
     output = capsys.readouterr()
     if remaining_type:

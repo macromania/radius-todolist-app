@@ -106,6 +106,38 @@ class CompiledInfrastructureTests(unittest.TestCase):
     def test_bootstrap_has_no_unbound_copy_indices(self):
         assert_bound_copy_indices(self.bootstrap)
 
+    def test_one_plane_group_collection_replaces_both_old_scopes(self):
+        groups = [
+            item
+            for item in resources(self.bootstrap)
+            if item["type"] == "Microsoft.Resources/resourceGroups"
+        ]
+        self.assertEqual(len(groups), 2)
+        planes = next(item for item in groups if "copy" in item)
+        self.assertEqual(planes["copy"]["name"], "planeGroups")
+        self.assertNotIn("-cluster", planes["name"])
+        self.assertNotIn("-app", planes["name"])
+        self.assertEqual(len(self.bootstrap["parameters"]["childSlots"]["defaultValue"]), 4)
+        loaded = next(
+            value for value in self.bootstrap["variables"].values()
+            if isinstance(value, dict) and value.get("layout") == "plane-v2"
+        )
+        self.assertEqual(loaded["layout"], "plane-v2")
+        self.assertNotIn("contributor", self.bootstrap["variables"])
+        modules = {
+            item.get("copy", {}).get("name", item["name"]): item
+            for item in resources(self.bootstrap)
+            if item["type"] == "Microsoft.Resources/deployments"
+        }
+        self.assertEqual(
+            modules["appAccess"]["resourceGroup"], modules["clusterAccess"]["resourceGroup"]
+        )
+        assignments = modules["appAccess"]["properties"]["parameters"]["assignments"]["value"]
+        self.assertEqual(len(assignments), 1)
+        self.assertIn("postgresApplication.purpose", assignments[0]["roleDefinitionGuid"])
+        self.assertIn("redisApplication.purpose", assignments[0]["roleDefinitionGuid"])
+        self.assertIn("applicationRoles", modules["appAccess"]["dependsOn"])
+
     def test_checker_rejects_the_reported_management_reference_regression(self):
         invalid = copy.deepcopy(self.bootstrap)
         management = next(
@@ -133,9 +165,9 @@ class CompiledInfrastructureTests(unittest.TestCase):
             with self.subTest(module=module["name"]):
                 self.assertEqual(
                     module["resourceGroup"],
-                    "[format('rg-{0}-management-cluster', variables('prefix'))]",
+                    "[format('rg-{0}-management', variables('prefix'))]",
                 )
-                self.assertIn("clusterGroups", module["dependsOn"])
+                self.assertIn("planeGroups", module["dependsOn"])
                 body = {key: value for key, value in module.items() if key != "properties"}
                 self.assertNotRegex(json.dumps(body), BARE_COPY_INDEX)
         for key in ("coordinatorIdentity", "managementCluster"):
@@ -164,7 +196,7 @@ class CompiledInfrastructureTests(unittest.TestCase):
             "[format('system:serviceaccount:{0}-{1}-{2}-management-management:harness', "
             "parameters('projectName'), parameters('deploymentName'), parameters('environment'))]",
         )
-        for name in ("appAccess", "harness-platform-read"):
+        for name in ("harness-platform-read",):
             assignments = modules[name]["properties"]["parameters"]["assignments"]["value"]
             harness = [a for a in assignments if "'harness-identity'" in a["principalId"]]
             self.assertEqual(len(harness), 1)
@@ -191,8 +223,7 @@ class CompiledInfrastructureTests(unittest.TestCase):
         )
         self.assertEqual(
             module["resourceGroup"],
-            "[format('rg-{0}-{1}-cluster', variables('prefix'), "
-            "parameters('childSlots')[copyIndex()])]",
+            "[format('rg-{0}-{1}', variables('prefix'), parameters('childSlots')[copyIndex()])]",
         )
         management_id = module["properties"]["parameters"]["managementRadiusPrincipalId"]["value"]
         self.assertNotIn("copyIndex", management_id)

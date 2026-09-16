@@ -158,6 +158,7 @@ def selected_config(raw_config):
             "projectName": identity.project,
             "deploymentName": identity.deployment,
             "environment": "azure",
+            "resourceGroupLayout": "plane-v2",
             "resourcePrefix": identity.stem,
             "radiusResourceGroup": identity.stem,
             "location": identity.location,
@@ -171,10 +172,11 @@ def selected_config(raw_config):
         allocation.update(
             {
                 "clusterName": f"aks-{name}",
-                "clusterResourceGroup": f"rg-{name}-cluster",
-                "appResourceGroup": f"rg-{name}-app",
-                "clusterResourceGroupId": PREFIX + f"rg-{name}-cluster",
-                "appResourceGroupId": PREFIX + f"rg-{name}-app",
+                "clusterResourceGroup": f"rg-{name}",
+                "appResourceGroup": f"rg-{name}",
+                "clusterResourceGroupId": PREFIX + f"rg-{name}",
+                "appResourceGroupId": PREFIX + f"rg-{name}",
+                "nodeResourceGroup": f"rg-{name}-nodes",
                 "namespace": identity.namespace(slot),
                 "certificateName": f"gateway-{name}",
                 "acmeStateSecretName": f"acme-{name}",
@@ -183,6 +185,16 @@ def selected_config(raw_config):
                 ),
             }
         )
+        for key, purpose in {
+            "radius": "radius",
+            "gateway": "gateway",
+            "controlPlane": "control-plane",
+            "kubelet": "kubelet",
+            "certificateIssuer": "certificate-issuer",
+        }.items():
+            allocation["identities"][key].update(
+                id=identity.managed_identity_id(slot, purpose), principalId=CLIENT
+            )
     for recipe in raw_config["recipes"].values():
         recipe["reference"] = recipe["reference"].replace(
             old_registry, foundation["registryLoginServer"]

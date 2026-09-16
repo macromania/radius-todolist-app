@@ -517,7 +517,7 @@ class LiveConfiguration:
             else:
                 cluster_id = (
                     f"/subscriptions/{self.config.subscription}/resourceGroups/"
-                    f"rg-{context}-cluster/providers/Microsoft.ContainerService/"
+                    f"rg-{context}/providers/Microsoft.ContainerService/"
                     f"managedClusters/aks-{context}"
                 )
             target = Target(
@@ -665,7 +665,7 @@ class LiveConfiguration:
             else:
                 expected_server = (
                     f"/subscriptions/{self.config.subscription}/resourceGroups/"
-                    f"rg-{self.config.slot_name(parent_slot)}-app/providers/"
+                    f"rg-{self.config.slot_name(parent_slot)}/providers/"
                     "Microsoft.DBforPostgreSQL/flexibleServers/"
                 )
                 require(

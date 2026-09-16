@@ -121,6 +121,7 @@ else: raise SystemExit("unexpected tool")
 def checkout(tmp_path):
     for relative in (
         "scripts/lib/output.sh",
+        "scripts/lib/progress.sh",
         "scripts/lib/env.sh",
         "scripts/lib/discovery.sh",
         "scripts/operations/endpoints.sh",
@@ -174,7 +175,7 @@ def configure(root, environment, slot="management", mode=None):
         if environment == "azure"
         else f"http://127.0.0.1:{35490 + index}",
         "aks_id": (
-            f"/subscriptions/{values.get('AZURE_SUBSCRIPTION_ID')}/resourceGroups/rg-{name}-cluster"
+            f"/subscriptions/{values.get('AZURE_SUBSCRIPTION_ID')}/resourceGroups/rg-{name}"
             f"/providers/Microsoft.ContainerService/managedClusters/aks-{name}"
         ),
         "api_key": 'synthetic-key-with-\\-and-"-' + "x" * 40,

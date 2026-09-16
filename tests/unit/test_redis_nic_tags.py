@@ -117,19 +117,13 @@ class Azure:
         assert "listKeys" not in request.url.path
         path = request.url.path
         if request.method == "PATCH":
-            assert path == self.nic_id + "/providers/Microsoft.Resources/tags/default"
-            assert request.url.params["api-version"] == "2021-04-01"
+            assert path == self.nic_id
+            assert request.url.params["api-version"] == "2024-07-01"
             body = json.loads(request.content)
             self.patches.append(body)
-            assert body["operation"] == "Merge"
-            assert set(body) == {"operation", "properties"}
-            assert set(body["properties"]) == {"tags"}
+            assert set(body) == {"tags"}
             if not self.ignore_patch:
-                for key, value in body["properties"]["tags"].items():
-                    for old in list(self.nic["tags"]):
-                        if old.casefold() == key.casefold():
-                            del self.nic["tags"][old]
-                    self.nic["tags"][key] = value
+                self.nic["tags"] = dict(body["tags"])
             if self.change_properties:
                 self.nic["properties"]["enableIPForwarding"] = True
             if self.change_etag:
@@ -175,6 +169,7 @@ def test_selected_project_scope_and_region_are_checked_on_the_real_tagging_path(
     for key in ("resource_group", "subnet_id", "resource_id", "environment_id", "application_id"):
         target_data[key] = target_data[key].replace("radplanes", prefix)
     target_data.update(project_name="sample", resource_prefix=prefix, location="northeurope")
+    target_data["resource_group"] = target_data["resource_group"].removesuffix("-app")
     target_data["tags"]["project"] = "sample"
     azure = Azure(metadata.Target.parse(target_data))
     for resource in (azure.cache, azure.pe, azure.nic):
@@ -215,6 +210,25 @@ def test_verified_merge_preserves_other_tags_and_network_properties_and_is_idemp
     assert azure.requests[-1].method == "GET" and azure.requests[-1].url.path == azure.nic_id
     assert azure.run() == result
     assert len(azure.patches) == 1
+
+
+def test_concurrent_tag_change_before_patch_is_not_overwritten(azure):
+    original = azure.handle
+    reads = 0
+
+    def concurrent(request):
+        nonlocal reads
+        if request.method == "GET" and request.url.path == azure.nic_id:
+            reads += 1
+            if reads == 2:
+                azure.nic["tags"]["other-writer"] = "retained"
+        return original(request)
+
+    azure.handle = concurrent
+    with pytest.raises(ProvisioningError, match="redis_nic_tag_conflict"):
+        azure.run()
+    assert not azure.patches
+    assert azure.nic["tags"]["other-writer"] == "retained"
 
 
 @pytest.mark.parametrize(

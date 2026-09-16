@@ -41,6 +41,28 @@ an isolated tenant gets another pair. Reconciler processes poll their parent
 databases and report local progress. An API request does not push configuration
 through all three planes.
 
+### Azure resource groups
+
+Bootstrap creates six groups with the prefix `rg-<project>-<deployment>-azure-`:
+
+| Suffix | Resources |
+|---|---|
+| `platform` | Shared networking, registry, private DNS and default Key Vault |
+| `management` | Management AKS, managed identities, PostgreSQL and Application Gateway |
+| `shared-control`, `isolated-1-control` | Each control instance's AKS, identities, PostgreSQL and Application Gateway |
+| `shared-data`, `isolated-1-data` | Each data instance's AKS, identities, Redis, private endpoint and Application Gateway |
+
+AKS adds a separate `*-nodes` group per cluster. The complete demo has eleven
+groups, including node groups. The six bootstrap groups reserve permissions
+upfront; their existence does not mean all five clusters are running.
+
+Management Radius still owns child clusters. Each child's Radius owns its
+applications. Management/control application roles permit PostgreSQL and gateway
+operations; data application roles permit Redis, gateway, private-endpoint and
+NIC operations. These roles cannot manage AKS, replace identities, grant roles
+or delete groups. Identity attachment and federation retain separate,
+resource-scoped grants.
+
 | Check | Meaning |
 |---|---|
 | Management `onboarding_status: ready` | Control created the tenant record |
@@ -111,10 +133,19 @@ unrestricted writer grant. If your subscription roles require PIM activation,
 activate them before running the demo. Role assignment conditions must permit
 the demo's grants, even when your role is Owner.
 
+The grant check also needs Microsoft Graph **Application.Read.All** or an
+equivalent delegated permission to read the Radius identities' group memberships.
+Azure Owner does not grant this Graph permission. If your tenant blocks the
+read, ask its administrator to review access; the demo will not bypass the check.
+
 This is the simple administrative setup for the full demo, not a least-privilege
 production configuration. Use a dedicated demo subscription or temporary access.
 
 ### Select deployment identity
+
+Use a **new deployment name** for this layout. Existing `*-cluster` / `*-app`
+deployments are not migrated. Keep their matching checkout and private `.env`
+for operation and cleanup. The new command path rejects old or mixed layouts.
 
 Choose the subscription and a short project/deployment name:
 
@@ -191,6 +222,20 @@ not repeated deployment attempts.
 
 Checkpoint: bootstrap completed and management AKS and Radius exist. The
 management application and tenant clusters have not been deployed yet.
+
+Bootstrap and subsequent build/deployment commands check the five Radius
+identities' grants, including inherited and group-based assignments. Missing
+reads, unexpected grants or changed custom roles fail explicitly. These are
+point-in-time grant checks, not a substitute for the manual scenarios.
+
+The consolidated layout still needs a fresh manual end-to-end run. In particular,
+verify that the Redis NIC metadata Job completes under the data Radius identity,
+preserves existing tags and changes no network settings. It uses the pinned
+network-interface tag PATCH API, not generic group-wide tag permission. Azure
+NIC write permission is not tag-only permission, and this API does not document
+an atomic merge guarantee; do not run concurrent NIC tag writers during the demo.
+If it fails, inspect the error rather than granting Contributor or broad tag
+access.
 
 ### Build and inspect artifacts
 
@@ -748,9 +793,13 @@ reset database rows to force cleanup.
 
 ### After a failed bootstrap
 
-Failed or canceled ARM deployments may have null or missing outputs. Cleanup
-validates their deployment identity and parameters, then inspects current owners
-instead of assuming that missing outputs mean no resources exist:
+Failed or canceled ARM deployments may have null or missing outputs. The
+consolidated layout requires verified `plane-v2` outputs before retrying bootstrap
+or authorizing cleanup. Missing outputs do not mean no resources exist. Retain
+those resources and inspect the failed operation rather than adopting them from
+names or tags alone.
+
+When complete layout outputs are available, preview owner-ordered cleanup:
 
 ```bash
 make clean-plan
@@ -758,14 +807,11 @@ make clean-azure CONFIRM_AZURE=yes
 make verify-clean
 ```
 
-With no clusters or applications, cleanup can remove verified partial foundation
-resources. Orphaned node/app resources, mismatched metadata, and active deployments
-block deletion with an explanation. A non-ready management AKS or unavailable
-Radius owner is retained for investigation, not deleted through a fallback.
-A failed bootstrap rerun with existing applications still uses normal Radius
-cleanup. External vaults and their retained objects remain protected. Cleanup
-rechecks the bootstrap record before Azure mutations and never reports clean
-until active-resource absence is verified.
+Orphaned resources, mismatched metadata, and active deployments block deletion.
+A non-ready management AKS or unavailable Radius owner is retained for
+investigation, not deleted through a fallback. External vaults and their objects
+remain protected. Cleanup rechecks the bootstrap record before Azure mutations
+and never reports clean until active-resource absence is verified.
 
 ### Optional: retain the foundation
 
@@ -779,6 +825,9 @@ CONFIRM_AZURE=yes uv run --no-sync python scripts/operations/clean-azure.py --ra
 
 Its success is `radius_resources_removed`, not a clean whole environment.
 Full `make verify-clean` is only appropriate after full cleanup.
+Plane groups and their preallocated identities remain after radius-only cleanup.
+The cleaner checks application-resource absence separately from those retained
+resources; it does not require an empty plane group.
 
 ## Troubleshooting
 

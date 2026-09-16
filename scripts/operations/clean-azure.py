@@ -22,6 +22,15 @@ from plane_demo.management.provisioning import ProvisioningError
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+from plane_demo.management.providers.identity import (  # noqa: E402
+    AZURE_GROUP_LAYOUT,
+    IDENTITY_PURPOSES,
+    provisioning_namespace,
+)
+from scripts.operations.azure.plane_policy import (  # noqa: E402
+    ROLE_NAMES as PLANE_ROLE_NAMES,
+)
+from scripts.operations.azure.plane_policy import role_slots  # noqa: E402
 from scripts.operations.config import ConfigError, load_config  # noqa: E402
 from scripts.operations.output import progress, run_main, status  # noqa: E402
 
@@ -1200,7 +1209,7 @@ class LiveClusterCleanup:
             namespaces = (
                 {self.config.slot_name(slot), self.config.namespace(slot)}
                 if name == role
-                else {f"{self.config.stem}-p-{name.removeprefix('cluster-')}"}
+                else {provisioning_namespace(self.config.stem, name.removeprefix("cluster-"))}
             )
             require(
                 compute["kind"] == "kubernetes" and compute["namespace"] in namespaces,
@@ -1520,7 +1529,7 @@ class LiveAzureCleanup(LiveClusterCleanup):
         super().__init__(environment="azure", **kwargs)
         self.platform = f"rg-{self.config.stem}-platform"
         self.groups = [self.platform] + [
-            self.group_name(slot, kind) for slot in SLOTS for kind in ("app", "cluster", "nodes")
+            self.group_name(slot, kind) for slot in SLOTS for kind in ("plane", "nodes")
         ]
         require(
             not any(name.startswith("rg-todolist-") for name in self.groups),
@@ -1535,7 +1544,7 @@ class LiveAzureCleanup(LiveClusterCleanup):
                     f"/subscriptions/{self.config.subscription}-{self.config.stem}-{value[0]}",
                 )
             )
-            for key, value in ROLE_NAMES.items()
+            for key, value in PLANE_ROLE_NAMES.items()
         }
         self.vault_id = (
             self.gid(self.platform)
@@ -1547,13 +1556,13 @@ class LiveAzureCleanup(LiveClusterCleanup):
         self.external = None
         self.group_resources = {}
         self.bootstrap_record = None
-        self.partial_foundation = False
 
     def gid(self, name):
         return f"/subscriptions/{self.config.subscription}/resourceGroups/{name}"
 
     def group_name(self, slot, kind):
-        return f"rg-{self.config.slot_name(slot)}-{kind}"
+        require(kind in {"plane", "app", "cluster", "nodes"}, "Unknown group role")
+        return self.config.plane_group(slot) + ("-nodes" if kind == "nodes" else "")
 
     def cluster_id(self, slot):
         return self.gid(self.group_name(slot, "cluster")) + (
@@ -1747,68 +1756,15 @@ class LiveAzureCleanup(LiveClusterCleanup):
                 "Bootstrap allocations output is malformed",
             )
         if outputs.get("foundation") is None or outputs.get("allocations") is None:
-            require(
-                properties["provisioningState"] in {"Failed", "Canceled"},
-                "Succeeded bootstrap has missing outputs; ownership must be investigated",
+            raise CleanupError(
+                "Bootstrap lacks verified plane-v2 outputs; "
+                "resources retained for operator recovery"
             )
-            expected = {
-                "projectName": self.config.project,
-                "deploymentName": self.config.deployment,
-                "environment": "azure",
-                "location": self.config.location,
-                "registryName": self.config.registry_name,
-                "vaultName": self.config.vault_name,
-                "deploymentHash": self.config.identity_hash,
-                "externalVaultResourceGroup": self.external["resourceGroup"]
-                if self.external
-                else "",
-            }
-            parameters = properties.get("parameters")
-            require(
-                same_id(
-                    value.get("id"),
-                    f"/subscriptions/{self.config.subscription}"
-                    f"/providers/Microsoft.Resources/deployments/{self.config.stem}-bootstrap",
-                )
-                and isinstance(parameters, dict)
-                and all(
-                    isinstance(parameters.get(key), dict) and parameters[key].get("value") == wanted
-                    for key, wanted in expected.items()
-                ),
-                "Incomplete bootstrap identity or parameters differ; resources retained",
-            )
-            partial = outputs.get("foundation") or {}
-            for key, wanted in {
-                "projectName": self.config.project,
-                "deploymentName": self.config.deployment,
-                "environment": "azure",
-                "resourcePrefix": self.config.stem,
-                "subscriptionId": self.config.subscription,
-                "vaultId": self.vault_id,
-                "vaultOwned": self.config.key_vault is None,
-                "roleDefinitionIds": self.roles,
-            }.items():
-                require(
-                    key not in partial or partial[key] == wanted,
-                    "Incomplete bootstrap outputs contradict the selected identity",
-                )
-            for item in outputs.get("allocations") or []:
-                slot = item["slot"]
-                require(
-                    item.get("clusterName") == "aks-" + self.config.slot_name(slot)
-                    and item.get("appResourceGroup") == self.group_name(slot, "app")
-                    and item.get("clusterResourceGroup") == self.group_name(slot, "cluster")
-                    and item.get("nodeResourceGroup") == self.group_name(slot, "nodes"),
-                    "Incomplete bootstrap allocations contradict the selected identity",
-                )
-            self.partial_foundation = True
-            self.bootstrap_record = record
-            status(
-                "warning",
-                "Bootstrap has no complete outputs; validating live owners before partial cleanup",
-            )
-            return
         foundation = outputs["foundation"]
+        require(
+            foundation.get("resourceGroupLayout") == AZURE_GROUP_LAYOUT,
+            "Unsupported resource group layout; use its matching checkout for cleanup",
+        )
         require(isinstance(foundation, dict), "Bootstrap foundation output is malformed")
         require(
             foundation.get("projectName") == self.config.project
@@ -1887,7 +1843,7 @@ class LiveAzureCleanup(LiveClusterCleanup):
         }
         for group in self.groups:
             resources = self.group(group) or []
-            if group.endswith(("-app", "-nodes")):
+            if group.endswith("-nodes"):
                 require(
                     not resources,
                     f"Resources remain without their application/AKS owner: {group}; retained",
@@ -1922,7 +1878,7 @@ class LiveAzureCleanup(LiveClusterCleanup):
                         f"Unexpected partial-bootstrap resource identity: {item['id']}; retained",
                     )
                 elif kind == "microsoft.managedidentity/userassignedidentities":
-                    slot = group.removeprefix(f"rg-{prefix}-").removesuffix("-cluster")
+                    slot = group.removeprefix(f"rg-{prefix}-")
                     require(
                         item["id"].rsplit("/", 1)[-1]
                         in {
@@ -1934,7 +1890,12 @@ class LiveAzureCleanup(LiveClusterCleanup):
                                 "gateway",
                                 "certificate-issuer",
                             )
-                        },
+                        }
+                        | (
+                            {f"id-{prefix}-coordinator", f"id-{prefix}-harness"}
+                            if slot == "management"
+                            else set()
+                        ),
                         "Unexpected partial-bootstrap cluster identity; retained",
                     )
 
@@ -1968,11 +1929,12 @@ class LiveAzureCleanup(LiveClusterCleanup):
             expected_scopes = (
                 {self.gid(self.platform).lower(), self.vault_id.lower()}
                 if key in {"certificateImporter", "acmeStateWriter"}
-                else {self.gid(self.group_name(slot, "cluster")).lower() for slot in CHILDREN}
+                else {self.gid(self.group_name(slot, "plane")).lower() for slot in role_slots(key)}
             )
             require(
                 value.get("roleType") == "CustomRole"
-                and value.get("roleName") == self.config.stem + ROLE_NAMES[key][1][len(PROJECT) :]
+                and value.get("roleName")
+                == self.config.stem + PLANE_ROLE_NAMES[key][1][len(PROJECT) :]
                 and {scope.lower() for scope in value["assignableScopes"]} == expected_scopes,
                 "Custom role ownership or scopes differ",
             )
@@ -2080,23 +2042,135 @@ class LiveAzureCleanup(LiveClusterCleanup):
 
     def preflight_dependencies(self, clusters, owners):
         for slot in SLOTS:
+            resources = self.application_resources(slot)
             require(
-                slot in clusters or not self.group_resources[self.group_name(slot, "app")],
+                slot in clusters or not resources,
                 "App resources lack a reachable Radius owner",
             )
-            if self.group_resources[self.group_name(slot, "app")]:
+            if resources:
                 role = "management" if slot == "management" else slot.rsplit("-", 1)[1]
                 require(
                     any(app["name"] == role for app in self.inventories[slot]["apps"]),
                     f"{slot}: app resources have no Radius application owner",
                 )
+                self.validate_application_resources(slot, resources)
+
+    def application_resources(self, slot):
+        """Only exact bootstrap resources may survive application deletion."""
+        resources = self.group(self.group_name(slot, "plane")) or []
+        identities = {
+            self.config.managed_identity_id(slot, purpose).lower()
+            for purpose in IDENTITY_PURPOSES.values()
+        }
+        if slot == "management":
+            identities.update(
+                self.config.managed_identity_id(slot, purpose).lower()
+                for purpose in ("coordinator", "harness")
+            )
+        cluster_present = any(same_id(item["id"], self.cluster_id(slot)) for item in resources)
+        federation = {
+            self.config.managed_identity_id(slot, "radius")
+            + "/federatedIdentityCredentials/radius-"
+            + account
+            for account in ("applications-rp", "bicep-de", "ucp", "dynamic-rp")
+        } | {
+            self.config.managed_identity_id(slot, "certificate-issuer")
+            + "/federatedIdentityCredentials/certificate-issuer"
+        }
+        if slot == "management":
+            federation |= {
+                self.config.managed_identity_id(slot, purpose)
+                + "/federatedIdentityCredentials/"
+                + name
+                for purpose, name in (("coordinator", "coordinator"), ("harness", "demo-harness"))
+            }
+        retained = identities | (
+            {value.lower() for value in federation} if cluster_present else set()
+        )
+        result = []
+        for resource in resources:
+            identifier, kind = resource["id"].lower(), resource["type"].lower()
+            if identifier in retained:
+                require(
+                    kind == "microsoft.managedidentity/userassignedidentities"
+                    or kind
+                    == (
+                        "microsoft.managedidentity/userassignedidentities/"
+                        "federatedidentitycredentials"
+                    ),
+                    "Bootstrap resource type differs",
+                )
+                continue
+            if same_id(identifier, self.cluster_id(slot)):
+                require(
+                    kind == "microsoft.containerservice/managedclusters", "Cluster type differs"
+                )
+                continue
+            # ARM group resource listings exclude deployments and role assignments.
+            # If an API starts returning them, retain them for explicit investigation.
+            result.append(resource)
+        return result
+
+    def validate_application_resources(self, slot, resources):
+        expected = {}
+        group = self.config.plane_group_id(slot) + "/providers/"
+        for owner in self.inventories[slot]["resources"]:
+            props, kind = owner["properties"], owner["type"].lower()
+            roots = []
+            if kind == "demo.platform/gateways" and props.get("gatewayId"):
+                gateway = props["gatewayId"]
+                require(
+                    gateway.startswith(group + "Microsoft.Network/applicationGateways/agw-"),
+                    "Gateway owner points outside its plane",
+                )
+                suffix = gateway.rsplit("/agw-", 1)[1]
+                roots = [gateway, group + "Microsoft.Network/publicIPAddresses/pip-" + suffix]
+            elif kind == "demo.platform/postgresqldatabases" and props.get("serverId"):
+                server = props["serverId"]
+                require(
+                    server.startswith(group + "Microsoft.DBforPostgreSQL/flexibleServers/pg-"),
+                    "PostgreSQL owner points outside its plane",
+                )
+                roots = [server, server + "/configurations/require_secure_transport"]
+                database = props.get("databaseName") or props.get("database")
+                if isinstance(database, str) and SLUG.fullmatch(database):
+                    roots.append(server + "/databases/" + database)
+            elif kind == "applications.datastores/rediscaches" and props.get("host"):
+                name = props["host"].split(".", 1)[0]
+                require(bool(re.fullmatch(r"amr-[a-z0-9]{13}", name)), "Redis owner name differs")
+                cache = group + "Microsoft.Cache/redisEnterprise/" + name
+                endpoint = group + "Microsoft.Network/privateEndpoints/pe-" + name
+                roots = [
+                    cache,
+                    cache + "/databases/default",
+                    endpoint,
+                    endpoint + "/privateDnsZoneGroups/default",
+                    group + "Microsoft.Network/networkInterfaces/nic-" + name,
+                ]
+            for identifier in roots:
+                require(identifier.lower() not in expected, "Duplicate native resource owner")
+                expected[identifier.lower()] = owner
+        for resource in resources:
+            owner = expected.get(resource["id"].lower())
+            require(
+                owner is not None,
+                f"Application resource has no exact Radius owner: {resource['id']}",
+            )
+            if resource["type"].lower() not in UNTAGGABLE:
+                tags = resource.get("tags") or {}
+                for key, value in {
+                    "radapp.io-resource": owner["id"],
+                    "radapp.io-application": owner["properties"]["application"],
+                    "radapp.io-environment": owner["properties"]["environment"],
+                }.items():
+                    require(same_id(tags.get(key), value), "Application owner tags differ")
 
     def child_apps_absent(self, slot):
         require(
             not self.rows(self.rad(slot, "app", "list")) and not self.native_resources(slot),
             "Child Radius workloads remain",
         )
-        remaining = self.group(self.group_name(slot, "app"))
+        remaining = self.application_resources(slot)
         require(
             not remaining,
             "Radius left app resources; direct deletion is forbidden: "
@@ -2112,8 +2186,6 @@ class LiveAzureCleanup(LiveClusterCleanup):
             self.sleep(3)
 
     def delete_group(self, name):
-        if self.partial_foundation and not self.targets:
-            self.partial_without_clusters()
         resources = self.group(name)
         if resources is None:
             return
@@ -2125,6 +2197,11 @@ class LiveAzureCleanup(LiveClusterCleanup):
                 ),
                 "A cluster remains; group deletion would bypass its owner",
             )
+            slot = next((slot for slot in SLOTS if self.group_name(slot, "plane") == name), None)
+            if slot is not None:
+                require(
+                    not self.application_resources(slot), "Unowned or application resources remain"
+                )
         self.note("bootstrap-group", name)
         if self.execute:
             self.az("group", "delete", "--name", name, "--yes", mutation=True)
@@ -2144,15 +2221,14 @@ class LiveAzureCleanup(LiveClusterCleanup):
         clusters = self.clusters()
         if not clusters:
             require(
-                not any(self.group_resources[self.group_name(slot, "app")] for slot in SLOTS),
+                not any(self.application_resources(slot) for slot in SLOTS),
                 "App resources remain without Radius; normal cleanup cannot bypass it",
             )
-            if self.partial_foundation:
-                self.partial_without_clusters()
+            self.partial_without_clusters()
         status("section", "Cleanup: remove applications and children through Radius")
         self.clean_radius(clusters)
         if self.execute:
-            remaining = self.group(self.group_name("management", "app"))
+            remaining = self.application_resources("management")
             require(
                 not remaining,
                 "Radius left management app resources: "
@@ -2166,10 +2242,8 @@ class LiveAzureCleanup(LiveClusterCleanup):
             }
         status("section", "Cleanup: remove owned foundation resources")
         for slot in CHILDREN:
-            self.delete_group(self.group_name(slot, "app"))
-            self.delete_group(self.group_name(slot, "cluster"))
+            self.delete_group(self.group_name(slot, "plane"))
             self.delete_group(self.group_name(slot, "nodes"))
-        self.delete_group(self.group_name("management", "app"))
         if "management" in clusters:
             self.note("bootstrap-management-aks", self.cluster_id("management"))
             if self.execute:

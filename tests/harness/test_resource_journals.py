@@ -121,7 +121,7 @@ class FaultCommands(NativeCommands):
                 if self.config.environment == "local"
                 else (
                     f"/subscriptions/{self.config.subscription}/resourceGroups/"
-                    f"rg-{self.config.slot_name(slot)}-app/providers/"
+                    f"rg-{self.config.slot_name(slot)}/providers/"
                     f"Microsoft.DBforPostgreSQL/flexibleServers/pg-{slot}"
                 ),
             },

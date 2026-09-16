@@ -11,6 +11,14 @@ from typing import Literal
 from uuid import UUID
 
 Environment = Literal["azure", "local"]
+AZURE_GROUP_LAYOUT = "plane-v2"
+IDENTITY_PURPOSES = {
+    "controlPlane": "control-plane",
+    "kubelet": "kubelet",
+    "radius": "radius",
+    "gateway": "gateway",
+    "certificateIssuer": "certificate-issuer",
+}
 SLOTS = ("management", "shared-control", "shared-data", "isolated-1-control", "isolated-1-data")
 SECRET_KEYS = {f"DEMO_KEY_{slot.upper().replace('-', '_')}": slot for slot in SLOTS}
 PUBLIC_KEYS = {
@@ -116,6 +124,25 @@ class DemoConfig:
         name = self.slot_name(slot)
         role = "management" if slot == "management" else slot.rsplit("-", 1)[1]
         return f"{name}-{role}"
+
+    def plane_group(self, slot: str) -> str:
+        if self.environment != "azure":
+            raise ConfigError("Azure resource groups require an Azure configuration")
+        return f"rg-{self.slot_name(slot)}"
+
+    def plane_group_id(self, slot: str) -> str:
+        return f"/subscriptions/{self.subscription}/resourceGroups/{self.plane_group(slot)}"
+
+    def managed_identity_id(self, slot: str, purpose: str) -> str:
+        if purpose not in IDENTITY_PURPOSES.values() and not (
+            slot == "management" and purpose in {"coordinator", "harness"}
+        ):
+            raise ConfigError("Unknown managed identity purpose")
+        name = self.stem if purpose in {"coordinator", "harness"} else self.slot_name(slot)
+        return (
+            self.plane_group_id(slot)
+            + f"/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-{name}-{purpose}"
+        )
 
     def values(self, *, include_secrets: bool = False) -> dict[str, str]:
         values = {

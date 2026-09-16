@@ -1,7 +1,7 @@
 targetScope = 'resourceGroup'
 
 param context object
-@description('One-entry operator-owned dictionary keyed by slot. The environment Azure provider scope must be that allocation clusterResourceGroup.')
+@description('One-entry operator-owned dictionary keyed by slot. Management Radius targets the same plane group as child applications, using a separate cluster role and Radius owner.')
 param allocations object
 param location string = resourceGroup().location
 param tenantId string = subscription().tenantId

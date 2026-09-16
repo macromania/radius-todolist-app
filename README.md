@@ -13,6 +13,12 @@ Each plane runs in its own cluster. Two shared tenants use the same control/data
 pair; an isolated tenant gets a separate pair. The complete demo has five
 clusters: management, shared control/data, and isolated control/data.
 
+Azure uses one resource group per plane instance and one shared platform group.
+AKS creates a separate node group for each provisioned cluster. Each Radius
+identity has resource-type-specific permissions instead of Contributor on its
+plane group. This layout requires a fresh deployment name; it does not migrate
+older deployments with separate `*-cluster` and `*-app` groups.
+
 Control pulls tenant records from management PostgreSQL. Data pulls configuration
 from control PostgreSQL and writes local ConfigMaps. Data API requests use only
 those ConfigMaps, Redis, and the data API's key, so they can continue during a

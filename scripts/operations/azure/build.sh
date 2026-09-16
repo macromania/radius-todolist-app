@@ -116,6 +116,7 @@ for name in cluster postgresql gateway redis; do
   source_file="infra/radius/recipes/azure/$name.bicep"
   inputs=("$source_file" infra/radius/recipes/azure/bicepconfig.json)
   if [[ "$name" == cluster ]]; then
+    inputs+=(scripts/operations/azure/plane-policy.json)
     for module in "$SOURCE"/infra/bootstrap/*.bicep; do
       inputs+=("${module#"$SOURCE"/}")
     done

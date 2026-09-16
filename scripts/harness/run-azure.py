@@ -657,6 +657,13 @@ def main(argv=None):
     parser.add_argument("--in-cluster", action="store_true")
     parser.add_argument("--execute", action="store_true", required=True)
     args = parser.parse_args(argv)
+    if (ROOT / ".env").exists():
+        print(
+            "Use scripts/harness/test-e2e.py for .env-selected deployments; "
+            "this legacy harness cannot operate the consolidated layout.",
+            file=sys.stderr,
+        )
+        return 1
     os.umask(0o077)
     commit = None
     try:

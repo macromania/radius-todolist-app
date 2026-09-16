@@ -55,7 +55,7 @@ printf '%s' "$OPERATOR_IP" | jq -Rse '
 
 demo_status section 'Bootstrap: existing resource ownership'
 GROUPS_JSON=$(printf '%s\n' "rg-$STEM-platform" \
-  "rg-$STEM-"{management,shared-control,shared-data,isolated-1-control,isolated-1-data}-{cluster,app,nodes} \
+  "rg-$STEM-"{management,shared-control,shared-data,isolated-1-control,isolated-1-data}{,-nodes} \
   | jq -Rsc 'split("\n") | map(select(length > 0))')
 azure_json group list --query '[].{name:name,tags:tags}' > "$AZURE_WORKSPACE/group-candidates.json"
 jq --arg prefix "rg-$STEM-" '[.[] | select((.name | ascii_downcase) | startswith($prefix))]' \
@@ -75,13 +75,13 @@ while IFS= read -r group; do
   if [[ "$lower_group" == *-nodes ]]; then
     slot="${lower_group#"rg-$STEM-"}"
     slot="${slot%-nodes}"
-    azure_json aks show --resource-group "rg-$STEM-$slot-cluster" --name "aks-$STEM-$slot" \
+    azure_json aks show --resource-group "rg-$STEM-$slot" --name "aks-$STEM-$slot" \
       > "$AZURE_WORKSPACE/node-owner.json"
     azure_owned < "$AZURE_WORKSPACE/node-owner.json" || {
       demo_error 'Node resource group is not attached to an owned AKS cluster'; exit 1;
     }
     jq -e --arg group "$group" --arg id \
-      "$SUBSCRIPTION_SCOPE/resourceGroups/rg-$STEM-$slot-cluster/providers/Microsoft.ContainerService/managedClusters/aks-$STEM-$slot" '
+      "$SUBSCRIPTION_SCOPE/resourceGroups/rg-$STEM-$slot/providers/Microsoft.ContainerService/managedClusters/aks-$STEM-$slot" '
       (.nodeResourceGroup | ascii_downcase) == ($group | ascii_downcase) and
       (.id | ascii_downcase) == ($id | ascii_downcase)
     ' "$AZURE_WORKSPACE/node-owner.json" >/dev/null || {
@@ -103,6 +103,37 @@ while IFS= read -r group; do
     demo_error 'An existing foundation resource has missing or foreign ownership'; exit 1;
   }
 done < <(jq -r '.[].name' "$AZURE_WORKSPACE/groups.json")
+
+azure_json deployment sub list --query "[?name=='$STEM-bootstrap']" \
+  > "$AZURE_WORKSPACE/layout-deployments.json"
+jq -e --arg project "$DEMO_PROJECT" --arg deployment "$DEMO_DEPLOYMENT" '
+  type == "array" and length <= 1 and all(.[];
+    .properties.outputs.foundation.value.resourceGroupLayout == "plane-v2" and
+    .properties.parameters.projectName.value == $project and
+    .properties.parameters.deploymentName.value == $deployment and
+    .properties.parameters.environment.value == "azure" and
+    (.properties.provisioningState | . == "Succeeded" or . == "Failed" or . == "Canceled"))' \
+  "$AZURE_WORKSPACE/layout-deployments.json" >/dev/null || {
+  demo_error 'Old or incomplete resource-group layout; use a fresh deployment name. Existing resources are retained.'
+  exit 1
+}
+if jq -e 'length > 0' "$AZURE_WORKSPACE/groups.json" >/dev/null; then
+  jq -e 'length == 1' "$AZURE_WORKSPACE/layout-deployments.json" >/dev/null || {
+    demo_error 'Existing resources have no verified bootstrap layout; resources retained'; exit 1;
+  }
+  jq '.[0].properties.outputs | map_values(.value)' "$AZURE_WORKSPACE/layout-deployments.json" \
+    > "$AZURE_WORKSPACE/existing-foundation.json"
+  "$ROOT/.venv/bin/python" "$ROOT/scripts/operations/azure/plane_policy.py" \
+    --foundation "$AZURE_WORKSPACE/existing-foundation.json" --allow-missing \
+    > "$AZURE_WORKSPACE/existing-plane-policy.json"
+elif jq -e 'length == 0' "$AZURE_WORKSPACE/layout-deployments.json" >/dev/null; then
+  azure_json role definition list --custom-role-only true \
+    --query "[?starts_with(roleName, '$STEM ')]" > "$AZURE_WORKSPACE/existing-roles.json"
+  jq -e 'type == "array" and length == 0' "$AZURE_WORKSPACE/existing-roles.json" >/dev/null || {
+    demo_error 'Custom roles remain without a verified foundation; use a fresh deployment name'
+    exit 1
+  }
+fi
 
 demo_status section 'Bootstrap: subscription prerequisites'
 [[ -x "$ROOT/.venv/bin/python" ]] || {
@@ -233,7 +264,7 @@ azure_recipe_policy
 BOOTSTRAP_PHASE='management Radius identity validation'
 demo_status section "Bootstrap: $BOOTSTRAP_PHASE"
 jq -e --arg identity \
-  "$SUBSCRIPTION_SCOPE/resourceGroups/rg-$STEM-management-cluster/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-$STEM-management-radius" \
+  "$SUBSCRIPTION_SCOPE/resourceGroups/rg-$STEM-management/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-$STEM-management-radius" \
   --slurpfile account "$AZURE_WORKSPACE/account.json" '
   [.allocations[] | select(.slot == "management")] as $management |
   ($management | length) == 1 and

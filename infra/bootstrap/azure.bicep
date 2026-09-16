@@ -66,7 +66,7 @@ var requiredTags = union(tags, {
   managedBy: 'radius-todolist-app'
 })
 var slots = concat(['management'], childSlots)
-var contributor = 'b24988ac-6180-42a0-ab88-20f7382dd24c'
+var planePolicy = loadJsonContent('../../scripts/operations/azure/plane-policy.json')
 var reader = 'acdd72a7-3385-48ef-bd42-f606fba81ae7'
 var clusterUser = '4abbcc35-e782-43d8-92c5-2d3f1bd2253f'
 var clusterAdmin = 'b1ff04bb-8a4e-4dc4-8eb5-8693973ce19b'
@@ -82,15 +82,31 @@ resource platformGroup 'Microsoft.Resources/resourceGroups@2024-03-01' = {
   location: location
   tags: requiredTags
 }
-resource clusterGroups 'Microsoft.Resources/resourceGroups@2024-03-01' = [for slot in slots: {
-  name: 'rg-${prefix}-${slot}-cluster'
+resource planeGroups 'Microsoft.Resources/resourceGroups@2024-03-01' = [for slot in slots: {
+  name: 'rg-${prefix}-${slot}'
   location: location
   tags: requiredTags
 }]
-resource appGroups 'Microsoft.Resources/resourceGroups@2024-03-01' = [for slot in slots: {
-  name: 'rg-${prefix}-${slot}-app'
-  location: location
-  tags: requiredTags
+
+resource applicationRoles 'Microsoft.Authorization/roleDefinitions@2022-04-01' = [for role in items(planePolicy.roles): {
+  name: guid(subscription().id, prefix, role.value.purpose)
+  properties: {
+    roleName: '${prefix} ${role.value.name}'
+    description: 'Provision only the selected plane application resource types, without AKS, identity or role management.'
+    type: 'CustomRole'
+    assignableScopes: map(filter(slots, slot => endsWith(slot, '-data') == (role.key == 'redisApplication')), slot => subscriptionResourceId('Microsoft.Resources/resourceGroups', 'rg-${prefix}-${slot}'))
+    permissions: [
+      {
+        actions: concat(planePolicy.deploymentActions, planePolicy.gatewayActions, role.value.actions)
+        notActions: []
+        dataActions: []
+        notDataActions: []
+      }
+    ]
+  }
+  dependsOn: [
+    planeGroups
+  ]
 }]
 
 // Certificate and ACME state rights are separate and assigned only at exact object scopes.
@@ -158,16 +174,10 @@ resource clusterRecipeRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' 
     roleName: '${prefix} child cluster recipe'
     description: 'Create Radius-owned child AKS and nested deployments, without identity writes or Azure role grants.'
     type: 'CustomRole'
-    assignableScopes: [for slot in childSlots: subscriptionResourceId('Microsoft.Resources/resourceGroups', 'rg-${prefix}-${slot}-cluster')]
+    assignableScopes: [for slot in childSlots: subscriptionResourceId('Microsoft.Resources/resourceGroups', 'rg-${prefix}-${slot}')]
     permissions: [
       {
-        actions: [
-          'Microsoft.Resources/subscriptions/resourceGroups/read'
-          'Microsoft.Resources/deployments/*'
-          'Microsoft.ContainerService/managedClusters/*'
-          'Microsoft.ManagedIdentity/userAssignedIdentities/read'
-          'Microsoft.Authorization/*/read'
-        ]
+        actions: concat(planePolicy.deploymentActions, planePolicy.clusterActions)
         notActions: []
         dataActions: []
         notDataActions: []
@@ -175,7 +185,7 @@ resource clusterRecipeRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' 
     ]
   }
   dependsOn: [
-    clusterGroups
+    planeGroups
   ]
 }
 resource federationRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
@@ -184,7 +194,7 @@ resource federationRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
     roleName: '${prefix} child identity federation'
     description: 'Bind service accounts on a preallocated identity; assigned only at individual identity scopes.'
     type: 'CustomRole'
-    assignableScopes: [for slot in childSlots: subscriptionResourceId('Microsoft.Resources/resourceGroups', 'rg-${prefix}-${slot}-cluster')]
+    assignableScopes: [for slot in childSlots: subscriptionResourceId('Microsoft.Resources/resourceGroups', 'rg-${prefix}-${slot}')]
     permissions: [
       {
         actions: [
@@ -200,7 +210,7 @@ resource federationRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
     ]
   }
   dependsOn: [
-    clusterGroups
+    planeGroups
   ]
 }
 
@@ -208,7 +218,7 @@ resource federationRole 'Microsoft.Authorization/roleDefinitions@2022-04-01' = {
 // Keep explicit resourceGroup(name) scopes and group-creation dependencies on these modules.
 module identity './identities.bicep' = [for slot in slots: {
   name: 'identities-${slot}'
-  scope: resourceGroup('rg-${prefix}-${slot}-cluster')
+  scope: resourceGroup('rg-${prefix}-${slot}')
   params: {
     prefix: prefix
     slot: slot
@@ -216,24 +226,24 @@ module identity './identities.bicep' = [for slot in slots: {
     tags: requiredTags
   }
   dependsOn: [
-    clusterGroups
+    planeGroups
   ]
 }]
 module coordinator './coordinator.bicep' = {
   name: 'coordinator-identity'
-  scope: resourceGroup('rg-${prefix}-management-cluster')
+  scope: resourceGroup('rg-${prefix}-management')
   params: {
     prefix: prefix
     location: location
     tags: requiredTags
   }
   dependsOn: [
-    clusterGroups
+    planeGroups
   ]
 }
 module harness './coordinator.bicep' = {
   name: 'harness-identity'
-  scope: resourceGroup('rg-${prefix}-management-cluster')
+  scope: resourceGroup('rg-${prefix}-management')
   params: {
     prefix: prefix
     location: location
@@ -241,7 +251,7 @@ module harness './coordinator.bicep' = {
     purpose: 'harness'
   }
   dependsOn: [
-    clusterGroups
+    planeGroups
   ]
 }
 module coordinatorBootstrapRead './coordinator-bootstrap-read.bicep' = {
@@ -286,28 +296,24 @@ module platformAccess './platform-access.bicep' = {
 }
 module appAccess './resource-group-access.bicep' = [for (slot, i) in slots: {
   name: 'app-access-${slot}'
-  scope: resourceGroup('rg-${prefix}-${slot}-app')
+  scope: resourceGroup('rg-${prefix}-${slot}')
   params: {
     assignments: [
       {
         principalId: identity[i].outputs.identity.radius.principalId
         principalType: 'ServicePrincipal'
-        roleDefinitionGuid: contributor
-      }
-      {
-        principalId: harness.outputs.identity.principalId
-        principalType: 'ServicePrincipal'
-        roleDefinitionGuid: reader
+        roleDefinitionGuid: guid(subscription().id, prefix, endsWith(slot, '-data') ? planePolicy.roles.redisApplication.purpose : planePolicy.roles.postgresApplication.purpose)
       }
     ]
   }
   dependsOn: [
-    appGroups
+    planeGroups
+    applicationRoles
   ]
 }]
 module clusterAccess './resource-group-access.bicep' = [for (slot, i) in slots: {
   name: 'cluster-access-${slot}'
-  scope: resourceGroup('rg-${prefix}-${slot}-cluster')
+  scope: resourceGroup('rg-${prefix}-${slot}')
   params: {
     assignments: concat([
       {
@@ -354,25 +360,25 @@ module clusterAccess './resource-group-access.bicep' = [for (slot, i) in slots: 
     ])
   }
   dependsOn: [
-    clusterGroups
+    planeGroups
   ]
 }]
 module childIdentityAccess './tenant-identity-access.bicep' = [for (slot, i) in childSlots: {
   name: 'child-identity-access-${slot}'
-  scope: resourceGroup('rg-${prefix}-${slot}-cluster')
+  scope: resourceGroup('rg-${prefix}-${slot}')
   params: {
     identities: identity[i + 1].outputs.identity
     managementRadiusPrincipalId: identity[0].outputs.identity.radius.principalId
     federationRoleId: federationRole.id
   }
   dependsOn: [
-    clusterGroups
+    planeGroups
   ]
 }]
 
 module management './aks.bicep' = {
   name: 'management-cluster'
-  scope: resourceGroup('rg-${prefix}-management-cluster')
+  scope: resourceGroup('rg-${prefix}-management')
   params: {
     clusterName: 'aks-${prefix}-management'
     location: location
@@ -389,14 +395,14 @@ module management './aks.bicep' = {
     tags: requiredTags
   }
   dependsOn: [
-    clusterGroups
+    planeGroups
     platformAccess
     clusterAccess
   ]
 }
 module managementRadiusFederation './federation.bicep' = {
   name: 'management-radius-federation'
-  scope: resourceGroup('rg-${prefix}-management-cluster')
+  scope: resourceGroup('rg-${prefix}-management')
   params: {
     identityName: last(split(identity[0].outputs.identity.radius.id, '/'))
     issuer: management.outputs.oidcIssuer
@@ -406,12 +412,12 @@ module managementRadiusFederation './federation.bicep' = {
     }]
   }
   dependsOn: [
-    clusterGroups
+    planeGroups
   ]
 }
 module managementIssuerFederation './federation.bicep' = {
   name: 'management-issuer-federation'
-  scope: resourceGroup('rg-${prefix}-management-cluster')
+  scope: resourceGroup('rg-${prefix}-management')
   params: {
     identityName: last(split(identity[0].outputs.identity.certificateIssuer.id, '/'))
     issuer: management.outputs.oidcIssuer
@@ -423,12 +429,12 @@ module managementIssuerFederation './federation.bicep' = {
     ]
   }
   dependsOn: [
-    clusterGroups
+    planeGroups
   ]
 }
 module coordinatorFederation './federation.bicep' = {
   name: 'coordinator-federation'
-  scope: resourceGroup('rg-${prefix}-management-cluster')
+  scope: resourceGroup('rg-${prefix}-management')
   params: {
     identityName: last(split(coordinator.outputs.identity.id, '/'))
     issuer: management.outputs.oidcIssuer
@@ -440,7 +446,7 @@ module coordinatorFederation './federation.bicep' = {
     ]
   }
   dependsOn: [
-    clusterGroups
+    planeGroups
   ]
 }
 
@@ -508,7 +514,7 @@ module harnessPlatformAccess './resource-group-access.bicep' = {
 }
 module harnessFederation './federation.bicep' = {
   name: 'harness-federation'
-  scope: resourceGroup('rg-${prefix}-management-cluster')
+  scope: resourceGroup('rg-${prefix}-management')
   params: {
     identityName: last(split(harness.outputs.identity.id, '/'))
     issuer: management.outputs.oidcIssuer
@@ -520,7 +526,7 @@ module harnessFederation './federation.bicep' = {
     ]
   }
   dependsOn: [
-    clusterGroups
+    planeGroups
   ]
 }
 
@@ -529,6 +535,7 @@ output foundation object = union(network.outputs.foundation, {
   deploymentName: deploymentName
   deploymentHash: deploymentHash
   environment: environment
+  resourceGroupLayout: planePolicy.layout
   resourcePrefix: prefix
   radiusResourceGroup: prefix
   subscriptionId: subscription().subscriptionId
@@ -544,6 +551,8 @@ output foundation object = union(network.outputs.foundation, {
     acmeStateWriter: acmeStateRole.id
     childClusterRecipe: clusterRecipeRole.id
     childIdentityFederation: federationRole.id
+    postgresApplication: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', guid(subscription().id, prefix, planePolicy.roles.postgresApplication.purpose))
+    redisApplication: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', guid(subscription().id, prefix, planePolicy.roles.redisApplication.purpose))
   }
   authorizedIpRanges: concat(operatorRanges, [
     '${network.outputs.foundation.egressIp}/32'
@@ -553,10 +562,10 @@ output foundation object = union(network.outputs.foundation, {
 output allocations array = [for (slot, i) in slots: union(network.outputs.allocations[i], {
   namespace: '${prefix}-${slot}-${slot == 'management' ? 'management' : last(split(slot, '-'))}'
   clusterName: 'aks-${prefix}-${slot}'
-  clusterResourceGroup: 'rg-${prefix}-${slot}-cluster'
-  clusterResourceGroupId: subscriptionResourceId('Microsoft.Resources/resourceGroups', 'rg-${prefix}-${slot}-cluster')
-  appResourceGroup: 'rg-${prefix}-${slot}-app'
-  appResourceGroupId: subscriptionResourceId('Microsoft.Resources/resourceGroups', 'rg-${prefix}-${slot}-app')
+  clusterResourceGroup: 'rg-${prefix}-${slot}'
+  clusterResourceGroupId: subscriptionResourceId('Microsoft.Resources/resourceGroups', 'rg-${prefix}-${slot}')
+  appResourceGroup: 'rg-${prefix}-${slot}'
+  appResourceGroupId: subscriptionResourceId('Microsoft.Resources/resourceGroups', 'rg-${prefix}-${slot}')
   nodeResourceGroup: 'rg-${prefix}-${slot}-nodes'
   identities: identity[i].outputs.identity
   certificateIssuerSubject: certificateIssuerServiceAccountSubject
@@ -565,7 +574,7 @@ output coordinatorIdentity object = coordinator.outputs.identity
 output managementCluster object = {
   id: management.outputs.clusterId
   name: management.outputs.clusterName
-  resourceGroup: 'rg-${prefix}-management-cluster'
+  resourceGroup: 'rg-${prefix}-management'
   fqdn: management.outputs.fqdn
   oidcIssuer: management.outputs.oidcIssuer
 }

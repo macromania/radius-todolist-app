@@ -141,6 +141,7 @@ azure_foundation() {
       .properties.parameters.deploymentName.value == $deployment and
       $o.foundation.projectName == $project and
       $o.foundation.deploymentName == $deployment and $o.foundation.environment == "azure" and
+      $o.foundation.resourceGroupLayout == "plane-v2" and
       $o.foundation.resourcePrefix == $stem and $o.foundation.radiusResourceGroup == $stem and
       ($o.foundation.subscriptionId | ascii_downcase) == $subscription and
       $o.foundation.location == $location and
@@ -154,15 +155,15 @@ azure_foundation() {
       $o.foundation.vaultOwned == $vaultOwned and $o.foundation.vaultResourceGroup == $vaultGroup and
       ($o.managementCluster.id | ascii_downcase) ==
         (($scope + "/resourceGroups/rg-" + $stem +
-          "-management-cluster/providers/Microsoft.ContainerService/managedClusters/aks-" +
+          "-management/providers/Microsoft.ContainerService/managedClusters/aks-" +
           $stem + "-management") | ascii_downcase) and
       $o.managementCluster.name == ("aks-" + $stem + "-management") and
       ($o.allocations | map(.slot) | sort) ==
         ["isolated-1-control", "isolated-1-data", "management", "shared-control", "shared-data"] and
       ($o.allocations | all(.[];
         .clusterName == ("aks-" + $stem + "-" + .slot) and
-        .clusterResourceGroup == ("rg-" + $stem + "-" + .slot + "-cluster") and
-        .appResourceGroup == ("rg-" + $stem + "-" + .slot + "-app") and
+        .clusterResourceGroup == ("rg-" + $stem + "-" + .slot) and
+        .appResourceGroup == ("rg-" + $stem + "-" + .slot) and
         .certificateName == ("gateway-" + $stem + "-" + .slot) and
         .acmeStateSecretName == ("acme-" + $stem + "-" + .slot) and
         .namespace == ($stem + "-" + .slot + "-" +
@@ -172,6 +173,10 @@ azure_foundation() {
   }
   jq '.properties.outputs | map_values(.value)' "$AZURE_WORKSPACE/deployment.json" \
     > "$AZURE_WORKSPACE/foundation.json" || return
+  demo_run 'Radius plane grant verification' "$ROOT/.venv/bin/python" \
+    "$ROOT/scripts/operations/azure/plane_policy.py" \
+    --foundation "$AZURE_WORKSPACE/foundation.json" \
+    > "$AZURE_WORKSPACE/plane-policy.json" || return
   HOST=$(jq -er '.foundation.registryLoginServer' "$AZURE_WORKSPACE/foundation.json") || return
   azure_json network private-endpoint show --resource-group "$PLATFORM_GROUP" \
     --name "pe-$STEM-vault" > "$AZURE_WORKSPACE/vault-endpoint.json" || return

@@ -40,9 +40,9 @@ demo_open_cluster() {
   mkdir -m 700 "$DEMO_WORKSPACE/$DEMO_SLOT"
   DEMO_KUBECONFIG="$DEMO_WORKSPACE/$DEMO_SLOT/kubeconfig"
   if [[ "$DEMO_ENV" == azure ]]; then
-    cluster_id="/subscriptions/$AZURE_SUBSCRIPTION_ID/resourceGroups/rg-$DEMO_CONTEXT-cluster/providers/Microsoft.ContainerService/managedClusters/aks-$DEMO_CONTEXT"
+    cluster_id="/subscriptions/$AZURE_SUBSCRIPTION_ID/resourceGroups/rg-$DEMO_CONTEXT/providers/Microsoft.ContainerService/managedClusters/aks-$DEMO_CONTEXT"
     cluster=$(az aks show --subscription "$AZURE_SUBSCRIPTION_ID" \
-      --resource-group "rg-$DEMO_CONTEXT-cluster" --name "aks-$DEMO_CONTEXT" --output json) || return
+      --resource-group "rg-$DEMO_CONTEXT" --name "aks-$DEMO_CONTEXT" --output json) || return
     printf '%s' "$cluster" | jq -e --arg id "$cluster_id" --arg project "$DEMO_PROJECT" \
       --arg deployment "$DEMO_DEPLOYMENT" '
         (.id | ascii_downcase) == ($id | ascii_downcase) and
@@ -51,7 +51,7 @@ demo_open_cluster() {
       ' >/dev/null || { demo_error 'Azure cluster identity or readiness differs'; return 1; }
     expected_server=$(printf '%s' "$cluster" | jq -er '"https://" + (.privateFqdn // .fqdn)') || return
     az aks get-credentials --subscription "$AZURE_SUBSCRIPTION_ID" \
-      --resource-group "rg-$DEMO_CONTEXT-cluster" --name "aks-$DEMO_CONTEXT" \
+      --resource-group "rg-$DEMO_CONTEXT" --name "aks-$DEMO_CONTEXT" \
       --context "$DEMO_CONTEXT" --file "$DEMO_KUBECONFIG" --format exec --only-show-errors || return
     chmod 600 "$DEMO_KUBECONFIG"
   else

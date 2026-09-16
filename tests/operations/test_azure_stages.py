@@ -21,7 +21,11 @@ TOOLS = ("az", "rad", "docker", "curl", "git", "bicep", "kubectl", "kubelogin")
 FAKE = r"""
 import hashlib,importlib.util,io,json,marshal,os,re,stat,sys,tarfile
 from pathlib import Path
+from uuid import NAMESPACE_DNS, uuid5
 root=Path(os.environ["FAKE_ROOT"])
+sys.path.insert(0,str(root))
+from scripts.operations.azure import plane_policy
+from plane_demo.management.providers.identity import DemoConfig, IDENTITY_PURPOSES
 spec=json.loads((root/"spec.json").read_text())
 state_path=root/"fake-state.json"
 state=json.loads(state_path.read_text()) if state_path.exists() else {"artifacts":{}}
@@ -88,6 +92,7 @@ def source_tag(name):
     base=root/"committed"
     paths=[f"infra/radius/recipes/azure/{name}.bicep","infra/radius/recipes/azure/bicepconfig.json"]
     if name=="cluster":
+        paths += ["scripts/operations/azure/plane-policy.json"]
         paths += [str(p.relative_to(base))
                   for p in sorted((base/"infra/bootstrap").glob("*.bicep"))]
     content="Bicep CLI version 0.42.1 (test)\n"
@@ -98,16 +103,25 @@ def foundation():
     for slot in slots:
         role="management" if slot=="management" else slot.rsplit("-",1)[1]
         allocations.append({"slot":slot,"clusterName":f"aks-{stem}-{slot}",
-            "clusterResourceGroup":f"rg-{stem}-{slot}-cluster",
-            "appResourceGroup":f"rg-{stem}-{slot}-app","namespace":f"{stem}-{slot}-{role}",
+            "clusterResourceGroup":f"rg-{stem}-{slot}",
+            "appResourceGroup":f"rg-{stem}-{slot}","namespace":f"{stem}-{slot}-{role}",
             "certificateName":f"gateway-{stem}-{slot}","acmeStateSecretName":f"acme-{stem}-{slot}",
             "identities":{"radius":{"clientId":radius_client,
-                "id":f"{scope}/resourceGroups/rg-{stem}-{slot}-cluster/providers/"
+                "id":f"{scope}/resourceGroups/rg-{stem}-{slot}/providers/"
                      f"Microsoft.ManagedIdentity/userAssignedIdentities/id-{stem}-{slot}-radius"}}})
+        allocations[-1]["identities"] = {
+            key: {"clientId":radius_client,"principalId":str(uuid5(NAMESPACE_DNS,slot+key)),
+                  "id":f"{scope}/resourceGroups/rg-{stem}-{slot}/providers/"
+                       f"Microsoft.ManagedIdentity/userAssignedIdentities/id-{stem}-{slot}-{purpose}"}
+            for key,purpose in IDENTITY_PURPOSES.items()
+        }
     if mode=="wrong-radius-identity": allocations[0]["identities"]["radius"]["id"]+="-foreign"
     if mode=="old-certificate-names":
         allocations[0]["certificateName"]="gateway-"+identity+"-management"
     values={"foundation":{"projectName":project,"deploymentName":deployment,"environment":"azure",
+        "resourceGroupLayout":"plane-v2",
+        "roleDefinitionIds":{key:plane_policy.role_id(subscription,stem,entry[0])
+                             for key,entry in plane_policy.ROLE_NAMES.items()},
         "resourcePrefix":stem,"radiusResourceGroup":stem,"subscriptionId":subscription,"tenantId":tenant,
         "location":spec["location"],"platformResourceGroup":f"rg-{stem}-platform",
         "registryName":registry,"registryLoginServer":host,"registryRoleAssignmentMode":registry_mode,
@@ -115,9 +129,10 @@ def foundation():
         "vaultName":vault,"vaultId":vault_id,"vaultOwned":not bool(external),
         "vaultResourceGroup":vault_group},
         "allocations":allocations,"managementCluster":{"name":f"aks-{stem}-management",
-        "id":f"{scope}/resourceGroups/rg-{stem}-management-cluster/providers/"
+        "id":f"{scope}/resourceGroups/rg-{stem}-management/providers/"
              f"Microsoft.ContainerService/managedClusters/aks-{stem}-management"}}
     if mode=="foreign-foundation": values["foundation"]["deploymentName"]="foreign"
+    if mode=="old-group-layout": values["foundation"].pop("resourceGroupLayout")
     if mode=="foreign-registry-host":
         values["foundation"]["registryLoginServer"]="foreign.azurecr.io"
     status="Failed" if mode=="unready-foundation" else "Succeeded"
@@ -205,7 +220,7 @@ elif tool=="az":
             emit([{"name":f"rg-{stem}-platform","tags":owner}])
         else: emit([])
     elif args[:2]==["aks","show"]:
-        emit({"id":f"{scope}/resourceGroups/rg-{stem}-management-cluster/providers/"
+        emit({"id":f"{scope}/resourceGroups/rg-{stem}-management/providers/"
                    f"Microsoft.ContainerService/managedClusters/aks-{stem}-management",
               "nodeResourceGroup":f"rg-{stem}-management-nodes",
               "fqdn":"management.synthetic.azmk8s.io","provisioningState":"Succeeded",
@@ -233,6 +248,27 @@ elif tool=="az":
     elif args[:2]==["acr","check-name"]:
         emit({"nameAvailable":True})
     elif args[:1]==["rest"]:
+        if arg("--method")=="get":
+            url=arg("--url")
+            if url.startswith("https://graph.microsoft.com/"):
+                emit({"value":[]});sys.exit()
+            config=DemoConfig("azure",project,deployment,subscription,spec["location"])
+            doc={key:value["value"] for key,value in foundation()["properties"]["outputs"].items()}
+            principals,grants,definitions=plane_policy.expected_grants(config,doc)
+            if "/roleAssignments?" in url:
+                rows=[{"id":sc+"/providers/Microsoft.Authorization/roleAssignments/"
+                       +str(uuid5(NAMESPACE_DNS,str((p,r,sc)))),
+                       "properties":{"principalId":p,"roleDefinitionId":r,"scope":sc}}
+                      for p,r,sc in grants]
+                if mode=="excess-plane-grant":
+                    rows[0]["properties"]["roleDefinitionId"]=scope+"/providers/Microsoft.Authorization/roleDefinitions/b24988ac-6180-42a0-ab88-20f7382dd24c"
+                emit({"value":rows});sys.exit()
+            rid=url.removeprefix("https://management.azure.com").split("?")[0]
+            if rid in definitions:
+                emit({"id":rid,"properties":{"type":"CustomRole",**definitions[rid]}})
+            else:
+                emit({"id":rid,"properties":{"type":"BuiltInRole"}})
+            sys.exit()
         expected_url=f"https://management.azure.com{scope}/providers/Microsoft.KeyVault/"
         expected_url+="checkNameAvailability?api-version=2024-11-01"
         body=json.loads(Path(arg("--body")[1:]).read_text())
@@ -247,7 +283,9 @@ elif tool=="az":
             prior["properties"]["provisioningState"]="Running"
         if mode=="foreign-deployment":
             prior["properties"]["parameters"]["deploymentName"]["value"]="foreign"
-        emit([prior] if mode in ("foreign-deployment","existing-owned","active-bootstrap") else [])
+        emit([prior] if mode in ("foreign-deployment","existing-owned","active-bootstrap",
+                                "owned-case-group","existing-owned-nodes",
+                                "old-group-layout") else [])
     elif args[:3]==["deployment","sub","create"]:
         if not entry["parameters"]["registryExists"]["value"]:
             state["arm_tags"]={}
@@ -275,7 +313,8 @@ elif tool=="az":
             assignments.append(row)
         emit(assignments)
     elif args[:3]==["role","definition","list"]:
-        emit([definition for definition in role_definitions if definition["name"]==arg("--name")])
+        emit([definition for definition in role_definitions if definition["name"]==arg("--name")]
+             if "--name" in args else [])
     elif args[:2]==["tag","update"]:
         if arg("--operation")!="Merge": sys.exit("unsafe ARM tag replacement")
         key,value=arg("--tags").split("=",1)
@@ -549,6 +588,9 @@ def checkout(tmp_path):
         "scripts/operations/azure/provenance.shlib",
         "scripts/operations/azure/registry-policy.json",
         "scripts/operations/azure/registry_policy.py",
+        "scripts/operations/azure/plane-policy.json",
+        "scripts/operations/azure/plane_policy.py",
+        "src/plane_demo/management/providers/identity.py",
     ):
         path = tmp_path / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -716,6 +758,7 @@ def assert_inspection_is_read_only(root):
         ("acr", "task", "show-run"),
         ("role", "assignment", "list"),
         ("role", "definition", "list"),
+        ("rest", "--method", "get"),
     )
     for call in calls(root):
         args = call["args"]
@@ -870,6 +913,26 @@ def test_bootstrap_uses_selected_identity_and_fresh_successful_outputs(checkout,
             assert call["private_parent"] == 0o700
 
 
+@pytest.mark.parametrize("stage", ["bootstrap", "build"])
+def test_old_layout_stops_public_stages_before_deployment(checkout, stage):
+    configure(checkout, mode="old-group-layout")
+    result = run(checkout, stage)
+    assert result.returncode != 0
+    assert not selected(checkout, "az", ["deployment", "sub", "create"])
+    assert not selected(checkout, "az", ["acr", "build"])
+    assert not selected(checkout, "az", ["provider", "register"])
+
+
+@pytest.mark.parametrize("stage", ["bootstrap", "build"])
+def test_excess_radius_grant_cannot_pass_the_real_foundation_gate(checkout, stage):
+    configure(checkout, mode="excess-plane-grant")
+    result = run(checkout, stage)
+    assert result.returncode != 0
+    assert "Unexpected Radius grant" in result.stderr
+    assert not selected(checkout, "az", ["acr", "build"])
+    assert not selected(checkout, "rad", ["install", "kubernetes"])
+
+
 def test_bootstrap_installs_management_radius_on_the_normal_verified_path(checkout):
     result = run(checkout, "bootstrap")
     assert result.returncode == 0, result.stderr
@@ -945,7 +1008,7 @@ def test_prerequisite_failure_blocks_actual_bootstrap_create(checkout, failed):
 @pytest.mark.parametrize(
     ("mode", "phase"),
     [
-        ("wrong-radius-identity", "management Radius identity validation"),
+        ("wrong-radius-identity", "live foundation verification"),
         ("foreign-management-access", "management cluster access"),
         ("wrong-management-server", "management cluster access"),
         ("radius-install-failure", "management Radius installation"),
