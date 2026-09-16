@@ -42,12 +42,12 @@ class Registrations:
         self.subscription = str(UUID(subscription))
         self.runner, self.clock, self.sleep = runner, clock, sleep
 
-    def az(self, *args):
+    def _run_az(self, *args, output):
         if args[1] == "register" and os.environ.get("CONFIRM_AZURE") != "yes":
             raise PrerequisiteError("Azure registration requires CONFIRM_AZURE=yes")
         try:
             result = self.runner(
-                ["az", *args, "--subscription", self.subscription, "--output", "json"],
+                ["az", *args, "--subscription", self.subscription, "--output", output],
                 stdout=subprocess.PIPE,
                 text=True,
                 check=False,
@@ -62,8 +62,12 @@ class Registrations:
                 f"{' '.join(args[:2])} failed (exit {result.returncode}); "
                 "check subscription registration permissions and the Azure diagnostic above"
             )
+        return result.stdout
+
+    def az(self, *args):
+        raw = self._run_az(*args, output="json")
         try:
-            value = json.loads(result.stdout)
+            value = json.loads(raw)
         except ValueError as error:
             raise PrerequisiteError("Azure registration returned invalid JSON") from error
         if not isinstance(value, dict):
@@ -79,7 +83,7 @@ class Registrations:
             )
         if refresh or state in {"NotRegistered", "Unregistered"}:
             status("progress", f"Register provider {namespace}")
-            self.az("provider", "register", "--namespace", namespace)
+            self._run_az("provider", "register", "--namespace", namespace, output="none")
             deadline = self.clock() + 300
             while True:
                 state = self.az("provider", "show", "--namespace", namespace).get(
@@ -120,7 +124,9 @@ class Registrations:
                 )
             if state in {"NotRegistered", "Unregistered"} and not submitted:
                 status("progress", f"Register feature {label}")
-                self.az("feature", "register", "--namespace", namespace, "--name", name)
+                self._run_az(
+                    "feature", "register", "--namespace", namespace, "--name", name, output="none"
+                )
                 submitted = True
             if self.clock() >= deadline:
                 raise PrerequisiteError(

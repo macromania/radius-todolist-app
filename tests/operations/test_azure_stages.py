@@ -181,14 +181,22 @@ elif tool=="git":
     else: sys.exit("unexpected git command")
 elif tool=="az":
     if args[:2]==["provider","show"]:
-        registered=state.get("providers",[])
-        value=("Registered" if mode!="unregistered-providers" or arg("--namespace") in registered
-               else "NotRegistered")
-        emit({"registrationState":value})
+        registered=arg("--namespace") in state.get("providers",[])
+        if mode=="unregistered-providers":
+            value=(spec.get("provider_registration_state","Registering")
+                   if registered else "NotRegistered")
+        else:
+            value="Registered"
+        phase="after-registration" if registered else "initial"
+        if spec.get("malformed_provider_query")==phase:
+            print("not json")
+        else:
+            emit({"registrationState":value})
     elif args[:2]==["provider","register"]:
         state.setdefault("providers",[]).append(arg("--namespace"))
         save()
-        emit({"registrationState":"Registering"})
+        print("WARNING: Registering is still on-going. You can monitor using "
+              f"'az provider show -n {arg('--namespace')}'",file=sys.stderr)
     elif args[:3]==["deployment","sub","validate"]:
         emit({"properties":{"provisioningState":"Succeeded"}})
     elif args[:2]==["account","show"]:
@@ -977,16 +985,46 @@ def test_bootstrap_installs_management_radius_on_the_normal_verified_path(checko
     assert "Bootstrap completed" in result.stderr
 
 
-def test_bootstrap_registers_new_subscription_before_service_checks(checkout):
-    configure(checkout, mode="unregistered-providers")
+@pytest.mark.parametrize("state", ["Registering", "Registered"])
+def test_bootstrap_registers_new_subscription_before_service_checks(checkout, state):
+    configure(checkout, mode="unregistered-providers", provider_registration_state=state)
     result = run(checkout, "bootstrap")
     assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["foundation"]["subscriptionId"] == SUBSCRIPTION
+    assert result.stderr.count("WARNING: Registering is still on-going.") == 9
     registrations = selected(checkout, "az", ["provider", "register"])
     assert len(registrations) == 9
+    all_calls = calls(checkout)
     (availability,) = selected(checkout, "az", ["acr", "check-name"])
-    assert all(
-        calls(checkout).index(call) < calls(checkout).index(availability) for call in registrations
-    )
+    (validate,) = selected(checkout, "az", ["deployment", "sub", "validate"])
+    (create,) = selected(checkout, "az", ["deployment", "sub", "create"])
+    for registration in registrations:
+        args = registration["args"]
+        assert args[-4:] == ["--subscription", SUBSCRIPTION, "--output", "none"]
+        namespace = args[args.index("--namespace") + 1]
+        before, after = [
+            index
+            for index, call in enumerate(all_calls)
+            if call["tool"] == "az"
+            and call["args"][:2] == ["provider", "show"]
+            and call["args"][call["args"].index("--namespace") + 1] == namespace
+        ]
+        assert before < all_calls.index(registration) < after < all_calls.index(availability)
+        assert all_calls[after]["args"][-4:] == ["--subscription", SUBSCRIPTION, "--output", "json"]
+        assert f"{namespace}: {state}" in result.stderr
+    assert all_calls.index(availability) < all_calls.index(validate) < all_calls.index(create)
+
+
+@pytest.mark.parametrize("phase", ["initial", "after-registration"])
+def test_malformed_provider_query_blocks_actual_bootstrap_create(checkout, phase):
+    configure(checkout, mode="unregistered-providers", malformed_provider_query=phase)
+    result = run(checkout, "bootstrap")
+    assert result.returncode != 0 and not result.stdout
+    assert "Azure registration returned invalid JSON" in result.stderr
+    registrations = selected(checkout, "az", ["provider", "register"])
+    assert len(registrations) == (1 if phase == "after-registration" else 0)
+    assert not selected(checkout, "az", ["deployment", "sub", "validate"])
+    assert not selected(checkout, "az", ["deployment", "sub", "create"])
 
 
 @pytest.mark.parametrize(

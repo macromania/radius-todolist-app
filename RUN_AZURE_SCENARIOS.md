@@ -207,6 +207,9 @@ ManagedIdentity, ContainerRegistry, KeyVault, DBforPostgreSQL, and Cache. These 
 subscription-wide registrations and remain after cleanup. The operator needs the
 providers' `/register/action` permissions; Contributor and Owner include them.
 The command never grants itself permissions or changes the default subscription.
+The warning `Registering is still on-going` is expected while Azure registers a
+provider asynchronously. A successful registration command can return no output;
+bootstrap checks its exit code, then queries provider state separately.
 After registration starts, ARM validation checks the selected deployment before
 creation; a provider need not finish registering in every unrelated region first.
 
