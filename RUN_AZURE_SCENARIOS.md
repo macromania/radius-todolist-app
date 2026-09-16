@@ -241,6 +241,7 @@ selected deployment name and a scoped inspection command when creation fails.
 Before creating the foundation, bootstrap reads current VM availability,
 capabilities, and vCPU quotas for the selected subscription and region. On the
 first run, choose one of up to three eligible sizes by entering its number.
+Elapsed-time updates pause while the menu waits for your answer, then resume.
 Enter `q` to cancel without deploying the foundation. The menu shows vCPUs,
 memory, and estimated Linux retail compute costs per VM and for the full demo.
 Disks and other Azure services are extra. Choices are ranked by available prices;

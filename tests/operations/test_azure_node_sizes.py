@@ -229,6 +229,7 @@ def test_retail_pagination_cannot_send_requests_to_another_host(next_page):
 
 @pytest.fixture
 def invocation(tmp_path, monkeypatch):
+    monkeypatch.delenv("PLANE_DEMO_PROGRESS_DIR", raising=False)
     config = replace(CONFIG, demo_keys={"management": "synthetic-private-key-" + "x" * 32})
     path = tmp_path / ".env"
     configuration.initialize_config(config, path)
@@ -289,6 +290,39 @@ def test_cancel_or_eof_does_not_change_configuration(invocation, monkeypatch, an
     monkeypatch.setattr(sys, "stdin", io.StringIO(answer))
     assert subject.main() == 130
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("answer,expected", [("2\n", 0), ("q\n", 130), ("", 130), (None, 130)])
+def test_selector_pauses_only_the_prompt_and_always_releases_it(
+    invocation, monkeypatch, answer, expected
+):
+    path, _, runner = invocation
+    directory = path.parent / "plane-progress.selection"
+    directory.mkdir(mode=0o700)
+    gate = directory / "heartbeat"
+    monkeypatch.setenv("PLANE_DEMO_PROGRESS_DIR", str(directory))
+    original_runner = runner.__call__
+
+    def working(argv, **kwargs):
+        assert not gate.exists(), "Progress was paused while discovering sizes or prices"
+        return original_runner(argv, **kwargs)
+
+    discovery = subject.Discovery(configuration.load_config(path))
+    discovery.runner = working
+
+    class Input:
+        def readline(self):
+            assert gate.is_dir(), "The selector did not pause its ancestor timers"
+            if answer is None:
+                raise KeyboardInterrupt
+            return answer
+
+    monkeypatch.setattr(sys, "stdin", Input())
+    before = path.read_bytes()
+    assert subject.main() == expected
+    assert not gate.exists()
+    if expected != 0:
+        assert path.read_bytes() == before
 
 
 def test_config_changed_during_selection_is_not_overwritten(invocation, monkeypatch, capsys):

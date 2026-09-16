@@ -24,7 +24,7 @@ from scripts.operations.config import (  # noqa: E402
     initialize_config,
     load_config,
 )
-from scripts.operations.output import progress, status  # noqa: E402
+from scripts.operations.output import pause_progress, progress, status  # noqa: E402
 
 PRICES = "https://prices.azure.com/api/retail/prices"
 
@@ -419,38 +419,41 @@ def select_size(eligible, problems, config, budget, discovery, *, existing=None)
         eligible.values(),
         key=lambda size: (prices.get(size.name, math.inf), size.cpus, size.memory, size.name),
     )[:3]
-    status("section", "AKS node size: choose an available option")
-    print(
-        f"  Region: {config.location}\n"
-        f"  Full demo: {budget.clusters} clusters x {budget.nodes} nodes; "
-        "one surge node per cluster reserved.\n\n"
-        "  #  Size                         vCPUs  RAM GiB   USD/VM-hour  USD/demo-hour",
-        file=sys.stderr,
-    )
-    for number, size in enumerate(choices, 1):
-        price = prices.get(size.name)
-        hourly = f"{price:.3f}" if price is not None else "unavailable"
-        fleet = f"{price * budget.fleet_nodes:.3f}" if price is not None else "unavailable"
+    with pause_progress():
+        status("section", "AKS node size: choose an available option")
         print(
-            f"  {number}  {size.name:<28} {size.cpus:>5} {size.memory:>8g} "
-            f"{hourly:>13} {fleet:>14}",
+            f"  Region: {config.location}\n"
+            f"  Full demo: {budget.clusters} clusters x {budget.nodes} nodes; "
+            "one surge node per cluster reserved.\n\n"
+            "  #  Size                         vCPUs  RAM GiB   USD/VM-hour  USD/demo-hour",
             file=sys.stderr,
         )
-    print(
-        "\n  Prices are Linux retail compute estimates; disks and other services are extra.\n"
-        "  Choices use regional node pools and managed OS disks.\n"
-        "  Availability is not a capacity reservation.\n",
-        file=sys.stderr,
-    )
-    while True:
-        print(f"  Select 1-{len(choices)}, or q to cancel: ", end="", file=sys.stderr, flush=True)
-        answer = sys.stdin.readline()
-        if not answer or answer.strip().lower() == "q":
-            raise SelectionCancelled
-        answer = answer.strip()
-        if answer in {str(number) for number in range(1, len(choices) + 1)}:
-            return choices[int(answer) - 1]
-        status("warning", f"Enter a number from 1 to {len(choices)}, or q")
+        for number, size in enumerate(choices, 1):
+            price = prices.get(size.name)
+            hourly = f"{price:.3f}" if price is not None else "unavailable"
+            fleet = f"{price * budget.fleet_nodes:.3f}" if price is not None else "unavailable"
+            print(
+                f"  {number}  {size.name:<28} {size.cpus:>5} {size.memory:>8g} "
+                f"{hourly:>13} {fleet:>14}",
+                file=sys.stderr,
+            )
+        print(
+            "\n  Prices are Linux retail compute estimates; disks and other services are extra.\n"
+            "  Choices use regional node pools and managed OS disks.\n"
+            "  Availability is not a capacity reservation.\n",
+            file=sys.stderr,
+        )
+        while True:
+            print(
+                f"  Select 1-{len(choices)}, or q to cancel: ", end="", file=sys.stderr, flush=True
+            )
+            answer = sys.stdin.readline()
+            if not answer or answer.strip().lower() == "q":
+                raise SelectionCancelled
+            answer = answer.strip()
+            if answer in {str(number) for number in range(1, len(choices) + 1)}:
+                return choices[int(answer) - 1]
+            status("warning", f"Enter a number from 1 to {len(choices)}, or q")
 
 
 def main():
