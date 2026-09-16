@@ -66,7 +66,7 @@ ShellCheck, and the following tools installed:
 | Terraform for offline checks | 1.14-1.15; CI/runtime use 1.15.8 |
 
 Azure also needs `az`, `helm`, and `kubelogin`. Sign in with an interactive
-Azure user account, not a service principal. The operator needs permission to
+Azure user account, not a service principal. Bootstrap requires permission to
 create the project's resource groups, resources, managed identities, custom
 roles, and scoped role assignments. The workstation must reach the AKS APIs.
 Docker Desktop is used to inspect built images.
@@ -82,6 +82,65 @@ generates type extensions; it does not deploy resources. `make check` runs the
 full source checks if you want that checkpoint before deploying.
 
 ### Select operator configuration
+
+#### Choose operator access
+
+The recommended target is scoped read, AKS, and ACR access for your regular
+account, with temporary privileged access for bootstrap and cleanup. Do not keep
+subscription Owner or User Access Administrator solely for everyday demo
+operation. This is a recommended access model, not a complete least-privilege
+permission package already configured by the current scripts.
+
+| Workflow | Access needed | Scope |
+|---|---|---|
+| Bootstrap and full cleanup | Resource and deployment management, custom role definition management, and role assignment management | The subscription deployment and required demo resource scopes; the selected external vault when applicable |
+| Resource discovery and reports | ARM read access, including bootstrap outputs and the RBAC metadata queried by the scripts | Demo resources and required subscription-level discovery reads |
+| Kubernetes access and full operational scenarios | Azure Kubernetes Service Cluster User Role and Azure Kubernetes Service RBAC Cluster Admin | Each demo cluster or its dedicated cluster resource group |
+| Image builds and Recipe publication | ACR task execution, repository read/write/import, and registry tag updates for build provenance | Only the demo registry |
+| Direct API requests after deployment | The endpoint and its demo API key; no Azure role | The selected plane API |
+
+AKS RBAC Cluster Admin is the current operator baseline, not a proven minimum.
+The full scenarios read Secrets, execute commands in Pods, change workloads and
+network policies, access Radius APIs, and perform impersonation checks. Narrower
+access requires purpose-built Kubernetes/AKS permissions. The `make api` helper
+also uses Kubernetes to discover the endpoint and normally read the API key;
+it does not have the same access requirements as a direct HTTP request.
+
+For builds, the relevant registry-scoped roles are **Container Registry Tasks
+Contributor**, **Container Registry Repository Writer**, and **Container Registry
+Data Importer and Data Reader**, plus registry tag-write permission.
+**Tag Contributor** is a built-in option for the tag updates. Keep the existing
+repository-writer condition: writes are limited to the image repositories and
+Recipe staging, not canonical Recipes. Bootstrap grants the writer and importer
+roles to its operator, but does not separately grant task execution or tag-write
+access. Those permissions must be supplied before removing broader operator
+access. See the [ACR role definitions](https://learn.microsoft.com/en-us/azure/container-registry/container-registry-rbac-built-in-roles-directory-reference).
+
+Bootstrap creates four custom role definitions as well as role assignments.
+It therefore needs both `Microsoft.Authorization/roleDefinitions/write` and
+`Microsoft.Authorization/roleAssignments/write`; full cleanup also needs the
+corresponding delete permissions. Access only to the management cluster resource
+group is insufficient. **Owner**, or **Contributor plus User Access
+Administrator**, can cover these bootstrap permissions, but both are broad
+administrative options rather than least-privilege configurations.
+**Contributor plus Role Based Access Control Administrator** alone cannot
+create the custom role definitions. See the [privileged role definitions](https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles/privileged).
+
+Bootstrap assigns its operator's AKS and ACR roles to the signed-in account.
+If a separate administrator runs bootstrap, those grants go to that account,
+not automatically to the everyday operator. Arrange the intended operator's
+scoped grants explicitly before relying on the split-access model. Application
+managed identities use their own scoped grants; they do not need subscription
+Owner.
+
+Check effective access in the subscription's **Access control (IAM)** view,
+including role assignment conditions. An active Owner assignment can still
+reject specific role grants when a condition restricts them. PIM activation is
+needed only when the required role is eligible but not active. Have the
+administrator review a blocking condition rather than removing it by default.
+`CONFIRM_AZURE=yes` confirms an operation; it does not elevate Azure permissions.
+
+#### Select deployment identity
 
 Choose the subscription and a short project/deployment name:
 
