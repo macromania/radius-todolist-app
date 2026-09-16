@@ -41,7 +41,7 @@ fi
 case "$environment" in azure|local) ;; *) demo_error 'Choose --environment azure or local'; exit 1 ;; esac
 if [[ "$environment" == azure ]]; then
   if [[ -z "$subscription" ]]; then
-    subscription=$(az account show --query id --output tsv --only-show-errors) || {
+    subscription=$(demo_run 'Discover selected Azure subscription' az account show --query id --output tsv --only-show-errors) || {
       demo_error 'Azure account lookup failed; supply --subscription'; exit 1;
     }
   fi
@@ -83,4 +83,5 @@ if [[ -e "$ROOT/.env" || -L "$ROOT/.env" ]]; then
   demo_private_file "$ROOT/.env"
 fi
 mv -f "$pending" "$ROOT/.env"
+demo_status success 'Private .env replaced; previous settings were not appended'
 printf 'Configured %s/%s (%s) in .env\n' "$DEMO_PROJECT" "$DEMO_DEPLOYMENT" "$DEMO_ENV"

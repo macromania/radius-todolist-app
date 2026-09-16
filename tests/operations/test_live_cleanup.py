@@ -4,6 +4,8 @@ import gzip
 import hashlib
 import importlib.util
 import json
+import os
+import shutil
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -581,6 +583,8 @@ class Platform:
                         "outputs": {key: {"value": val} for key, val in outputs.items()},
                     }
                 }
+                if hasattr(self, "bootstrap_response"):
+                    value = copy.deepcopy(self.bootstrap_response)
             elif args[:3] == ["role", "definition", "list"]:
                 value = (
                     self.roles
@@ -987,6 +991,190 @@ def test_normal_cleanup_obeys_radius_owners_without_saved_files(world):
         assert result["unrelatedPreservationVerified"] is True
     else:
         assert result["softDeletedVaults"] and result["purged"] is False
+
+
+def failed_bootstrap(platform, state="Failed", outputs=None):
+    config = platform.config
+    return {
+        "id": (
+            f"/subscriptions/{config.subscription}/providers/Microsoft.Resources/"
+            f"deployments/{config.stem}-bootstrap"
+        ),
+        "properties": {
+            "provisioningState": state,
+            "parameters": {
+                key: {"value": value}
+                for key, value in {
+                    "projectName": config.project,
+                    "deploymentName": config.deployment,
+                    "environment": "azure",
+                    "location": config.location,
+                    "registryName": config.registry_name,
+                    "vaultName": config.vault_name,
+                    "deploymentHash": config.identity_hash,
+                    "externalVaultResourceGroup": platform.vault_group if config.key_vault else "",
+                }.items()
+            },
+            "outputs": outputs,
+        },
+    }
+
+
+def remove_clusters_and_apps(platform):
+    platform.clusters.clear()
+    for slot in shared.SLOTS:
+        for kind in ("cluster", "app", "nodes"):
+            platform.azure_resources[platform.group(slot, kind)] = []
+
+
+@pytest.mark.parametrize("world", ["azure"], indirect=True)
+@pytest.mark.parametrize("state", ["Failed", "Canceled"])
+@pytest.mark.parametrize("outputs", [None, {}, {"foundation": {"value": None}}])
+def test_partial_bootstrap_cleans_owned_foundation_without_radius(world, state, outputs):
+    engine, platform, _ = world
+    remove_clusters_and_apps(platform)
+    platform.bootstrap_response = failed_bootstrap(platform, state, outputs)
+    engine.execute = False
+    preview = engine.clean()
+    assert preview["status"] == "planned" and platform.mutations == []
+    engine.execute = True
+    assert engine.clean()["status"] == "clean"
+    assert not any(argv[0] in {"rad", "kubectl", "bash"} for argv, _ in platform.calls)
+    assert engine.clean()["status"] == "clean"
+
+
+@pytest.mark.parametrize("world", ["azure"], indirect=True)
+def test_failed_bootstrap_rerun_still_deletes_existing_apps_through_radius(world):
+    engine, platform, _ = world
+    platform.bootstrap_response = failed_bootstrap(platform)
+    assert engine.clean()["status"] == "clean"
+    kinds = [kind for kind, _ in platform.mutations]
+    assert kinds.index("app") < kinds.index("radius-child") < kinds.index("management-aks")
+
+
+@pytest.mark.parametrize("world", ["azure"], indirect=True)
+@pytest.mark.parametrize("failure", ["Succeeded", "Running", "foreign", "malformed", "missing"])
+def test_invalid_bootstrap_metadata_blocks_cleanup_without_traceback(world, failure, capsys):
+    engine, platform, _ = world
+    remove_clusters_and_apps(platform)
+    response = failed_bootstrap(platform)
+    if failure in {"Succeeded", "Running"}:
+        response["properties"]["provisioningState"] = failure
+    elif failure == "foreign":
+        response["properties"]["parameters"]["deploymentName"]["value"] = "foreign"
+    elif failure == "malformed":
+        response["properties"]["outputs"] = []
+    else:
+        response["properties"] = None
+    platform.bootstrap_response = response
+    assert shared.main(["--execute"], engine_factory=lambda **kwargs: engine) == 1
+    output = capsys.readouterr()
+    assert "Cleanup incomplete" in output.err and "Traceback" not in output.err
+    assert platform.mutations == []
+
+
+@pytest.mark.parametrize("world", ["azure"], indirect=True)
+def test_partial_bootstrap_refuses_orphaned_nodes(world):
+    engine, platform, _ = world
+    remove_clusters_and_apps(platform)
+    platform.bootstrap_response = failed_bootstrap(platform)
+    group = platform.group("management", "nodes")
+    platform.azure_resources[group] = [
+        {
+            "id": platform.gid(group) + "/providers/Microsoft.Compute/virtualMachines/orphan",
+            "type": "Microsoft.Compute/virtualMachines",
+            "tags": platform.tags,
+        }
+    ]
+    with pytest.raises(shared.CleanupError, match="without their application/AKS owner"):
+        engine.clean()
+    assert platform.mutations == []
+
+
+@pytest.mark.parametrize("world", ["azure"], indirect=True)
+def test_bootstrap_restarting_between_inventory_and_delete_blocks_mutation(world):
+    engine, platform, _ = world
+    remove_clusters_and_apps(platform)
+    platform.bootstrap_response = failed_bootstrap(platform)
+    reads = 0
+
+    def runner(argv, **kwargs):
+        nonlocal reads
+        if argv[:4] == ["az", "deployment", "sub", "show"]:
+            reads += 1
+            if reads > 1:
+                platform.bootstrap_response["properties"]["provisioningState"] = "Running"
+        return platform(argv, **kwargs)
+
+    engine.runner = runner
+    with pytest.raises(shared.CleanupError, match="nonterminal"):
+        engine.clean()
+    assert platform.mutations == []
+
+
+@pytest.mark.parametrize(
+    "target,confirmed,expected",
+    [
+        ("clean-plan", False, "planned"),
+        ("clean-azure", True, "clean"),
+        ("clean-azure", False, None),
+    ],
+)
+def test_real_make_cleanup_path_handles_null_outputs_offline(tmp_path, target, confirmed, expected):
+    config = DemoConfig(
+        "azure", "demo", "team", "11111111-1111-1111-1111-111111111111", "centralus"
+    )
+    initialize_config(config, tmp_path / ".env")
+    for relative in (
+        "Makefile",
+        "scripts/lib/env.sh",
+        "scripts/lib/output.sh",
+        "scripts/lib/progress.sh",
+        "scripts/operations/stage.sh",
+    ):
+        destination = tmp_path / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / relative, destination)
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    uv = binary / "uv"
+    uv.write_text(
+        f"#!{sys.executable}\n"
+        "import json, runpy, sys\nfrom pathlib import Path\n"
+        "assert sys.argv[1:5] == ['run','--no-sync','python','scripts/operations/clean-azure.py']\n"
+        f"test = runpy.run_path({str(Path(__file__).resolve())!r})\n"
+        "shared = test['shared']; shared.ROOT = Path.cwd()\n"
+        "config = shared.load_config(Path.cwd()/'.env')\n"
+        "platform = test['Platform'](config, shared.SLOTS)\n"
+        "test['remove_clusters_and_apps'](platform)\n"
+        "platform.bootstrap_response = test['failed_bootstrap'](platform)\n"
+        "def factory(**kwargs):\n"
+        "    return shared.LiveAzureCleanup(runner=platform, **kwargs)\n"
+        "raise SystemExit(shared.main(sys.argv[5:], engine_factory=factory))\n"
+    )
+    uv.chmod(0o700)
+    result = subprocess.run(
+        [
+            "make",
+            "--no-print-directory",
+            target,
+            "COLOR=always",
+            f"CONFIRM_AZURE={'yes' if confirmed else ''}",
+        ],
+        cwd=tmp_path,
+        env={**os.environ, "PATH": str(binary) + os.pathsep + os.environ["PATH"], "NO_COLOR": ""},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert (result.returncode == 0) == (expected is not None), result.stderr
+    if expected:
+        assert json.loads(result.stdout)["status"] == expected
+        assert "\033[" in result.stderr and "\033" not in result.stdout
+    else:
+        assert "CONFIRM_AZURE" in result.stderr
+    assert "Traceback" not in result.stderr
 
 
 @pytest.mark.parametrize("failure", ["sticky_app", "fail_radius", "sticky_child"])

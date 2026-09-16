@@ -13,7 +13,13 @@ KEY = 'literal-$(id)-`id`-"quotes"-' + "x" * 40
 
 @pytest.fixture
 def checkout(tmp_path):
-    for relative in ("scripts/lib/env.sh", "scripts/operations/init.sh"):
+    for relative in (
+        "Makefile",
+        "scripts/lib/progress.sh",
+        "scripts/lib/output.sh",
+        "scripts/lib/env.sh",
+        "scripts/operations/init.sh",
+    ):
         target = tmp_path / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / relative, target)
@@ -44,10 +50,60 @@ def run_init(root, *args, values=None):
 
 
 def stored(root):
+    lines = (root / ".env").read_text().splitlines()
+    keys = [line.split("=", 1)[0] for line in lines]
+    assert len(keys) == len(set(keys)), "Duplicate assignments must not disappear into a dictionary"
     return {
         key: json.loads(value)
         for key, value in (line.split("=", 1) for line in (root / ".env").read_text().splitlines())
     }
+
+
+def test_real_make_azure_initialization_is_repeatable_and_literal(checkout):
+    environment = {**os.environ, "MAKEFLAGS": "", "MFLAGS": "", "NO_COLOR": "1"}
+    arguments = [
+        "make",
+        "--no-print-directory",
+        "init",
+        "ENV=azure",
+        f"ARGS=--subscription {SUBSCRIPTION} --demo-key-from-env management=SUPPLIED_KEY",
+    ]
+    environment.update(SUPPLIED_KEY=KEY, DEMO_ENV="local", DEMO_PROJECT="stale")
+    first = subprocess.run(
+        arguments, cwd=checkout, env=environment, capture_output=True, text=True, check=False
+    )
+    assert first.returncode == 0, first.stderr
+    before = (checkout / ".env").read_bytes()
+    second = subprocess.run(
+        arguments, cwd=checkout, env=environment, capture_output=True, text=True, check=False
+    )
+    assert second.returncode == 0, second.stderr
+    assert (checkout / ".env").read_bytes() == before
+    assert len(stored(checkout)) == 6
+    assert (checkout / ".env").stat().st_mode & 0o777 == 0o600
+    assert first.stdout.count("Configured") == second.stdout.count("Configured") == 1
+    assert KEY not in first.stdout + first.stderr + second.stdout + second.stderr
+    assert not (checkout / "az-calls").exists()
+
+
+def test_repeated_credential_slot_is_rejected_without_replacement(checkout):
+    assert run_init(checkout, "--environment", "local").returncode == 0
+    before = (checkout / ".env").read_bytes()
+    result = run_init(
+        checkout,
+        "--environment",
+        "azure",
+        "--subscription",
+        SUBSCRIPTION,
+        "--demo-key-from-env",
+        "management=SUPPLIED_KEY",
+        "--demo-key-from-env",
+        "management=SUPPLIED_KEY",
+        values={"SUPPLIED_KEY": KEY},
+    )
+    assert result.returncode != 0 and "Duplicate .env key" in result.stderr
+    assert (checkout / ".env").read_bytes() == before
+    assert KEY not in result.stdout + result.stderr
 
 
 def test_local_shell_init_never_calls_azure_or_creates_state(checkout):

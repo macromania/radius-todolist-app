@@ -36,6 +36,7 @@ demo_kube() {
 demo_open_cluster() {
   local cluster cluster_id node_ids node_json kube_json expected_server host
   demo_slot "$1" || return
+  demo_status progress "Discover $DEMO_ENV cluster access: $DEMO_SLOT"
   mkdir -m 700 "$DEMO_WORKSPACE/$DEMO_SLOT"
   DEMO_KUBECONFIG="$DEMO_WORKSPACE/$DEMO_SLOT/kubeconfig"
   if [[ "$DEMO_ENV" == azure ]]; then

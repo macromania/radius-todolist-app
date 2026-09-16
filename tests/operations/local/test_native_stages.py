@@ -338,6 +338,7 @@ def stage_lab(tmp_path):
     local.mkdir(parents=True)
     (repo / "scripts/lib").mkdir(parents=True)
     shutil.copy(ROOT / "scripts/lib/env.sh", repo / "scripts/lib/env.sh")
+    shutil.copy(ROOT / "scripts/lib/output.sh", repo / "scripts/lib/output.sh")
     for name in FILES:
         shutil.copy(ROOT / "scripts/operations/local" / name, local / name)
     (repo / "ports.env").write_text("PORT_BLOCK_START=35490\nPORT_BLOCK_END=35499\n")
@@ -486,7 +487,7 @@ def test_build_failures_stop_without_completion_claims(stage_lab, failure):
     assert result.returncode != 0
     assert '"coldChildReady"' not in result.stdout
     assert not stored(stage_lab)["containers"]
-    assert not list((stage_lab / "scratch").iterdir())
+    assert not list((stage_lab / "scratch").iterdir()), result.stderr
 
 
 def test_foreign_image_is_not_overwritten(stage_lab):

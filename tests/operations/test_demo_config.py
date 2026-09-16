@@ -317,6 +317,7 @@ def test_make_init_and_show_config_use_the_selected_checkout(tmp_path):
         "scripts/operations/config.py",
         "scripts/operations/demo.py",
         "scripts/operations/init.sh",
+        "scripts/lib/output.sh",
         "scripts/lib/env.sh",
     ):
         (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)

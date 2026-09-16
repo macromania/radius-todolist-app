@@ -165,7 +165,18 @@ elif tool=="git":
                 archive.add(path,arcname=path.name)
     else: sys.exit("unexpected git command")
 elif tool=="az":
-    if args[:2]==["account","show"]:
+    if args[:2]==["provider","show"]:
+        registered=state.get("providers",[])
+        value=("Registered" if mode!="unregistered-providers" or arg("--namespace") in registered
+               else "NotRegistered")
+        emit({"registrationState":value})
+    elif args[:2]==["provider","register"]:
+        state.setdefault("providers",[]).append(arg("--namespace"))
+        save()
+        emit({"registrationState":"Registering"})
+    elif args[:3]==["deployment","sub","validate"]:
+        emit({"properties":{"provisioningState":"Succeeded"}})
+    elif args[:2]==["account","show"]:
         emit({"id":subscription,"tenantId":tenant,"user":{"type":"user"},"state":"Enabled"})
     elif args[:2]==["keyvault","list"]:
         name=vault.upper() if mode=="external-case" else vault
@@ -232,9 +243,11 @@ elif tool=="az":
         emit({"nameAvailable":mode!="retained-vault"})
     elif args[:3]==["deployment","sub","list"]:
         prior=foundation()
+        if mode=="active-bootstrap":
+            prior["properties"]["provisioningState"]="Running"
         if mode=="foreign-deployment":
             prior["properties"]["parameters"]["deploymentName"]["value"]="foreign"
-        emit([prior] if mode in ("foreign-deployment","existing-owned") else [])
+        emit([prior] if mode in ("foreign-deployment","existing-owned","active-bootstrap") else [])
     elif args[:3]==["deployment","sub","create"]:
         if not entry["parameters"]["registryExists"]["value"]:
             state["arm_tags"]={}
@@ -521,6 +534,9 @@ else: sys.exit("unexpected native tool")
 @pytest.fixture
 def checkout(tmp_path):
     for relative in (
+        "scripts/lib/output.sh",
+        "scripts/operations/output.py",
+        "scripts/operations/azure/prerequisites.py",
         "scripts/lib/env.sh",
         "scripts/lib/discovery.sh",
         "scripts/operations/install-radius.sh",
@@ -797,6 +813,21 @@ def test_bootstrap_uses_selected_identity_and_fresh_successful_outputs(checkout,
     assert foundation["location"] == "westeurope"
     (create,) = selected(checkout, "az", ["deployment", "sub", "create"])
     assert create["template_exists"]
+    providers = selected(checkout, "az", ["provider", "show"])
+    assert {call["args"][call["args"].index("--namespace") + 1] for call in providers} == {
+        "Microsoft.Network",
+        "Microsoft.Compute",
+        "Microsoft.Storage",
+        "Microsoft.ContainerService",
+        "Microsoft.ManagedIdentity",
+        "Microsoft.ContainerRegistry",
+        "Microsoft.KeyVault",
+        "Microsoft.DBforPostgreSQL",
+        "Microsoft.Cache",
+    }
+    assert all(calls(checkout).index(call) < calls(checkout).index(create) for call in providers)
+    (validate,) = selected(checkout, "az", ["deployment", "sub", "validate"])
+    assert calls(checkout).index(validate) < calls(checkout).index(create)
     parameters = {key: value["value"] for key, value in create["parameters"].items()}
     names = parameters.pop("applicationCredentialNames")
     credential_scope = CredentialScope(spec["project"], spec["deployment"], "azure")
@@ -881,6 +912,34 @@ def test_bootstrap_installs_management_radius_on_the_normal_verified_path(checko
     assert not selected(checkout, "az", ["acr", "build"])
     assert not any("recipe" in call["args"] for call in radius_calls)
     assert "Bootstrap completed" in result.stderr
+
+
+def test_bootstrap_registers_new_subscription_before_service_checks(checkout):
+    configure(checkout, mode="unregistered-providers")
+    result = run(checkout, "bootstrap")
+    assert result.returncode == 0, result.stderr
+    registrations = selected(checkout, "az", ["provider", "register"])
+    assert len(registrations) == 9
+    (availability,) = selected(checkout, "az", ["acr", "check-name"])
+    assert all(
+        calls(checkout).index(call) < calls(checkout).index(availability) for call in registrations
+    )
+
+
+@pytest.mark.parametrize(
+    "failed",
+    [
+        ["az", "provider", "show"],
+        ["az", "provider", "register"],
+        ["az", "deployment", "sub", "validate"],
+    ],
+)
+def test_prerequisite_failure_blocks_actual_bootstrap_create(checkout, failed):
+    configure(checkout, mode="unregistered-providers", fail=failed)
+    result = run(checkout, "bootstrap")
+    assert result.returncode != 0 and not result.stdout
+    assert "synthetic native command failure" in result.stderr
+    assert not selected(checkout, "az", ["deployment", "sub", "create"])
 
 
 @pytest.mark.parametrize(

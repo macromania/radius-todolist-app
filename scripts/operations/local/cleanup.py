@@ -2005,7 +2005,7 @@ def main(argv=None, *, engine_factory=LiveLocalCleanup):
         KeyError,
         TypeError,
     ) as error:
-        print(f"Cleanup incomplete: {error}; no direct child deletion", file=sys.stderr)
+        live_support().status("error", f"Cleanup incomplete: {error}; no direct child deletion")
         return 1
     finally:
         if engine is not None:
@@ -2013,4 +2013,4 @@ def main(argv=None, *, engine_factory=LiveLocalCleanup):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(live_support().run_main(main, "Local cleanup"))

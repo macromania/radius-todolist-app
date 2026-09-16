@@ -4,7 +4,7 @@
 source "$ROOT/scripts/lib/env.sh"
 
 azure_json() {
-  az "$@" --subscription "$AZURE_SUBSCRIPTION_ID" --output json
+  demo_run "Azure $1 ${2:-}" az "$@" --subscription "$AZURE_SUBSCRIPTION_ID" --output json
 }
 
 azure_cleanup() {

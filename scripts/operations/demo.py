@@ -127,4 +127,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from scripts.operations.output import run_main
+
+    raise SystemExit(run_main(main, "Operator configuration"))

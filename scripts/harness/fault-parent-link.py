@@ -2093,4 +2093,6 @@ def main(argv=None, *, configuration_factory=LiveConfiguration) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    from scripts.operations.output import run_main
+
+    raise SystemExit(run_main(main, "Parent-link fault operation"))

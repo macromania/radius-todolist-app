@@ -120,6 +120,7 @@ else: raise SystemExit("unexpected tool")
 @pytest.fixture
 def checkout(tmp_path):
     for relative in (
+        "scripts/lib/output.sh",
         "scripts/lib/env.sh",
         "scripts/lib/discovery.sh",
         "scripts/operations/endpoints.sh",

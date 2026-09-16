@@ -231,7 +231,9 @@ def test_stage_headings_preserve_tool_output_arguments_and_failures(
         "CONFIRM_LOCAL=yes",
     )
     assert result.stdout == "tool output line 1\ntool output line 2\n"
-    assert result.stderr.startswith(f"\n\n== {target} ==\n{RULE}\n\ntool diagnostic\n")
+    assert result.stderr.startswith(f"\n\n== {target} ==\n{RULE}\n\n[progress] {target}\n")
+    assert "tool diagnostic\n" in result.stderr
+    assert f"[{'success' if exit_code == 0 else 'error'}] {target}" in result.stderr
     assert (result.returncode == 0) == (exit_code == 0)
     assert "All source checks passed" not in result.stdout
 
@@ -350,7 +352,9 @@ def test_styled_stage_headings_preserve_json_stdout(tmp_path, color, terminal, e
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout == '{"result":"unchanged"}\n'
-    assert ANSI.sub("", result.stderr) == f"\n\n== show-config ==\n{RULE}\n\n"
+    plain = ANSI.sub("", result.stderr)
+    assert plain.startswith(f"\n\n== show-config ==\n{RULE}\n\n[progress] show-config\n")
+    assert "[success] show-config completed (" in plain
     assert ("\x1b" in result.stderr) == styled
 
 

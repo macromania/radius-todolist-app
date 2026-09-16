@@ -66,10 +66,9 @@ ShellCheck, and the following tools installed:
 | Terraform for offline checks | 1.14-1.15; CI/runtime use 1.15.8 |
 
 Azure also needs `az`, `helm`, and `kubelogin`. Sign in with an interactive
-Azure user account, not a service principal. Bootstrap requires permission to
-create the project's resource groups, resources, managed identities, custom
-roles, and scoped role assignments. The workstation must reach the AKS APIs.
-Docker Desktop is used to inspect built images.
+Azure user account, not a service principal. The required roles are listed below.
+The workstation must reach the AKS APIs. Docker Desktop is used to inspect built
+images.
 
 ```bash
 uv sync --locked
@@ -81,66 +80,41 @@ make check-bicep
 generates type extensions; it does not deploy resources. `make check` runs the
 full source checks if you want that checkpoint before deploying.
 
+All Make workflows use colored sections and labeled status: blue headings, cyan
+progress, green success, yellow warnings, and red errors. Quiet waits print elapsed
+time every 15 seconds. `COLOR=always` forces status color; `COLOR=never` or nonempty
+`NO_COLOR` disables it. Redirected output is plain by default. Status goes to stderr;
+JSON/API stdout and complete native tool diagnostics and build/push logs are preserved.
+
 ### Select operator configuration
 
-#### Choose operator access
+Use the same signed-in account for bootstrap and the rest of this walkthrough.
+Your account needs one of these options:
 
-The recommended target is scoped read, AKS, and ACR access for your regular
-account, with temporary privileged access for bootstrap and cleanup. Do not keep
-subscription Owner or User Access Administrator solely for everyday demo
-operation. This is a recommended access model, not a complete least-privilege
-permission package already configured by the current scripts.
+| Roles required before bootstrap | Scope |
+|---|---|
+| **Owner** | Selected Azure subscription |
+| **Contributor** plus **User Access Administrator** | Selected Azure subscription |
 
-| Workflow | Access needed | Scope |
-|---|---|---|
-| Bootstrap and full cleanup | Resource and deployment management, custom role definition management, and role assignment management | The subscription deployment and required demo resource scopes; the selected external vault when applicable |
-| Resource discovery and reports | ARM read access, including bootstrap outputs and the RBAC metadata queried by the scripts | Demo resources and required subscription-level discovery reads |
-| Kubernetes access and full operational scenarios | Azure Kubernetes Service Cluster User Role and Azure Kubernetes Service RBAC Cluster Admin | Each demo cluster or its dedicated cluster resource group |
-| Image builds and Recipe publication | ACR task execution, repository read/write/import, and registry tag updates for build provenance | Only the demo registry |
-| Direct API requests after deployment | The endpoint and its demo API key; no Azure role | The selected plane API |
+Contributor alone, or Contributor plus Role Based Access Control Administrator,
+cannot create the demo's custom role definitions.
 
-AKS RBAC Cluster Admin is the current operator baseline, not a proven minimum.
-The full scenarios read Secrets, execute commands in Pods, change workloads and
-network policies, access Radius APIs, and perform impersonation checks. Narrower
-access requires purpose-built Kubernetes/AKS permissions. The `make api` helper
-also uses Kubernetes to discover the endpoint and normally read the API key;
-it does not have the same access requirements as a direct HTTP request.
+Bootstrap automatically grants that account these additional roles:
 
-For builds, the relevant registry-scoped roles are **Container Registry Tasks
-Contributor**, **Container Registry Repository Writer**, and **Container Registry
-Data Importer and Data Reader**, plus registry tag-write permission.
-**Tag Contributor** is a built-in option for the tag updates. Keep the existing
-repository-writer condition: writes are limited to the image repositories and
-Recipe staging, not canonical Recipes. Bootstrap grants the writer and importer
-roles to its operator, but does not separately grant task execution or tag-write
-access. Those permissions must be supplied before removing broader operator
-access. See the [ACR role definitions](https://learn.microsoft.com/en-us/azure/container-registry/container-registry-rbac-built-in-roles-directory-reference).
+| Roles granted by bootstrap | Scope |
+|---|---|
+| Azure Kubernetes Service Cluster User Role and Azure Kubernetes Service RBAC Cluster Admin | Demo clusters |
+| Container Registry Repository Writer and Container Registry Data Importer and Data Reader | Demo registry |
 
-Bootstrap creates four custom role definitions as well as role assignments.
-It therefore needs both `Microsoft.Authorization/roleDefinitions/write` and
-`Microsoft.Authorization/roleAssignments/write`; full cleanup also needs the
-corresponding delete permissions. Access only to the management cluster resource
-group is insufficient. **Owner**, or **Contributor plus User Access
-Administrator**, can cover these bootstrap permissions, but both are broad
-administrative options rather than least-privilege configurations.
-**Contributor plus Role Based Access Control Administrator** alone cannot
-create the custom role definitions. See the [privileged role definitions](https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles/privileged).
+Keep the repository-writer condition that bootstrap applies; do not add an
+unrestricted writer grant. If your subscription roles require PIM activation,
+activate them before running the demo. Role assignment conditions must permit
+the demo's grants, even when your role is Owner.
 
-Bootstrap assigns its operator's AKS and ACR roles to the signed-in account.
-If a separate administrator runs bootstrap, those grants go to that account,
-not automatically to the everyday operator. Arrange the intended operator's
-scoped grants explicitly before relying on the split-access model. Application
-managed identities use their own scoped grants; they do not need subscription
-Owner.
+This is the simple administrative setup for the full demo, not a least-privilege
+production configuration. Use a dedicated demo subscription or temporary access.
 
-Check effective access in the subscription's **Access control (IAM)** view,
-including role assignment conditions. An active Owner assignment can still
-reject specific role grants when a condition restricts them. PIM activation is
-needed only when the required role is eligible but not active. Have the
-administrator review a blocking condition rather than removing it by default.
-`CONFIRM_AZURE=yes` confirms an operation; it does not elevate Azure permissions.
-
-#### Select deployment identity
+### Select deployment identity
 
 Choose the subscription and a short project/deployment name:
 
@@ -162,6 +136,11 @@ Check `make show-config` before creating resources. It treats `.env` as data and
 redacts keys. To supply a demo key, add `--demo-key-from-env SLOT=VARIABLE` to
 the initialization arguments, with the value already set privately in that
 environment variable. Never put the key itself in `ARGS` or shell history.
+
+Initialization replaces the file; it does not append or merge previous settings.
+Identical inputs produce one assignment per key. Switching environments removes
+old Azure settings and keys. Invalid inputs or repeated credential slots leave
+the previous private file unchanged.
 
 By default, bootstrap creates the deployment's shared Key Vault. To use an
 existing vault, add `--key-vault NAME` during initialization. It must belong to
@@ -190,6 +169,25 @@ child scopes and permissions but does not create tenant clusters or databases.
 ```bash
 make bootstrap CONFIRM_AZURE=yes
 ```
+
+Before resource creation, bootstrap checks and registers the providers used by
+the foundation and later child Recipes: Network, Compute, Storage, ContainerService,
+ManagedIdentity, ContainerRegistry, KeyVault, DBforPostgreSQL, and Cache. These are
+subscription-wide registrations and remain after cleanup. The operator needs the
+providers' `/register/action` permissions; Contributor and Owner include them.
+The command never grants itself permissions or changes the default subscription.
+After registration starts, ARM validation checks the selected deployment before
+creation; a provider need not finish registering in every unrelated region first.
+
+The current templates require no preview feature registrations. In particular,
+`Microsoft.Network/AllowBringYourOwnPublicIpAddress` is not an intended dependency:
+NAT and Application Gateway use Azure-assigned Standard Static addresses, not
+customer-owned IP ranges. If Azure requests that feature, inspect the failed ARM
+operation and its request rather than enabling it blindly. Bootstrap prints the
+selected deployment name and a scoped inspection command when creation fails.
+Denied registration or an unexpected response stops bootstrap without claiming
+success. A genuinely required approval-pending feature needs service approval,
+not repeated deployment attempts.
 
 Checkpoint: bootstrap completed and management AKS and Radius exist. The
 management application and tenant clusters have not been deployed yet.
@@ -747,6 +745,27 @@ until its retention period ends; `purged: false` is not active-deployment residu
 If an owner is unavailable or a Recipe left orphaned resources, stop and inspect
 the failure. Do not substitute direct AKS deletion, edit ownership records, or
 reset database rows to force cleanup.
+
+### After a failed bootstrap
+
+Failed or canceled ARM deployments may have null or missing outputs. Cleanup
+validates their deployment identity and parameters, then inspects current owners
+instead of assuming that missing outputs mean no resources exist:
+
+```bash
+make clean-plan
+make clean-azure CONFIRM_AZURE=yes
+make verify-clean
+```
+
+With no clusters or applications, cleanup can remove verified partial foundation
+resources. Orphaned node/app resources, mismatched metadata, and active deployments
+block deletion with an explanation. A non-ready management AKS or unavailable
+Radius owner is retained for investigation, not deleted through a fallback.
+A failed bootstrap rerun with existing applications still uses normal Radius
+cleanup. External vaults and their retained objects remain protected. Cleanup
+rechecks the bootstrap record before Azure mutations and never reports clean
+until active-resource absence is verified.
 
 ### Optional: retain the foundation
 

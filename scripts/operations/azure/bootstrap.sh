@@ -15,7 +15,9 @@ if [[ "${1:-}" == --help ]]; then
   exit 0
 fi
 (( $# == 0 )) || { demo_error 'bootstrap takes no arguments'; exit 1; }
+demo_status section 'Bootstrap: configuration and tools'
 azure_init
+demo_status section 'Bootstrap: account, vault and operator discovery'
 azure_discover_vault
 
 azure_json account show > "$AZURE_WORKSPACE/account.json"
@@ -51,6 +53,7 @@ printf '%s' "$OPERATOR_IP" | jq -Rse '
   else false end
 ' >/dev/null || { demo_error 'Operator address must be a canonical public IPv4 address'; exit 1; }
 
+demo_status section 'Bootstrap: existing resource ownership'
 GROUPS_JSON=$(printf '%s\n' "rg-$STEM-platform" \
   "rg-$STEM-"{management,shared-control,shared-data,isolated-1-control,isolated-1-data}-{cluster,app,nodes} \
   | jq -Rsc 'split("\n") | map(select(length > 0))')
@@ -100,6 +103,14 @@ while IFS= read -r group; do
     demo_error 'An existing foundation resource has missing or foreign ownership'; exit 1;
   }
 done < <(jq -r '.[].name' "$AZURE_WORKSPACE/groups.json")
+
+demo_status section 'Bootstrap: subscription prerequisites'
+[[ -x "$ROOT/.venv/bin/python" ]] || {
+  demo_error 'Run uv sync --locked before bootstrap'; exit 1;
+}
+demo_run 'Azure subscription prerequisites' "$ROOT/.venv/bin/python" \
+  "$ROOT/scripts/operations/azure/prerequisites.py" --subscription "$AZURE_SUBSCRIPTION_ID" \
+  > "$AZURE_WORKSPACE/prerequisites.json"
 
 REGISTRY_EXISTS=false
 for kind in registry vault; do
@@ -158,6 +169,12 @@ jq -e --arg project "$DEMO_PROJECT" --arg deployment "$DEMO_DEPLOYMENT" '
 ' "$AZURE_WORKSPACE/prior-deployments.json" >/dev/null || {
   demo_error 'The subscription deployment name already belongs to another identity'; exit 1;
 }
+jq -e 'all(.[]; .properties.provisioningState |
+  . == "Succeeded" or . == "Failed" or . == "Canceled")' \
+  "$AZURE_WORKSPACE/prior-deployments.json" >/dev/null || {
+  demo_error 'Bootstrap deployment is still active or has an unknown state; inspect it before retrying'
+  exit 1
+}
 
 CREDENTIAL_NAMES=$(azure_credential_names | jq -Rsc 'split("\n") | map(select(length > 0))')
 EXTERNAL_VAULT_GROUP=''
@@ -169,6 +186,7 @@ jq -e --arg vault "$VAULT" --arg group "$EXTERNAL_VAULT_GROUP" '
   demo_error 'Existing deployment has a different vault binding; implicit migration is refused'; exit 1;
 }
 
+demo_status section 'Bootstrap: compile and validate the foundation'
 jq -n --arg project "$DEMO_PROJECT" --arg deployment "$DEMO_DEPLOYMENT" \
   --arg location "$AZURE_LOCATION" --arg registry "$REGISTRY" --arg vault "$VAULT" \
   --arg operator "$OPERATOR" --arg ip "$OPERATOR_IP" --arg hash "$IDENTITY_HASH" \
@@ -184,19 +202,36 @@ jq -n --arg project "$DEMO_PROJECT" --arg deployment "$DEMO_DEPLOYMENT" \
     } | map_values({value:.}))
   }' > "$AZURE_WORKSPACE/parameters.json"
 "$BICEP" build "$ROOT/infra/bootstrap/azure.bicep" --outfile "$AZURE_WORKSPACE/bootstrap.json"
+azure_json deployment sub validate --location "$AZURE_LOCATION" --name "$STEM-bootstrap" \
+  --template-file "$AZURE_WORKSPACE/bootstrap.json" --parameters "@$AZURE_WORKSPACE/parameters.json" \
+  > "$AZURE_WORKSPACE/validated.json"
+jq -e '.properties.provisioningState == "Succeeded"' "$AZURE_WORKSPACE/validated.json" >/dev/null || {
+  demo_error 'Foundation validation did not reach Succeeded; no deployment was submitted'; exit 1;
+}
+demo_status section "Bootstrap: ARM deployment $STEM-bootstrap"
 azure_json deployment sub create --location "$AZURE_LOCATION" --name "$STEM-bootstrap" \
   --template-file "$AZURE_WORKSPACE/bootstrap.json" --parameters "@$AZURE_WORKSPACE/parameters.json" \
-  > "$AZURE_WORKSPACE/created.json"
+  > "$AZURE_WORKSPACE/created.json" || {
+    result=$?
+    demo_status error "Foundation deployment failed; Azure resources may remain. Inspect failed operations:"
+    printf '  az deployment operation sub list --subscription %s --name %s-bootstrap --output json\n' \
+      "$AZURE_SUBSCRIPTION_ID" "$STEM" >&2
+    demo_status warning 'An unexpected BYOIP requirement must be diagnosed from the failed request, not enabled automatically.'
+    exit "$result"
+  }
 jq -e '.properties.provisioningState == "Succeeded"' "$AZURE_WORKSPACE/created.json" >/dev/null || {
   demo_error 'Foundation deployment did not reach Succeeded'; exit 1;
 }
 BOOTSTRAP_PHASE='live foundation verification'
+demo_status section "Bootstrap: $BOOTSTRAP_PHASE"
 trap 'printf "ERROR: ARM deployment %s succeeded, but bootstrap is incomplete at %s. Azure resources are retained; rerun normal bootstrap after resolving the failure.\n" "$STEM-bootstrap" "$BOOTSTRAP_PHASE" >&2' ERR
 azure_foundation
 BOOTSTRAP_PHASE='registry repository permission validation'
+demo_status section "Bootstrap: $BOOTSTRAP_PHASE"
 azure_registry
 azure_recipe_policy
 BOOTSTRAP_PHASE='management Radius identity validation'
+demo_status section "Bootstrap: $BOOTSTRAP_PHASE"
 jq -e --arg identity \
   "$SUBSCRIPTION_SCOPE/resourceGroups/rg-$STEM-management-cluster/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-$STEM-management-radius" \
   --slurpfile account "$AZURE_WORKSPACE/account.json" '
@@ -212,9 +247,11 @@ RADIUS_CLIENT_ID=$(jq -er '.allocations[] | select(.slot == "management") | .ide
   "$AZURE_WORKSPACE/foundation.json")
 RADIUS_TENANT_ID=$(jq -er '.foundation.tenantId' "$AZURE_WORKSPACE/foundation.json")
 BOOTSTRAP_PHASE='management cluster access'
+demo_status section "Bootstrap: $BOOTSTRAP_PHASE"
 TMPDIR="$AZURE_WORKSPACE" demo_workspace
 demo_open_cluster management
 BOOTSTRAP_PHASE='management Radius installation'
+demo_status section "Bootstrap: $BOOTSTRAP_PHASE"
 BICEP_BIN="$BICEP" bash "$ROOT/scripts/operations/install-radius.sh" \
   --workspace-root "$AZURE_WORKSPACE" \
   --context "$DEMO_CONTEXT" --kubeconfig "$DEMO_KUBECONFIG" \
@@ -222,8 +259,9 @@ BICEP_BIN="$BICEP" bash "$ROOT/scripts/operations/install-radius.sh" \
   --client-id "$RADIUS_CLIENT_ID" --tenant-id "$RADIUS_TENANT_ID" \
   > "$AZURE_WORKSPACE/radius-install.json"
 BOOTSTRAP_PHASE='management Radius verification'
+demo_status section "Bootstrap: $BOOTSTRAP_PHASE"
 jq -e --arg context "$DEMO_CONTEXT" \
   '.context == $context and .workload_identity_verified == true' \
   "$AZURE_WORKSPACE/radius-install.json" >/dev/null
-printf '%s\n' 'Bootstrap completed: Azure foundation and management Radius workload identity are verified.' >&2
+demo_status success 'Bootstrap completed: Azure foundation and management Radius workload identity are verified.'
 cat "$AZURE_WORKSPACE/foundation.json"

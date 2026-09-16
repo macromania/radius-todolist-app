@@ -77,6 +77,13 @@ docker --context desktop-linux version
 creating resources. `make check` runs the full source checks if you want that
 checkpoint before deploying.
 
+All Make workflows use colored sections and labeled status: blue headings, cyan
+progress, green success, yellow warnings, and red errors. Quiet waits print elapsed
+time every 15 seconds. Use `COLOR=always` to force status color, or `COLOR=never`
+or nonempty `NO_COLOR` to disable it. Redirected output is plain by default.
+Status goes to stderr; JSON/API stdout and native tool diagnostics are preserved.
+Build and push logs are not filtered.
+
 ### Select operator configuration
 
 Choose the local deployment identity:
@@ -91,6 +98,10 @@ no resources. The defaults are project `radplanes` and deployment `learning`.
 For another selection, use
 `make init ENV=local ARGS='--project demo --deployment team'`.
 `make show-config` treats the file as data and redacts keys.
+
+Initialization replaces rather than appends or merges settings. Repeating the
+same inputs writes each key once. Switching from Azure removes its old settings
+and keys. Invalid inputs or duplicate credential slots preserve the previous file.
 
 To supply a demo key, add `--demo-key-from-env SLOT=VARIABLE` to initialization,
 with the value already set privately in that environment variable. Never put

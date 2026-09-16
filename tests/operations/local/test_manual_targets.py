@@ -47,6 +47,7 @@ def test_manual_target_runs_one_explicit_stage(tmp_path, target, stage, environm
 @pytest.mark.parametrize("checker_exit", [0, 7])
 def test_shell_target_covers_nested_libraries_and_propagates_failures(tmp_path, checker_exit):
     paths = {
+        "scripts/lib/output.sh",
         "scripts/lib/env.sh",
         "scripts/operations/local/encryption.sh",
         "scripts/harness/nested/with space.sh",

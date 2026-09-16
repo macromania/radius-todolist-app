@@ -16,6 +16,7 @@ mode=${1:-apply}
 if [[ "$mode" != apply && "$mode" != inspect ]] || (( $# > 1 )); then
   demo_error 'Unexpected bootstrap arguments'; exit 1;
 fi
+demo_status section "Local bootstrap: $mode management foundation"
 for tool in docker kind kubectl jq rad uv; do
   command -v "$tool" >/dev/null || { demo_error "Required tool missing: $tool"; exit 1; }
 done
@@ -51,10 +52,10 @@ environment=(env -i "PATH=$PATH" "HOME=$work/home" "DOCKER_HOST=$host" \
   "KIND_EXPERIMENTAL_PROVIDER=docker" "KUBECONFIG=$kubeconfig" "LC_ALL=C" \
   "UV_PYTHON_DOWNLOADS=never" "UV_OFFLINE=1")
 docker_cli() { "${environment[@]}" docker --host "$host" "$@"; }
-kind_cli() { "${environment[@]}" kind "$@"; }
+kind_cli() { demo_run "kind $1" "${environment[@]}" kind "$@"; }
 kube() { "${environment[@]}" kubectl --kubeconfig "$kubeconfig" --context "$context" \
   --request-timeout=30s "$@"; }
-radius() { "${environment[@]}" rad --config "$work/radius.yaml" "$@"; }
+radius() { demo_run "Radius $1" "${environment[@]}" rad --config "$work/radius.yaml" "$@"; }
 assets() { "${environment[@]}" uv run --no-sync --project "$ROOT" python \
   "$ROOT/scripts/operations/local/assets.py" "$@"; }
 

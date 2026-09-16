@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 from config import load_config
+from output import run_main, status
 from project import ROOT, CommandError, require_confirmation
 
 sys.path.insert(0, str(ROOT / "src"))
@@ -577,6 +578,7 @@ def main() -> int:
         raise ValueError("This command requires the Azure .env selection")
     if args.execute:
         require_confirmation("azure")
+    status("section", "Management: discover deployment inputs and cluster access")
     config = live_configuration(identity)
     with tempfile.TemporaryDirectory(prefix="plane-management-") as directory:
         context, kubeconfig = management_access(identity, Path(directory))
@@ -593,13 +595,14 @@ def main() -> int:
                 )
             )
             return 0
+        status("section", "Management: submit deployment Job and wait for completion")
         print(json.dumps(deploy_selected(config, context, kubeconfig)))
     return 0
 
 
 if __name__ == "__main__":
     try:
-        sys.exit(main())
+        sys.exit(run_main(main, "Management deployment"))
     except (CommandError, ValueError, KeyError, OSError) as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        status("error", f"ERROR: {exc}")
         sys.exit(1)

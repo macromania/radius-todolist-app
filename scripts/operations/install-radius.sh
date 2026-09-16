@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
+set +x
 umask 077
+# shellcheck source=../lib/output.sh
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/output.sh"
 
-fail() { printf 'Radius installation failed: %s\n' "$*" >&2; exit 1; }
+fail() { demo_status error "Radius installation failed: $*"; exit 1; }
 context='' kubeconfig='' config='' client_id='' tenant_id='' workspace=''
 while (($#)); do
   (($# >= 2)) || fail "Missing value for $1"
@@ -62,12 +65,13 @@ mkdir -p "$temporary_home/.kube" "$temporary_home/.rad/bin"
 ln -s "$kubeconfig" "$temporary_home/.kube/config"
 ln -s "$bicep" "$temporary_home/.rad/bin/bicep"
 export HOME="$temporary_home" KUBECONFIG="$kubeconfig"
-rad_command() { rad --config "$config" "$@" >&2; }
+rad_command() { demo_run "Radius $1" rad --config "$config" "$@" >&2; }
 kube() { kubectl --kubeconfig "$kubeconfig" --context "$context" "$@"; }
 kube get nodes >&2
 rad_command install kubernetes --kubecontext "$context" --skip-contour-install \
   --set dashboard.enabled=false --set global.azureWorkloadIdentity.enabled=true
 for account in applications-rp bicep-de ucp dynamic-rp; do
+  demo_status progress "Configure and verify Radius workload identity: $account"
   kube -n radius-system annotate serviceaccount "$account" --overwrite \
     "azure.workload.identity/client-id=$client_id" \
     "azure.workload.identity/tenant-id=$tenant_id" >&2

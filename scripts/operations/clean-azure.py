@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from scripts.operations.config import ConfigError, load_config  # noqa: E402
+from scripts.operations.output import progress, run_main, status  # noqa: E402
 
 PROJECT = "radplanes"
 SUBSCRIPTION = "a3ed6c04-563f-4855-ac84-bdf1e5fbc3fc"
@@ -975,20 +976,23 @@ class LiveClusterCleanup:
                 f"Mutation requires --execute and {self.confirmation}=yes",
             )
         try:
-            result = self.runner(
-                argv,
-                input=payload,
-                env=env or self.env,
-                cwd=ROOT,
-                timeout=timeout,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            with progress(f"Cleanup: {Path(argv[0]).name}"):
+                result = self.runner(
+                    argv,
+                    input=payload,
+                    env=env or self.env,
+                    cwd=ROOT,
+                    timeout=timeout,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
         except (OSError, subprocess.TimeoutExpired):
             raise CleanupError(
                 f"{argv[0]} unavailable or timed out; cleanup is incomplete"
             ) from None
+        if result.stderr:
+            print(result.stderr, file=sys.stderr, end="" if result.stderr.endswith("\n") else "\n")
         require(result.returncode == 0, f"{argv[0]} command failed; no provider fallback")
         require(len(result.stdout) <= 8_000_000, "Cleanup response exceeds inventory limit")
         return result.stdout
@@ -1260,7 +1264,7 @@ class LiveClusterCleanup:
 
     def note(self, action, identity):
         self.steps.append({"action": action, "identity": identity})
-        print(f"{'execute' if self.execute else 'plan'} {action}: {identity}", file=sys.stderr)
+        status("progress", f"{'execute' if self.execute else 'plan'} {action}: {identity}")
 
     def quiesce(self):
         if self.namespace("management") is None:
@@ -1542,6 +1546,8 @@ class LiveAzureCleanup(LiveClusterCleanup):
         )
         self.external = None
         self.group_resources = {}
+        self.bootstrap_record = None
+        self.partial_foundation = False
 
     def gid(self, name):
         return f"/subscriptions/{self.config.subscription}/resourceGroups/{name}"
@@ -1575,6 +1581,8 @@ class LiveAzureCleanup(LiveClusterCleanup):
         )
 
     def az(self, *args, mutation=False):
+        if mutation and self.bootstrap_record is not None:
+            self.bootstrap_properties()
         raw = self.call(
             [
                 "az",
@@ -1683,14 +1691,125 @@ class LiveAzureCleanup(LiveClusterCleanup):
                 selected_resources.append(value)
         return selected_groups, selected_resources
 
-    def foundation(self):
+    def bootstrap_properties(self):
         value = self.az("deployment", "sub", "show", "--name", self.config.stem + "-bootstrap")
-        properties = value["properties"]
+        require(isinstance(value, dict), "Bootstrap deployment response is missing or malformed")
+        properties = value.get("properties")
         require(
-            properties.get("provisioningState") in TERMINAL, "Bootstrap deployment is nonterminal"
+            isinstance(properties, dict), "Bootstrap deployment properties are missing or malformed"
         )
-        outputs = {key: item["value"] for key, item in properties["outputs"].items()}
+        state = properties.get("provisioningState")
+        require(
+            isinstance(state, str) and state in TERMINAL,
+            "Bootstrap deployment is nonterminal or has an invalid state",
+        )
+        record = json.dumps(
+            [
+                value.get("id"),
+                properties.get("timestamp"),
+                properties.get("correlationId"),
+                properties.get("provisioningState"),
+                properties.get("parameters"),
+                properties.get("outputs"),
+            ],
+            sort_keys=True,
+        )
+        require(
+            self.bootstrap_record is None or self.bootstrap_record == record,
+            "Bootstrap deployment changed during cleanup; resources retained",
+        )
+        return value, properties, record
+
+    def foundation(self):
+        value, properties, record = self.bootstrap_properties()
+        raw = properties.get("outputs")
+        require(raw is None or isinstance(raw, dict), "Bootstrap outputs are malformed")
+        outputs = {}
+        for key, item in (raw or {}).items():
+            require(
+                isinstance(item, dict) and "value" in item, "Bootstrap output entry is malformed"
+            )
+            outputs[key] = item["value"]
+        if outputs.get("foundation") is not None:
+            require(
+                isinstance(outputs["foundation"], dict), "Bootstrap foundation output is malformed"
+            )
+        if outputs.get("allocations") is not None:
+            allocations = outputs["allocations"]
+            require(
+                isinstance(allocations, list)
+                and all(
+                    isinstance(item, dict)
+                    and isinstance(item.get("slot"), str)
+                    and item["slot"] in SLOTS
+                    for item in allocations
+                ),
+                "Bootstrap allocations output is malformed",
+            )
+        if outputs.get("foundation") is None or outputs.get("allocations") is None:
+            require(
+                properties["provisioningState"] in {"Failed", "Canceled"},
+                "Succeeded bootstrap has missing outputs; ownership must be investigated",
+            )
+            expected = {
+                "projectName": self.config.project,
+                "deploymentName": self.config.deployment,
+                "environment": "azure",
+                "location": self.config.location,
+                "registryName": self.config.registry_name,
+                "vaultName": self.config.vault_name,
+                "deploymentHash": self.config.identity_hash,
+                "externalVaultResourceGroup": self.external["resourceGroup"]
+                if self.external
+                else "",
+            }
+            parameters = properties.get("parameters")
+            require(
+                same_id(
+                    value.get("id"),
+                    f"/subscriptions/{self.config.subscription}"
+                    f"/providers/Microsoft.Resources/deployments/{self.config.stem}-bootstrap",
+                )
+                and isinstance(parameters, dict)
+                and all(
+                    isinstance(parameters.get(key), dict) and parameters[key].get("value") == wanted
+                    for key, wanted in expected.items()
+                ),
+                "Incomplete bootstrap identity or parameters differ; resources retained",
+            )
+            partial = outputs.get("foundation") or {}
+            for key, wanted in {
+                "projectName": self.config.project,
+                "deploymentName": self.config.deployment,
+                "environment": "azure",
+                "resourcePrefix": self.config.stem,
+                "subscriptionId": self.config.subscription,
+                "vaultId": self.vault_id,
+                "vaultOwned": self.config.key_vault is None,
+                "roleDefinitionIds": self.roles,
+            }.items():
+                require(
+                    key not in partial or partial[key] == wanted,
+                    "Incomplete bootstrap outputs contradict the selected identity",
+                )
+            for item in outputs.get("allocations") or []:
+                slot = item["slot"]
+                require(
+                    item.get("clusterName") == "aks-" + self.config.slot_name(slot)
+                    and item.get("appResourceGroup") == self.group_name(slot, "app")
+                    and item.get("clusterResourceGroup") == self.group_name(slot, "cluster")
+                    and item.get("nodeResourceGroup") == self.group_name(slot, "nodes"),
+                    "Incomplete bootstrap allocations contradict the selected identity",
+                )
+            self.partial_foundation = True
+            self.bootstrap_record = record
+            status(
+                "warning",
+                "Bootstrap has no complete outputs; validating live owners before partial cleanup",
+            )
+            return
         foundation = outputs["foundation"]
+        require(isinstance(foundation, dict), "Bootstrap foundation output is malformed")
         require(
             foundation.get("projectName") == self.config.project
             and foundation.get("deploymentName") == self.config.deployment
@@ -1712,7 +1831,12 @@ class LiveAzureCleanup(LiveClusterCleanup):
         )
         allocations = outputs["allocations"]
         require(
-            len(allocations) == len(SLOTS) and {item["slot"] for item in allocations} == set(SLOTS),
+            isinstance(allocations, list)
+            and len(allocations) == len(SLOTS)
+            and all(
+                isinstance(item, dict) and isinstance(item.get("slot"), str) for item in allocations
+            )
+            and {item["slot"] for item in allocations} == set(SLOTS),
             "Bootstrap allocations differ",
         )
         for item in allocations:
@@ -1724,6 +1848,95 @@ class LiveAzureCleanup(LiveClusterCleanup):
                 and item["nodeResourceGroup"] == self.group_name(slot, "nodes"),
                 "Bootstrap group or cluster ownership differs",
             )
+        self.bootstrap_record = record
+
+    def partial_without_clusters(self):
+        """No Radius bypass: accept only foundation resource kinds, never orphaned apps/nodes."""
+        platform_types = {
+            "microsoft.network/virtualnetworks",
+            "microsoft.network/publicipaddresses",
+            "microsoft.network/natgateways",
+            "microsoft.network/networksecuritygroups",
+            "microsoft.network/privatednszones",
+            "microsoft.network/privatednszones/virtualnetworklinks",
+            "microsoft.network/privateendpoints",
+            "microsoft.network/networkinterfaces",
+            "microsoft.containerregistry/registries",
+            "microsoft.keyvault/vaults",
+            "microsoft.managedidentity/userassignedidentities",
+        }
+        prefix = self.config.stem
+        platform_names = {
+            "microsoft.network/virtualnetworks": {f"vnet-{prefix}"},
+            "microsoft.network/publicipaddresses": {f"pip-{prefix}-egress"},
+            "microsoft.network/natgateways": {f"nat-{prefix}"},
+            "microsoft.network/networksecuritygroups": {f"nsg-{prefix}-gateways"},
+            "microsoft.network/privatednszones": {
+                f"{prefix}.postgres.database.azure.com",
+                "privatelink.redis.azure.net",
+                "privatelink.vaultcore.azure.net",
+            },
+            "microsoft.network/privateendpoints": {f"pe-{prefix}-vault"},
+            "microsoft.network/networkinterfaces": {f"nic-{prefix}-vault"},
+            "microsoft.containerregistry/registries": {self.config.registry_name},
+            "microsoft.keyvault/vaults": {self.config.vault_name},
+            "microsoft.managedidentity/userassignedidentities": {
+                f"id-{prefix}-coordinator",
+                f"id-{prefix}-harness",
+            },
+        }
+        for group in self.groups:
+            resources = self.group(group) or []
+            if group.endswith(("-app", "-nodes")):
+                require(
+                    not resources,
+                    f"Resources remain without their application/AKS owner: {group}; retained",
+                )
+                continue
+            allowed = (
+                platform_types
+                if group == self.platform
+                else {
+                    "microsoft.managedidentity/userassignedidentities",
+                }
+            )
+            for item in resources:
+                kind = item["type"].lower()
+                require(
+                    kind
+                    in allowed
+                    | {
+                        "microsoft.authorization/roleassignments",
+                        "microsoft.resources/deployments",
+                        "microsoft.managedidentity/userassignedidentities/federatedidentitycredentials",
+                    },
+                    f"Unexpected partial-bootstrap resource: {item['id']}; retained",
+                )
+                require(
+                    self.tags(item.get("tags")) or kind in UNTAGGABLE,
+                    "Partial-bootstrap resource ownership differs",
+                )
+                if group == self.platform and kind in platform_names:
+                    require(
+                        item["id"].rsplit("/", 1)[-1] in platform_names[kind],
+                        f"Unexpected partial-bootstrap resource identity: {item['id']}; retained",
+                    )
+                elif kind == "microsoft.managedidentity/userassignedidentities":
+                    slot = group.removeprefix(f"rg-{prefix}-").removesuffix("-cluster")
+                    require(
+                        item["id"].rsplit("/", 1)[-1]
+                        in {
+                            f"id-{prefix}-{slot}-{purpose}"
+                            for purpose in (
+                                "control-plane",
+                                "kubelet",
+                                "radius",
+                                "gateway",
+                                "certificate-issuer",
+                            )
+                        },
+                        "Unexpected partial-bootstrap cluster identity; retained",
+                    )
 
     def role_state(self):
         found, retained, assignments = {}, [], []
@@ -1899,6 +2112,8 @@ class LiveAzureCleanup(LiveClusterCleanup):
             self.sleep(3)
 
     def delete_group(self, name):
+        if self.partial_foundation and not self.targets:
+            self.partial_without_clusters()
         resources = self.group(name)
         if resources is None:
             return
@@ -1919,6 +2134,7 @@ class LiveAzureCleanup(LiveClusterCleanup):
             )
 
     def clean(self, *, radius_only=False):
+        status("section", "Cleanup: discover and validate live ownership")
         self.external_vault()
         self.unexpected()
         self.group_resources = {name: self.group(name) for name in self.groups}
@@ -1931,6 +2147,9 @@ class LiveAzureCleanup(LiveClusterCleanup):
                 not any(self.group_resources[self.group_name(slot, "app")] for slot in SLOTS),
                 "App resources remain without Radius; normal cleanup cannot bypass it",
             )
+            if self.partial_foundation:
+                self.partial_without_clusters()
+        status("section", "Cleanup: remove applications and children through Radius")
         self.clean_radius(clusters)
         if self.execute:
             remaining = self.group(self.group_name("management", "app"))
@@ -1945,6 +2164,7 @@ class LiveAzureCleanup(LiveClusterCleanup):
                 "foundationRetained": True,
                 "steps": self.steps,
             }
+        status("section", "Cleanup: remove owned foundation resources")
         for slot in CHILDREN:
             self.delete_group(self.group_name(slot, "app"))
             self.delete_group(self.group_name(slot, "cluster"))
@@ -2024,6 +2244,7 @@ class LiveAzureCleanup(LiveClusterCleanup):
         )
 
     def verify(self):
+        status("section", "Cleanup: verify owned active resources are absent")
         retained = self.external_vault()
         remaining = []
         for name in self.groups:
@@ -2190,7 +2411,7 @@ def main(argv=None, *, verify_only=False, engine_factory=LiveAzureCleanup):
         KeyError,
         TypeError,
     ) as error:
-        print(f"Cleanup incomplete: {error}", file=sys.stderr)
+        status("error", f"Cleanup incomplete: {error}")
         return 1
     finally:
         if engine is not None:
@@ -2198,4 +2419,4 @@ def main(argv=None, *, verify_only=False, engine_factory=LiveAzureCleanup):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(run_main(main, "Azure cleanup"))

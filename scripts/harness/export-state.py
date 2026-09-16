@@ -1341,4 +1341,7 @@ def main(argv=None, *, environment=None):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.path.insert(0, str(ROOT))
+    from scripts.operations.output import run_main
+
+    raise SystemExit(run_main(main, "Live report"))

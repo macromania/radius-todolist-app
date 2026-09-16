@@ -103,7 +103,7 @@ def test_make_report_invokes_the_live_exporter_without_confirmation(tmp_path):
 
 @pytest.fixture
 def stages(tmp_path):
-    for relative in ("scripts/lib/env.sh", "scripts/operations/stage.sh"):
+    for relative in ("scripts/lib/output.sh", "scripts/lib/env.sh", "scripts/operations/stage.sh"):
         target = tmp_path / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / relative, target)

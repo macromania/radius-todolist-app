@@ -13,6 +13,7 @@ case "${1:-apply}" in
   *) demo_error 'Expected apply or inspect'; exit 1 ;;
 esac
 (( $# <= 1 )) || { demo_error 'Unexpected setup arguments'; exit 1; }
+demo_status section "Local setup: $mode Radius Recipes"
 demo_load_env "$ROOT/.env"
 [[ "$DEMO_ENV" == local ]] || { demo_error 'Local setup requires DEMO_ENV=local'; exit 1; }
 unset DEMO_KEY_MANAGEMENT DEMO_KEY_SHARED_CONTROL DEMO_KEY_SHARED_DATA \

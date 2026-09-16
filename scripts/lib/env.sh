@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 
+# shellcheck source=output.sh
+source "$(dirname "${BASH_SOURCE[0]}")/output.sh"
+
 demo_error() {
-  printf 'ERROR: %s\n' "$1" >&2
+  demo_status error "ERROR: $1"
   return 1
 }
 

@@ -14,6 +14,7 @@ case "${1:-build}" in
   *) demo_error 'Expected build or inspect'; exit 1 ;;
 esac
 (( $# <= 1 )) || { demo_error 'Unexpected build arguments'; exit 1; }
+demo_status section "Local images: $stage and verify"
 for tool in docker jq git tar uv rad helm; do
   command -v "$tool" >/dev/null || { demo_error "Required tool missing: $tool"; exit 1; }
 done
@@ -57,7 +58,7 @@ mkdir -p "$work/home/.rad/bin"
 cp "$host_bicep" "$work/home/.rad/bin/bicep"
 environment=(env -i "PATH=$PATH" "HOME=$work/home" "DOCKER_HOST=$host" \
   "LC_ALL=C" "UV_PYTHON_DOWNLOADS=never" "UV_OFFLINE=1")
-docker_cli() { "${environment[@]}" docker --host "$host" "$@"; }
+docker_cli() { demo_run "Docker $1" "${environment[@]}" docker --host "$host" "$@"; }
 assets() {
   "${environment[@]}" uv run --no-sync --project "$ROOT" python \
     "$ROOT/scripts/operations/local/assets.py" "$@"
