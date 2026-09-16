@@ -114,7 +114,12 @@ jq -e --arg project "$DEMO_PROJECT" --arg deployment "$DEMO_DEPLOYMENT" '
     .properties.parameters.environment.value == "azure" and
     (.properties.provisioningState | . == "Succeeded" or . == "Failed" or . == "Canceled"))' \
   "$AZURE_WORKSPACE/layout-deployments.json" >/dev/null || {
-  demo_error 'Old or incomplete resource-group layout; use a fresh deployment name. Existing resources are retained.'
+  demo_status error "Old or incomplete resource-group layout for $STEM-bootstrap. Existing resources are retained."
+  demo_status warning 'Azure can retain old subscription deployment records after their resource groups are deleted.'
+  demo_status warning 'Run make init ENV=azure with a fresh --deployment name in ARGS, then retry bootstrap.'
+  printf '\n%s\n%s\n' \
+    'See RUN_AZURE_SCENARIOS.md under "Select deployment identity" for the full command.' \
+    'Do not bypass the layout guard.' >&2
   exit 1
 }
 if jq -e 'length > 0' "$AZURE_WORKSPACE/groups.json" >/dev/null; then
@@ -142,6 +147,27 @@ demo_status section 'Bootstrap: subscription prerequisites'
 demo_run 'Azure subscription prerequisites' "$ROOT/.venv/bin/python" \
   "$ROOT/scripts/operations/azure/prerequisites.py" --subscription "$AZURE_SUBSCRIPTION_ID" \
   > "$AZURE_WORKSPACE/prerequisites.json"
+
+demo_status section 'Bootstrap: node capacity and size'
+demo_run 'Bicep: compile foundation' "$BICEP" build "$ROOT/infra/bootstrap/azure.bicep" \
+  --outfile "$AZURE_WORKSPACE/bootstrap.json"
+node_arguments=(--config "$ROOT/.env" --template "$AZURE_WORKSPACE/bootstrap.json")
+if [[ -f "$AZURE_WORKSPACE/existing-foundation.json" ]]; then
+  node_arguments+=(--existing-foundation "$AZURE_WORKSPACE/existing-foundation.json")
+fi
+demo_run 'AKS node size selection' "$ROOT/.venv/bin/python" \
+  "$ROOT/scripts/operations/azure/node_sizes.py" "${node_arguments[@]}" \
+  > "$AZURE_WORKSPACE/node-size.json"
+AZURE_NODE_VM_SIZE=$(jq -er '
+  .nodeVmSize | select(type == "string" and test("^Standard_[A-Za-z0-9_]{1,64}$"))
+' "$AZURE_WORKSPACE/node-size.json") || {
+  demo_error 'Node-size selection returned an invalid VM size'; exit 1;
+}
+NODE_COUNT=$(jq -er '.nodeCount | select(type == "number" and . >= 2 and floor == .)' \
+  "$AZURE_WORKSPACE/node-size.json") || {
+  demo_error 'Node-size selection returned an invalid node count'; exit 1;
+}
+export AZURE_NODE_VM_SIZE
 
 REGISTRY_EXISTS=false
 for kind in registry vault; do
@@ -217,11 +243,12 @@ jq -e --arg vault "$VAULT" --arg group "$EXTERNAL_VAULT_GROUP" '
   demo_error 'Existing deployment has a different vault binding; implicit migration is refused'; exit 1;
 }
 
-demo_status section 'Bootstrap: compile and validate the foundation'
+demo_status section 'Bootstrap: validate the foundation'
 jq -n --arg project "$DEMO_PROJECT" --arg deployment "$DEMO_DEPLOYMENT" \
   --arg location "$AZURE_LOCATION" --arg registry "$REGISTRY" --arg vault "$VAULT" \
   --arg operator "$OPERATOR" --arg ip "$OPERATOR_IP" --arg hash "$IDENTITY_HASH" \
   --arg externalVaultGroup "$EXTERNAL_VAULT_GROUP" --argjson credentialNames "$CREDENTIAL_NAMES" \
+  --arg nodeVmSize "$AZURE_NODE_VM_SIZE" --argjson nodeCount "$NODE_COUNT" \
   --argjson registryExists "$REGISTRY_EXISTS" '{
     "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
     contentVersion: "1.0.0.0",
@@ -229,10 +256,10 @@ jq -n --arg project "$DEMO_PROJECT" --arg deployment "$DEMO_DEPLOYMENT" \
       projectName:$project, deploymentName:$deployment, environment:"azure", location:$location,
       registryName:$registry, vaultName:$vault, operatorObjectId:$operator, operatorIp:$ip,
       deploymentHash:$hash, externalVaultResourceGroup:$externalVaultGroup,
+      nodeVmSize:$nodeVmSize, nodeCount:$nodeCount,
       applicationCredentialNames:$credentialNames, registryExists:$registryExists
     } | map_values({value:.}))
   }' > "$AZURE_WORKSPACE/parameters.json"
-"$BICEP" build "$ROOT/infra/bootstrap/azure.bicep" --outfile "$AZURE_WORKSPACE/bootstrap.json"
 azure_json deployment sub validate --location "$AZURE_LOCATION" --name "$STEM-bootstrap" \
   --template-file "$AZURE_WORKSPACE/bootstrap.json" --parameters "@$AZURE_WORKSPACE/parameters.json" \
   > "$AZURE_WORKSPACE/validated.json"
@@ -247,7 +274,7 @@ azure_json deployment sub create --location "$AZURE_LOCATION" --name "$STEM-boot
     demo_status error "Foundation deployment failed; Azure resources may remain. Inspect failed operations:"
     printf '  az deployment operation sub list --subscription %s --name %s-bootstrap --output json\n' \
       "$AZURE_SUBSCRIPTION_ID" "$STEM" >&2
-    demo_status warning 'An unexpected BYOIP requirement must be diagnosed from the failed request, not enabled automatically.'
+    demo_status warning 'If Azure still reports a BYOIP requirement, inspect public-IP policy events and feature approval before retrying.'
     exit "$result"
   }
 jq -e '.properties.provisioningState == "Succeeded"' "$AZURE_WORKSPACE/created.json" >/dev/null || {

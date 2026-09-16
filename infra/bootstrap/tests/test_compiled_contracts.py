@@ -119,7 +119,8 @@ class CompiledInfrastructureTests(unittest.TestCase):
         self.assertNotIn("-app", planes["name"])
         self.assertEqual(len(self.bootstrap["parameters"]["childSlots"]["defaultValue"]), 4)
         loaded = next(
-            value for value in self.bootstrap["variables"].values()
+            value
+            for value in self.bootstrap["variables"].values()
             if isinstance(value, dict) and value.get("layout") == "plane-v2"
         )
         self.assertEqual(loaded["layout"], "plane-v2")
@@ -285,7 +286,10 @@ class CompiledInfrastructureTests(unittest.TestCase):
         self.assertIn("allocation", kubelet["resourceId"])
         self.assertIn(".identities.kubelet.id", kubelet["resourceId"])
         self.assertEqual(template["parameters"]["nodeCount"]["defaultValue"], 2)
-        self.assertEqual(template["parameters"]["nodeVmSize"]["defaultValue"], "Standard_D4s_v5")
+        self.assertNotIn("defaultValue", template["parameters"]["nodeVmSize"])
+        self.assertNotIn("defaultValue", self.bootstrap["parameters"]["nodeVmSize"])
+        self.assertEqual(child_pool["osDiskType"], "Managed")
+        self.assertEqual(child_pool["upgradeSettings"]["maxSurge"], "1")
         self.assertEqual(
             set(template["outputs"]["result"]["value"]["values"]),
             {

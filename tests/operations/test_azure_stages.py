@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "scripts/operations/azure"))
 SUBSCRIPTION = "11111111-1111-1111-1111-111111111111"
 REVISION = "c" * 40
 COMPILER = "Bicep CLI version 0.42.1 (test)"
+NODE_SIZE = "Standard_D4as_v7"
 TOOLS = ("az", "rad", "docker", "curl", "git", "bicep", "kubectl", "kubelogin")
 FAKE = r"""
 import hashlib,importlib.util,io,json,marshal,os,re,stat,sys,tarfile
@@ -76,7 +77,9 @@ def emit(value):
     print(json.dumps(value))
 def compile_bytes(name):
     return json.dumps({
-        "resources":[],"metadata":{"source":name},"contentVersion":"1.0.0.0"}).encode()
+        "resources":[],"metadata":{"source":name},"contentVersion":"1.0.0.0",
+        "parameters":{"nodeCount":{"defaultValue":2},
+                      "childSlots":{"defaultValue":slots[1:]}}}).encode()
 def artifact(name,source):
     blob=compile_bytes(source)
     if mode=="wrong-recipe-content":
@@ -124,6 +127,8 @@ def foundation():
                              for key,entry in plane_policy.ROLE_NAMES.items()},
         "resourcePrefix":stem,"radiusResourceGroup":stem,"subscriptionId":subscription,"tenantId":tenant,
         "location":spec["location"],"platformResourceGroup":f"rg-{stem}-platform",
+        "nodeVmSize":state.get("node_vm_size",spec.get("node_vm_size","Standard_D4as_v7")),
+        "nodeCount":2,
         "registryName":registry,"registryLoginServer":host,"registryRoleAssignmentMode":registry_mode,
         "registryId":f"{platform}/providers/Microsoft.ContainerRegistry/registries/{registry}",
         "vaultName":vault,"vaultId":vault_id,"vaultOwned":not bool(external),
@@ -180,7 +185,26 @@ elif tool=="git":
                 archive.add(path,arcname=path.name)
     else: sys.exit("unexpected git command")
 elif tool=="az":
-    if args[:2]==["provider","show"]:
+    if args[:2]==["vm","list-skus"]:
+        sizes=[]
+        for name,family,memory in (
+            ("Standard_D4as_v7","StandardDasv7Family",16),
+            ("Standard_D4s_v7","StandardDsv7Family",16),
+            ("Standard_E4as_v7","StandardEasv7Family",32)):
+            sizes.append({"name":name,"family":family,"locations":[spec["location"]],
+                "restrictions":[],"capabilities":[{"name":key,"value":value} for key,value in
+                {"vCPUs":"4","MemoryGB":str(memory),"CpuArchitectureType":"x64",
+                 "HyperVGenerations":"V2","PremiumIO":"True",
+                 "EphemeralOSDiskSupported":"False","DiskControllerTypes":"NVMe"}.items()]})
+        emit(spec.get("vm_skus",sizes))
+    elif args[:2]==["vm","list-usage"]:
+        emit(spec.get("vm_usage",[
+            {"name":{"value":name},"currentValue":0,"limit":100}
+            for name in ("cores","StandardDasv7Family","StandardDsv7Family",
+                         "StandardEasv7Family")]))
+    elif args[:2]==["aks","list"]:
+        emit(spec.get("existing_clusters",[]))
+    elif args[:2]==["provider","show"]:
         registered=arg("--namespace") in state.get("providers",[])
         if mode=="unregistered-providers":
             value=(spec.get("provider_registration_state","Registering")
@@ -197,6 +221,11 @@ elif tool=="az":
         save()
         print("WARNING: Registering is still on-going. You can monitor using "
               f"'az provider show -n {arg('--namespace')}'",file=sys.stderr)
+    elif args[:2]==["feature","show"]:
+        emit({"properties":{"state":state.get("feature",spec.get("feature_state","Registered"))}})
+    elif args[:2]==["feature","register"]:
+        state["feature"]="Registered"
+        save()
     elif args[:3]==["deployment","sub","validate"]:
         emit({"properties":{"provisioningState":"Succeeded"}})
     elif args[:2]==["account","show"]:
@@ -295,6 +324,8 @@ elif tool=="az":
                                 "owned-case-group","existing-owned-nodes",
                                 "old-group-layout") else [])
     elif args[:3]==["deployment","sub","create"]:
+        state["node_vm_size"]=entry["parameters"]["nodeVmSize"]["value"]
+        save()
         if not entry["parameters"]["registryExists"]["value"]:
             state["arm_tags"]={}
             save()
@@ -558,7 +589,14 @@ elif tool=="docker":
     else: sys.exit("unexpected Docker command")
 elif tool=="curl":
     url=next(value for value in args if value.startswith("https://"))
-    if "github.com/Azure/kubelogin/" in url:
+    if url.startswith("https://prices.azure.com/"):
+        emit({"NextPageLink":None,"Items":[
+            {"armSkuName":name,"armRegionName":spec["location"],"type":"Consumption",
+             "currencyCode":"USD","unitOfMeasure":"1 Hour","productName":"Virtual Machines Linux",
+             "meterName":name,"retailPrice":price}
+            for name,price in (("Standard_D4as_v7",0.182),("Standard_D4s_v7",0.254),
+                               ("Standard_E4as_v7",0.3))]})
+    elif "github.com/Azure/kubelogin/" in url:
         Path(arg("--output")).write_bytes((root/"kubelogin.zip").read_bytes())
     elif "api.ipify.org" in url:
         print(spec.get("operator_ip","8.8.4.4"),end="")
@@ -584,6 +622,8 @@ def checkout(tmp_path):
         "scripts/lib/output.sh",
         "scripts/operations/output.py",
         "scripts/operations/azure/prerequisites.py",
+        "scripts/operations/azure/node_sizes.py",
+        "scripts/operations/config.py",
         "scripts/lib/env.sh",
         "scripts/lib/discovery.sh",
         "scripts/operations/install-radius.sh",
@@ -690,6 +730,8 @@ def configure(root, **changes):
     }
     if values["DEMO_ENV"] == "azure":
         values.update(AZURE_SUBSCRIPTION_ID=SUBSCRIPTION, AZURE_LOCATION=spec["location"])
+        if spec.get("node_vm_size", NODE_SIZE) is not None:
+            values["AZURE_NODE_VM_SIZE"] = spec.get("node_vm_size", NODE_SIZE)
     values.update(spec.get("extra_env", {}))
     (root / ".env").write_text(
         "".join(f"{key}={json.dumps(value)}\n" for key, value in values.items())
@@ -699,7 +741,7 @@ def configure(root, **changes):
     return spec
 
 
-def run(root, script, *args, confirmed=True):
+def run(root, script, *args, confirmed=True, input=None):
     result = subprocess.run(
         ["bash", str(root / f"scripts/operations/azure/{script}.sh"), *args],
         cwd=root,
@@ -713,6 +755,7 @@ def run(root, script, *args, confirmed=True):
             "AZURE_CONFIG_DIR": str(root / "operator-azure-cache"),
         },
         capture_output=True,
+        input=input,
         text=True,
         check=False,
         timeout=60,
@@ -906,11 +949,13 @@ def test_bootstrap_uses_selected_identity_and_fresh_successful_outputs(checkout,
         "deploymentHash": identity,
         "externalVaultResourceGroup": "",
         "registryExists": mode == "existing-owned",
+        "nodeVmSize": NODE_SIZE,
+        "nodeCount": 2,
     }
     assert create["args"][create["args"].index("--name") + 1] == "sample-learn-azure-bootstrap"
     (show,) = selected(checkout, "az", ["deployment", "sub", "show"])
     assert calls(checkout).index(show) > calls(checkout).index(create)
-    assert "Bootstrap completed: Azure foundation and management Radius" in result.stderr
+    assert f"{'Bootstrap completed':<26}  Azure foundation and management Radius" in result.stderr
     for call in calls(checkout):
         assert "synthetic-graph-token" not in json.dumps(call)
         if call["tool"] == "az":
@@ -925,7 +970,20 @@ def test_bootstrap_uses_selected_identity_and_fresh_successful_outputs(checkout,
 def test_old_layout_stops_public_stages_before_deployment(checkout, stage):
     configure(checkout, mode="old-group-layout")
     result = run(checkout, stage)
-    assert result.returncode != 0
+    assert result.returncode != 0 and not result.stdout
+    if stage == "bootstrap":
+        for message in (
+            "Old or incomplete resource-group layout for sample-learn-azure-bootstrap",
+            "Existing resources are retained.",
+            "Azure can retain old subscription deployment records",
+            "after their resource groups are deleted.",
+            "make init ENV=azure with a fresh --deployment name in ARGS",
+            "then retry bootstrap.",
+            'RUN_AZURE_SCENARIOS.md under "Select deployment identity"',
+            "Do not bypass the layout guard.",
+        ):
+            assert message in result.stderr
+    assert not selected(checkout, "az", ["deployment", "sub", "validate"])
     assert not selected(checkout, "az", ["deployment", "sub", "create"])
     assert not selected(checkout, "az", ["acr", "build"])
     assert not selected(checkout, "az", ["provider", "register"])
@@ -991,28 +1049,153 @@ def test_bootstrap_registers_new_subscription_before_service_checks(checkout, st
     result = run(checkout, "bootstrap")
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["foundation"]["subscriptionId"] == SUBSCRIPTION
-    assert result.stderr.count("WARNING: Registering is still on-going.") == 9
-    registrations = selected(checkout, "az", ["provider", "register"])
-    assert len(registrations) == 9
+    assert result.stderr.count("WARNING: Registering is still on-going.") == 10
     all_calls = calls(checkout)
+    registrations = [
+        (index, call)
+        for index, call in enumerate(all_calls)
+        if call["tool"] == "az" and call["args"][:2] == ["provider", "register"]
+    ]
+    assert len(registrations) == 10
+    assert not selected(checkout, "az", ["feature", "register"])
+    (feature,) = selected(checkout, "az", ["feature", "show"])
+    assert feature["args"][feature["args"].index("--name") + 1] == (
+        "AllowBringYourOwnPublicIpAddress"
+    )
     (availability,) = selected(checkout, "az", ["acr", "check-name"])
     (validate,) = selected(checkout, "az", ["deployment", "sub", "validate"])
     (create,) = selected(checkout, "az", ["deployment", "sub", "create"])
-    for registration in registrations:
+    for index, registration in registrations:
         args = registration["args"]
         assert args[-4:] == ["--subscription", SUBSCRIPTION, "--output", "none"]
         namespace = args[args.index("--namespace") + 1]
-        before, after = [
-            index
-            for index, call in enumerate(all_calls)
-            if call["tool"] == "az"
-            and call["args"][:2] == ["provider", "show"]
-            and call["args"][call["args"].index("--namespace") + 1] == namespace
-        ]
-        assert before < all_calls.index(registration) < after < all_calls.index(availability)
-        assert all_calls[after]["args"][-4:] == ["--subscription", SUBSCRIPTION, "--output", "json"]
-        assert f"{namespace}: {state}" in result.stderr
+        for query in (all_calls[index - 1], all_calls[index + 1]):
+            assert query["tool"] == "az"
+            assert query["args"] == [
+                "provider",
+                "show",
+                "--namespace",
+                namespace,
+                "--subscription",
+                SUBSCRIPTION,
+                "--output",
+                "json",
+            ]
+        assert index + 1 < all_calls.index(availability)
+        assert f"{namespace:<26}  {state}" in result.stderr
+    assert all_calls.index(feature) < registrations[-1][0]
     assert all_calls.index(availability) < all_calls.index(validate) < all_calls.index(create)
+
+
+def test_bootstrap_registers_public_ip_feature_before_service_checks(checkout):
+    configure(checkout, feature_state="NotRegistered")
+    result = run(checkout, "bootstrap")
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["foundation"]["subscriptionId"] == SUBSCRIPTION
+    all_calls = calls(checkout)
+    feature_calls = [
+        (index, call)
+        for index, call in enumerate(all_calls)
+        if call["tool"] == "az" and call["args"][:1] == ["feature"]
+    ]
+    assert [call["args"][:2] for _, call in feature_calls] == [
+        ["feature", "show"],
+        ["feature", "register"],
+        ["feature", "show"],
+    ]
+    for _, call in feature_calls:
+        args = call["args"]
+        assert args[args.index("--namespace") + 1] == "Microsoft.Network"
+        assert args[args.index("--name") + 1] == "AllowBringYourOwnPublicIpAddress"
+        output = "none" if args[1] == "register" else "json"
+        assert args[-4:] == ["--subscription", SUBSCRIPTION, "--output", output]
+    (refresh,) = selected(checkout, "az", ["provider", "register"])
+    assert refresh["args"][refresh["args"].index("--namespace") + 1] == "Microsoft.Network"
+    (availability,) = selected(checkout, "az", ["acr", "check-name"])
+    (validate,) = selected(checkout, "az", ["deployment", "sub", "validate"])
+    (create,) = selected(checkout, "az", ["deployment", "sub", "create"])
+    assert (
+        feature_calls[-1][0]
+        < all_calls.index(refresh)
+        < all_calls.index(availability)
+        < all_calls.index(validate)
+        < all_calls.index(create)
+    )
+    assert "Microsoft.Network/AllowBringYourOwnPublicIpAddress  Registered" in result.stderr
+
+
+def test_pending_public_ip_feature_blocks_actual_bootstrap_create(checkout):
+    configure(checkout, feature_state="Pending")
+    result = run(checkout, "bootstrap")
+    assert result.returncode != 0 and not result.stdout
+    assert "AllowBringYourOwnPublicIpAddress  Pending service approval" in result.stderr
+    assert not selected(checkout, "az", ["feature", "register"])
+    assert not selected(checkout, "az", ["provider", "register"])
+    assert not selected(checkout, "az", ["acr", "check-name"])
+    assert not selected(checkout, "az", ["deployment", "sub", "validate"])
+    assert not selected(checkout, "az", ["deployment", "sub", "create"])
+
+
+def test_bootstrap_selects_and_persists_live_node_size_before_arm_create(checkout):
+    configure(checkout, node_vm_size=None)
+    result = run(checkout, "bootstrap", input="2\n")
+    assert result.returncode == 0, result.stderr
+    assert "Select 1-3" in result.stderr
+    assert "Standard_D4as_v7" in result.stderr and "Standard_E4as_v7" in result.stderr
+    assert 'AZURE_NODE_VM_SIZE="Standard_D4s_v7"' in (checkout / ".env").read_text()
+    (create,) = selected(checkout, "az", ["deployment", "sub", "create"])
+    assert create["parameters"]["nodeVmSize"]["value"] == "Standard_D4s_v7"
+    assert create["parameters"]["nodeCount"]["value"] == 2
+    assert json.loads(result.stdout)["foundation"]["nodeVmSize"] == "Standard_D4s_v7"
+    all_calls = calls(checkout)
+    for command in (["vm", "list-skus"], ["vm", "list-usage"], ["aks", "list"]):
+        (discovery,) = selected(checkout, "az", command)
+        assert all_calls.index(discovery) < all_calls.index(create)
+        assert discovery["args"][-4:] == ["--subscription", SUBSCRIPTION, "--output", "json"]
+
+
+def test_cancelled_node_selection_does_not_create_resources_or_replace_env(checkout):
+    configure(checkout, node_vm_size=None)
+    before = (checkout / ".env").read_bytes()
+    result = run(checkout, "bootstrap", input="q\n")
+    assert result.returncode != 0 and not result.stdout
+    assert (checkout / ".env").read_bytes() == before
+    assert "selection cancelled" in result.stderr
+    assert not selected(checkout, "az", ["deployment", "sub", "validate"])
+    assert not selected(checkout, "az", ["deployment", "sub", "create"])
+
+
+def test_node_quota_failure_blocks_bootstrap_before_resource_creation(checkout):
+    configure(
+        checkout,
+        vm_usage=[
+            {"name": {"value": name}, "currentValue": 0, "limit": 0}
+            for name in (
+                "cores",
+                "StandardDasv7Family",
+                "StandardDsv7Family",
+                "StandardEasv7Family",
+            )
+        ],
+    )
+    before = (checkout / ".env").read_bytes()
+    result = run(checkout, "bootstrap", input="1\n")
+    assert result.returncode != 0 and not result.stdout
+    assert "No eligible x64 node sizes" in result.stderr
+    assert (checkout / ".env").read_bytes() == before
+    assert not selected(checkout, "az", ["deployment", "sub", "create"])
+
+
+@pytest.mark.parametrize("command", [["vm", "list-skus"], ["vm", "list-usage"], ["aks", "list"]])
+def test_node_discovery_failure_blocks_bootstrap_before_resource_creation(checkout, command):
+    configure(checkout, fail=["az", *command])
+    before = (checkout / ".env").read_bytes()
+    result = run(checkout, "bootstrap")
+    assert result.returncode != 0 and not result.stdout
+    assert "synthetic native command failure" in result.stderr
+    assert (checkout / ".env").read_bytes() == before
+    assert not selected(checkout, "az", ["deployment", "sub", "validate"])
+    assert not selected(checkout, "az", ["deployment", "sub", "create"])
 
 
 @pytest.mark.parametrize("phase", ["initial", "after-registration"])
@@ -1032,11 +1215,13 @@ def test_malformed_provider_query_blocks_actual_bootstrap_create(checkout, phase
     [
         ["az", "provider", "show"],
         ["az", "provider", "register"],
+        ["az", "feature", "show"],
+        ["az", "feature", "register"],
         ["az", "deployment", "sub", "validate"],
     ],
 )
 def test_prerequisite_failure_blocks_actual_bootstrap_create(checkout, failed):
-    configure(checkout, mode="unregistered-providers", fail=failed)
+    configure(checkout, mode="unregistered-providers", feature_state="NotRegistered", fail=failed)
     result = run(checkout, "bootstrap")
     assert result.returncode != 0 and not result.stdout
     assert "synthetic native command failure" in result.stderr

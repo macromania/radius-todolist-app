@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.operations.azure import prerequisites as subject  # noqa: E402
 
 SUBSCRIPTION = "11111111-1111-1111-1111-111111111111"
+FEATURE = "AllowBringYourOwnPublicIpAddress"
 
 
 @pytest.fixture(autouse=True)
@@ -46,7 +47,7 @@ class Azure:
                     f"'az provider show -n {namespace}'",
                     file=sys.stderr,
                 )
-            elif self.feature == "NotRegistered":
+            elif self.feature in {"NotRegistered", "Unregistered"}:
                 self.feature = "Registered"
             return subprocess.CompletedProcess(argv, 0, "")
         value = (
@@ -65,25 +66,48 @@ class Azure:
         )
 
 
-def test_prepare_registers_only_required_providers_and_never_byoip(capsys):
-    fake = Azure(provider="NotRegistered")
+@pytest.mark.parametrize("state", ["NotRegistered", "Unregistered"])
+def test_prepare_registers_required_providers_and_public_ip_feature(capsys, state):
+    fake = Azure(provider="NotRegistered", feature=state)
     result = fake.client().prepare()
     assert result == {
         "subscriptionId": SUBSCRIPTION,
         "providers": dict.fromkeys(subject.PROVIDERS, "Registering"),
-        "features": [],
+        "features": [f"Microsoft.Network/{FEATURE}"],
     }
-    assert [call[1:5] for call in fake.calls] == [
+    assert [call[1:-4] for call in fake.calls] == [
         ["provider", action, "--namespace", namespace]
         for namespace in subject.PROVIDERS
+        for action in ("show", "register", "show")
+    ] + [
+        ["feature", action, "--namespace", "Microsoft.Network", "--name", FEATURE]
+        for action in ("show", "register", "show")
+    ] + [
+        ["provider", action, "--namespace", "Microsoft.Network"]
         for action in ("show", "register", "show")
     ]
     captured = capsys.readouterr()
     assert not captured.out
-    assert captured.err.count("WARNING: Registering is still on-going.") == len(subject.PROVIDERS)
+    assert (
+        captured.err.count("WARNING: Registering is still on-going.") == len(subject.PROVIDERS) + 1
+    )
+    assert fake.now == 15
     before = len(fake.calls)
     fake.client().prepare()
-    assert all(call[2] == "show" for call in fake.calls[before:])
+    assert [call[1:-4] for call in fake.calls[before:] if call[2] == "register"] == [
+        ["provider", "register", "--namespace", "Microsoft.Network"]
+    ]
+
+
+def test_prepare_reports_provider_state_after_feature_refresh():
+    fake = Azure()
+    result = fake.client().prepare()
+    assert result["providers"] == {
+        **dict.fromkeys(subject.PROVIDERS, "Registered"),
+        "Microsoft.Network": "Registering",
+    }
+    assert result["features"] == [f"Microsoft.Network/{FEATURE}"]
+    assert [call[1:3] for call in fake.calls if call[2] == "register"] == [["provider", "register"]]
 
 
 def test_confirmation_precedes_all_azure_calls(monkeypatch):
@@ -143,14 +167,14 @@ def test_registration_failure_stops_before_followup_query(group):
 def test_unavailable_or_approval_pending_feature_stops_without_mutation(state):
     fake = Azure(feature=state)
     with pytest.raises(subject.PrerequisiteError, match="Pending|unexpected"):
-        fake.client().feature("Microsoft.Network", "SyntheticTestFeature")
+        fake.client().prepare()
     assert all(call[2] == "show" for call in fake.calls)
 
 
 def test_feature_timeout_is_bounded():
     fake = Azure(feature="Registering")
     with pytest.raises(subject.PrerequisiteError, match="timed out"):
-        fake.client().feature("Microsoft.Network", "SyntheticTestFeature")
+        fake.client().prepare()
     assert fake.now == 900
 
 

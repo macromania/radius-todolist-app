@@ -79,8 +79,8 @@ def test_wrapper_preserves_stdin_stdout_native_diagnostics_and_exit_code():
     )
     assert result.returncode == 7
     assert json.loads(result.stdout) == {"synthetic": "input"}
-    assert "native diagnostic" in result.stderr and "[error]" in result.stderr
-    assert "[success]" not in result.stderr
+    assert "native diagnostic" in result.stderr and "ERROR:" in result.stderr
+    assert "OK  Synthetic command" not in result.stderr
 
 
 @pytest.mark.parametrize("shell", SHELLS)
@@ -148,14 +148,14 @@ def test_progress_is_visible_before_completion_and_every_fifteen_seconds(shell):
             with selectors.DefaultSelector() as selector:
                 selector.register(process.stderr, selectors.EVENT_READ)
                 assert selector.select(timeout=3), "No early status before the command blocks"
-                assert b"[progress] Waiting for input\n" == process.stderr.readline()
+                assert b"      Waiting for input\n" == process.stderr.readline()
                 assert process.poll() is None
                 assert selector.select(timeout=20), "No heartbeat during a quiet command"
                 assert b"elapsed" in process.stderr.readline()
                 assert 14 <= time.monotonic() - started < 25
             stdout, stderr = process.communicate(input=b"done", timeout=5)
             assert process.returncode == 0 and json.loads(stdout) == {}
-            assert b"[success]" in stderr
+            assert b"OK  Waiting for input completed" in stderr
         finally:
             if process.poll() is None:
                 process.terminate()
@@ -177,12 +177,12 @@ def test_interruption_reaps_the_owned_monitor_and_keeps_failure():
         start_new_session=True,
         env={**os.environ, "NO_COLOR": "1"},
     ) as process:
-        assert b"[progress]" in process.stderr.readline()
+        assert process.stderr.readline() == b"      Interrupted command\n"
         assert process.stdout.readline() == b"ready\n"
         os.killpg(process.pid, signal.SIGTERM)
         stdout, stderr = process.communicate(timeout=5)
         assert process.returncode != 0 and stdout == b""
-        assert b"[success]" not in stderr
+        assert b"OK  Interrupted command" not in stderr
 
 
 def test_python_progress_stops_on_failure_and_sanitizes_controls(capsys):
@@ -191,10 +191,46 @@ def test_python_progress_stops_on_failure_and_sanitizes_controls(capsys):
             time.sleep(0.02)
             raise RuntimeError("failure")
     before = capsys.readouterr()
-    assert "[progress]" in before.err
+    assert "      Synthetic failure\n" in before.err
     time.sleep(0.03)
     assert capsys.readouterr().err == ""
     status("error", "unsafe\033[2J\nvalue")
     assert "\033" not in capsys.readouterr().err
     assert run_main(lambda: 7, "failed operation") == 7
-    assert "[success]" not in capsys.readouterr().err
+    assert "OK  failed operation" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("color", ["never", "always"])
+def test_entities_sections_and_outcomes_are_visually_separate(monkeypatch, capsys, color):
+    monkeypatch.setenv("COLOR", color)
+    monkeypatch.setenv("NO_COLOR", "")
+    for kind, message in (
+        ("section", "Bootstrap: validate the foundation"),
+        ("progress", "Azure: deployment sub validate"),
+        ("success", "Azure: deployment sub validate completed (2s)"),
+    ):
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$1"; demo_status "$2" "$3"',
+                "test",
+                str(ROOT / "scripts/lib/output.sh"),
+                kind,
+                message,
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        status(kind, message)
+        assert result.stderr == capsys.readouterr().err
+        assert not result.stdout
+        assert f"[{kind}]" not in result.stderr
+        if kind == "section":
+            assert "BOOTSTRAP\nValidate the foundation\n" + "-" * 78 in result.stderr
+        elif kind == "progress":
+            assert f"      {'Azure':<26}  deployment sub validate" in result.stderr
+            assert "\u2705" not in result.stderr
+        else:
+            assert ("\u2705" in result.stderr) == (color == "always")

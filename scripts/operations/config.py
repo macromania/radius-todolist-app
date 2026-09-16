@@ -68,12 +68,16 @@ def load_config(path: Path = ROOT / ".env") -> DemoConfig:
     return parse_env(text)
 
 
-def initialize_config(config: DemoConfig, path: Path = ROOT / ".env") -> None:
+def initialize_config(
+    config: DemoConfig, path: Path = ROOT / ".env", *, expected: DemoConfig | None = None
+) -> None:
     if path.name != ".env" or not path.parent.is_dir() or path.parent.is_symlink():
         raise ConfigError("Configuration must be written to a checkout's .env")
     previous = path.lstat() if path.exists() or path.is_symlink() else None
     if previous and (not stat.S_ISREG(previous.st_mode) or previous.st_mode & 0o077):
         raise ConfigError("Existing .env must be a private regular file")
+    if expected is not None and load_config(path) != expected:
+        raise ConfigError(".env changed while selecting configuration; rerun bootstrap")
     text = "".join(
         f"{key}={json.dumps(value, ensure_ascii=True)}\n"
         for key, value in config.values(include_secrets=True).items()

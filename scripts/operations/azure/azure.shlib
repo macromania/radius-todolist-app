@@ -4,7 +4,12 @@
 source "$ROOT/scripts/lib/env.sh"
 
 azure_json() {
-  demo_run "Azure $1 ${2:-}" az "$@" --subscription "$AZURE_SUBSCRIPTION_ID" --output json
+  local label='Azure:' part
+  for part in "$@"; do
+    [[ "$part" != -* ]] || break
+    label="$label $part"
+  done
+  demo_run "$label" az "$@" --subscription "$AZURE_SUBSCRIPTION_ID" --output json
 }
 
 azure_cleanup() {
@@ -134,6 +139,7 @@ azure_foundation() {
     --arg subscription "$AZURE_SUBSCRIPTION_ID" --arg location "$AZURE_LOCATION" \
     --arg stem "$STEM" --arg registry "$REGISTRY" --arg vault "$VAULT" \
     --arg vaultId "$VAULT_ID" --arg vaultGroup "$VAULT_RESOURCE_GROUP" --argjson vaultOwned "$VAULT_OWNED" \
+    --arg nodeVmSize "${AZURE_NODE_VM_SIZE:-}" \
     --arg scope "$SUBSCRIPTION_SCOPE" --arg platform "$PLATFORM_SCOPE" '
       (.properties.outputs | map_values(.value)) as $o |
       .properties.provisioningState == "Succeeded" and
@@ -145,6 +151,7 @@ azure_foundation() {
       $o.foundation.resourcePrefix == $stem and $o.foundation.radiusResourceGroup == $stem and
       ($o.foundation.subscriptionId | ascii_downcase) == $subscription and
       $o.foundation.location == $location and
+      ($nodeVmSize == "" or $o.foundation.nodeVmSize == $nodeVmSize) and
       $o.foundation.platformResourceGroup == ("rg-" + $stem + "-platform") and
       $o.foundation.registryName == $registry and
       $o.foundation.registryLoginServer == ($registry + ".azurecr.io") and

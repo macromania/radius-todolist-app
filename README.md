@@ -42,12 +42,14 @@ Run `make help` for commands, or narrow it with `GROUP=azure`, `GROUP=local`,
 `GROUP=setup`, or `GROUP=checks`. `COLOR=never` or `NO_COLOR=1` disables styling;
 redirected output is plain.
 
-Operator commands use blue section headings, cyan progress, green success,
-yellow warnings, and red errors, with text labels in every mode. Quiet waits
-print elapsed time every 15 seconds. Use `COLOR=always` to force status color or
-`COLOR=never` to disable it; `NO_COLOR` overrides both. Progress goes to stderr,
-leaving API responses, reports and other machine-readable stdout unchanged.
-Native tool diagnostics and complete build/push logs remain visible.
+Operator commands use separated section headings and align entities with their
+messages. Progress has no bracketed label or icon. Styled terminals show green
+check marks for completed operations; plain output uses `OK`. Warnings and errors
+remain explicit. Quiet waits print elapsed time every 15 seconds.
+Use `COLOR=always` to force styling or `COLOR=never` to disable it; `NO_COLOR`
+overrides both. Progress goes to stderr, leaving API responses, reports and other
+machine-readable stdout unchanged. Native diagnostics and complete build/push
+logs remain visible.
 
 Use `make report` for current endpoints and tenant status.
 `make fault-status ARGS='SLOT COMPONENT'` reads a fault journal without changing
@@ -66,7 +68,7 @@ file unchanged.
 
 | Information | Owner |
 |---|---|
-| Starting identity | `.env`: environment, project/deployment name, and Azure selection when applicable |
+| Operator choices | `.env`: environment, project/deployment name, Azure selection, and chosen AKS node size when applicable |
 | Stable application credentials | Key Vault on Azure; Kubernetes Secrets locally |
 | Endpoints and cluster access | Current Azure, Radius, Kubernetes, or Docker APIs |
 | Tenant configuration and provisioning progress | PostgreSQL |

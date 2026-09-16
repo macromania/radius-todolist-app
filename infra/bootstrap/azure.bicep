@@ -35,7 +35,8 @@ param additionalOperatorIps array = []
 param operatorObjectId string
 @description('Regional az aks get-versions probe on 2026-09-09 confirmed 1.35.7 in centralus.')
 param kubernetesVersion string = '1.35.7'
-param nodeVmSize string = 'Standard_D4s_v5'
+@description('Operator-selected x64 size checked against current regional availability and quota before deployment.')
+param nodeVmSize string
 @description('Current AKS system-pool guidance requires at least two nodes and four vCPUs per node.')
 @minValue(2)
 param nodeCount int = 2

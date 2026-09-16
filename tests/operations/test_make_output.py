@@ -170,18 +170,18 @@ def test_guidance_is_distinct_from_the_command_catalog(tmp_path, group, color):
     result = run_make(tmp_path, "help", f"GROUP={group}", f"COLOR={color}")
     assert result.returncode == 0, result.stderr
     plain = ANSI.sub("", result.stdout)
-    marker = "\n\n  [info] Start here\n\n"
+    marker = "\n\n  Start here\n\n"
     assert marker in plain
     footer = plain.split(marker, 1)[1]
     next_heading = "Read next" if group == "checks" else "Walkthroughs"
-    assert f"\n\n  [info] {next_heading}\n\n" in footer
+    assert f"\n\n  {next_heading}\n\n" in footer
     assert RULE not in footer
-    styled_footer = result.stdout.split("[info] Start here", 1)[1]
+    styled_footer = result.stdout.split("Start here", 1)[1]
     values = re.findall(r"^    [^:\n]+:\s+([^\n]+)$", styled_footer, re.MULTILINE)
     assert values
     assert all("\x1b" not in value for value in values)
     if color == "always":
-        assert "\x1b[1m[info] Start here\x1b[0m" in result.stdout
+        assert "\x1b[1mStart here\x1b[0m" in result.stdout
         assert "\x1b[34m" not in styled_footer
 
 
@@ -231,9 +231,9 @@ def test_stage_headings_preserve_tool_output_arguments_and_failures(
         "CONFIRM_LOCAL=yes",
     )
     assert result.stdout == "tool output line 1\ntool output line 2\n"
-    assert result.stderr.startswith(f"\n\n== {target} ==\n{RULE}\n\n[progress] {target}\n")
+    assert result.stderr.startswith(f"\n\n== {target} ==\n{RULE}\n\n      {target}\n")
     assert "tool diagnostic\n" in result.stderr
-    assert f"[{'success' if exit_code == 0 else 'error'}] {target}" in result.stderr
+    assert f"{'OK  ' if exit_code == 0 else 'ERROR: '}{target}" in result.stderr
     assert (result.returncode == 0) == (exit_code == 0)
     assert "All source checks passed" not in result.stdout
 
@@ -341,7 +341,7 @@ def test_help_styles_only_the_selected_output_stream(
 )
 def test_styled_stage_headings_preserve_json_stdout(tmp_path, color, terminal, environment, styled):
     tool = tmp_path / "tool.py"
-    tool.write_text("print('{\"result\":\"unchanged\"}')\n")
+    tool.write_text('print(\'{"result":"unchanged"}\')\n')
     result = run_make(
         tmp_path,
         "show-config",
@@ -353,8 +353,8 @@ def test_styled_stage_headings_preserve_json_stdout(tmp_path, color, terminal, e
     assert result.returncode == 0, result.stderr
     assert result.stdout == '{"result":"unchanged"}\n'
     plain = ANSI.sub("", result.stderr)
-    assert plain.startswith(f"\n\n== show-config ==\n{RULE}\n\n[progress] show-config\n")
-    assert "[success] show-config completed (" in plain
+    assert plain.startswith(f"\n\n== show-config ==\n{RULE}\n\n      show-config\n")
+    assert f"{chr(0x2705) if styled else 'OK'}  show-config completed (" in plain
     assert ("\x1b" in result.stderr) == styled
 
 

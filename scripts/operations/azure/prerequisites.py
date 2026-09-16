@@ -27,8 +27,8 @@ PROVIDERS = (
     "Microsoft.DBforPostgreSQL",
     "Microsoft.Cache",
 )
-# Current GA templates require no preview features, including BYOIP.
-FEATURES: tuple[tuple[str, str], ...] = ()
+# Inherited policies can require this feature by appending FirstPartyUsage IP tags.
+FEATURES: tuple[tuple[str, str], ...] = (("Microsoft.Network", "AllowBringYourOwnPublicIpAddress"),)
 
 
 class PrerequisiteError(RuntimeError):
@@ -112,8 +112,7 @@ class Registrations:
             if state == "Registered":
                 status("success", f"{label}: Registered")
                 # Refresh even on a resumed run whose feature finished after an earlier timeout.
-                self.provider(namespace, refresh=True)
-                return
+                return self.provider(namespace, refresh=True)
             if state == "Pending":
                 raise PrerequisiteError(
                     f"{label}: Pending service approval; request Azure support approval, then rerun"
@@ -140,12 +139,7 @@ class Registrations:
             raise PrerequisiteError("Azure registration requires CONFIRM_AZURE=yes")
         providers = {name: self.provider(name) for name in PROVIDERS}
         for namespace, name in FEATURES:
-            self.feature(namespace, name)
-        if not FEATURES:
-            status(
-                "progress",
-                "No preview features required by the current templates; BYOIP is not enabled",
-            )
+            providers[namespace] = self.feature(namespace, name)
         return {
             "subscriptionId": self.subscription,
             "providers": providers,

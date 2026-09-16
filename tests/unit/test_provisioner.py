@@ -312,6 +312,32 @@ def test_selected_child_provisioning_namespace_accounts_for_radius_application_s
     assert len(namespace + "-cluster-isolated-1-control") <= 63
 
 
+@pytest.mark.parametrize("size", ["Standard_D4as_v7", "Standard_D4s_v7"])
+def test_selected_node_size_reaches_management_and_child_recipes(
+    selected_config, tmp_path, monkeypatch, size
+):
+    raw = selected_config.to_dict()
+    raw["foundation"]["nodeVmSize"] = size
+    selected = OperatorConfig.from_dict(raw, identity=selected_config.identity)
+    provider = AzureProvider(
+        selected, tmp_path, credentials(tmp_path / "credentials.json", selected)
+    )
+    provider._verified = True
+    monkeypatch.setattr(provider, "rad", MagicMock())
+    parameters = provider.recipe_map("management")["Demo.Platform/clusters"]["default"][
+        "parameters"
+    ]
+    assert parameters["nodeVmSize"] == size and parameters["nodeCount"] == 2
+    for slot in ("shared-control", "isolated-1-data"):
+        provider.register_cluster_environment(slot)
+        document = json.loads(
+            (provider.state / f"{slot}-cluster-environment.parameters.json").read_text()
+        )
+        parameters = document["parameters"]["recipes"]["value"]["Demo.Platform/clusters"]
+        assert parameters["default"]["parameters"]["nodeVmSize"] == size
+        assert parameters["default"]["parameters"]["nodeCount"] == 2
+
+
 def test_maximum_selected_prefix_stays_within_kubernetes_namespace_limit():
     identity = DemoConfig("azure", "abcdefghijklmnop", "ab", SUBSCRIPTION, "centralus")
     assert len(identity.stem) == 25

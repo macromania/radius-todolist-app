@@ -77,12 +77,14 @@ docker --context desktop-linux version
 creating resources. `make check` runs the full source checks if you want that
 checkpoint before deploying.
 
-All Make workflows use colored sections and labeled status: blue headings, cyan
-progress, green success, yellow warnings, and red errors. Quiet waits print elapsed
-time every 15 seconds. Use `COLOR=always` to force status color, or `COLOR=never`
-or nonempty `NO_COLOR` to disable it. Redirected output is plain by default.
-Status goes to stderr; JSON/API stdout and native tool diagnostics are preserved.
-Build and push logs are not filtered.
+Make workflows separate sections with headings and rules, and align entities
+with their messages. Progress has no bracketed label or icon. Styled terminals
+show green check marks for completed operations; plain output uses `OK`.
+Warnings and errors remain explicit. Quiet waits print elapsed time every
+15 seconds. Use `COLOR=always` to force styling, or `COLOR=never` or nonempty
+`NO_COLOR` to disable it. Redirected output is plain by default. Status goes to
+stderr; JSON/API stdout and native diagnostics are preserved. Build and push logs
+are not filtered.
 
 ### Select operator configuration
 

@@ -4,7 +4,7 @@
 source "$(dirname "${BASH_SOURCE[0]}")/output.sh"
 
 demo_error() {
-  demo_status error "ERROR: $1"
+  demo_status error "$1"
   return 1
 }
 
@@ -35,7 +35,12 @@ demo_validate_env() {
     [[ "${AZURE_LOCATION:-}" =~ ^[a-z][a-z0-9]{1,31}$ ]] || {
       demo_error 'Invalid AZURE_LOCATION'; return 1;
     }
-  elif [[ -n "${AZURE_SUBSCRIPTION_ID+x}${AZURE_LOCATION+x}${DEMO_KEY_VAULT+x}" ]]; then
+    if [[ -n "${AZURE_NODE_VM_SIZE+x}" ]]; then
+      [[ "$AZURE_NODE_VM_SIZE" =~ ^Standard_[A-Za-z0-9_]{1,64}$ ]] || {
+        demo_error 'AZURE_NODE_VM_SIZE must be an Azure VM size'; return 1;
+      }
+    fi
+  elif [[ -n "${AZURE_SUBSCRIPTION_ID+x}${AZURE_LOCATION+x}${DEMO_KEY_VAULT+x}${AZURE_NODE_VM_SIZE+x}" ]]; then
     demo_error 'Local configuration must not contain Azure settings'; return 1
   fi
   if [[ -n "${DEMO_KEY_VAULT+x}" ]]; then
@@ -65,7 +70,7 @@ demo_load_env() {
   (( bytes <= 16384 )) || { demo_error '.env is too large'; return 1; }
   clean_bytes=$(tr -d '\000' < "$file" | wc -c) || return
   [[ "$bytes" -eq "$clean_bytes" ]] || { demo_error '.env contains a null byte'; return 1; }
-  unset DEMO_ENV DEMO_PROJECT DEMO_DEPLOYMENT AZURE_SUBSCRIPTION_ID AZURE_LOCATION \
+  unset DEMO_ENV DEMO_PROJECT DEMO_DEPLOYMENT AZURE_SUBSCRIPTION_ID AZURE_LOCATION AZURE_NODE_VM_SIZE \
     DEMO_KEY_VAULT DEMO_REVISION DEMO_KEY_MANAGEMENT DEMO_KEY_SHARED_CONTROL DEMO_KEY_SHARED_DATA \
     DEMO_KEY_ISOLATED_1_CONTROL DEMO_KEY_ISOLATED_1_DATA
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -75,7 +80,7 @@ demo_load_env() {
     [[ "$line" == *=* ]] || { demo_error 'Invalid .env assignment'; return 1; }
     key="${line%%=*}" raw="${line#*=}"
     case "$key" in
-      DEMO_ENV|DEMO_PROJECT|DEMO_DEPLOYMENT|AZURE_SUBSCRIPTION_ID|AZURE_LOCATION|DEMO_KEY_VAULT|DEMO_REVISION|\
+      DEMO_ENV|DEMO_PROJECT|DEMO_DEPLOYMENT|AZURE_SUBSCRIPTION_ID|AZURE_LOCATION|AZURE_NODE_VM_SIZE|DEMO_KEY_VAULT|DEMO_REVISION|\
       DEMO_KEY_MANAGEMENT|DEMO_KEY_SHARED_CONTROL|DEMO_KEY_SHARED_DATA|DEMO_KEY_ISOLATED_1_CONTROL|DEMO_KEY_ISOLATED_1_DATA) ;;
       *) demo_error 'Unknown .env key'; return 1 ;;
     esac

@@ -6,7 +6,7 @@ param allocations object
 param location string = resourceGroup().location
 param tenantId string = subscription().tenantId
 param kubernetesVersion string = '1.35.7'
-param nodeVmSize string = 'Standard_D4s_v5'
+param nodeVmSize string
 @minValue(2)
 param nodeCount int = 2
 @minLength(1)
@@ -97,6 +97,10 @@ resource cluster 'Microsoft.ContainerService/managedClusters@2025-05-01' = {
         count: nodeCount
         maxPods: 110
         osDiskSizeGB: 64
+        osDiskType: 'Managed'
+        upgradeSettings: {
+          maxSurge: '1'
+        }
         enableNodePublicIP: false
         vnetSubnetID: allocation.nodeSubnetId
         tags: requiredTags

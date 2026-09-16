@@ -27,6 +27,7 @@ PUBLIC_KEYS = {
     "DEMO_DEPLOYMENT",
     "AZURE_SUBSCRIPTION_ID",
     "AZURE_LOCATION",
+    "AZURE_NODE_VM_SIZE",
     "DEMO_KEY_VAULT",
     "DEMO_REVISION",
 }
@@ -52,6 +53,7 @@ class DemoConfig:
     key_vault: str | None = None
     revision: str | None = None
     demo_keys: Mapping[str, str] = field(default_factory=dict, repr=False)
+    node_vm_size: str | None = None
 
     def __post_init__(self) -> None:
         if self.environment not in {"azure", "local"}:
@@ -77,8 +79,16 @@ class DemoConfig:
                 r"[a-z][a-z0-9]{1,31}", self.location
             ):
                 raise ConfigError("AZURE_LOCATION must be an Azure location identifier")
-        elif any(value is not None for value in (self.subscription, self.location, self.key_vault)):
+        elif any(
+            value is not None
+            for value in (self.subscription, self.location, self.key_vault, self.node_vm_size)
+        ):
             raise ConfigError("Local configuration must not contain Azure settings")
+        if self.node_vm_size is not None and (
+            not isinstance(self.node_vm_size, str)
+            or not re.fullmatch(r"Standard_[A-Za-z0-9_]{1,64}", self.node_vm_size)
+        ):
+            raise ConfigError("AZURE_NODE_VM_SIZE must be an Azure VM size")
         if self.key_vault is not None and (
             not isinstance(self.key_vault, str)
             or not re.fullmatch(r"[a-z][a-z0-9-]{1,22}[a-z0-9]", self.key_vault)
@@ -153,6 +163,7 @@ class DemoConfig:
         for key, value in (
             ("AZURE_SUBSCRIPTION_ID", self.subscription),
             ("AZURE_LOCATION", self.location),
+            ("AZURE_NODE_VM_SIZE", self.node_vm_size),
             ("DEMO_KEY_VAULT", self.key_vault),
             ("DEMO_REVISION", self.revision),
         ):
@@ -179,6 +190,7 @@ class DemoConfig:
             deployment=values.get("DEMO_DEPLOYMENT", ""),
             subscription=values.get("AZURE_SUBSCRIPTION_ID"),
             location=values.get("AZURE_LOCATION"),
+            node_vm_size=values.get("AZURE_NODE_VM_SIZE"),
             key_vault=values.get("DEMO_KEY_VAULT"),
             revision=values.get("DEMO_REVISION"),
             demo_keys={slot: values[key] for key, slot in SECRET_KEYS.items() if key in values},

@@ -9,6 +9,7 @@ import time
 from contextlib import contextmanager
 
 COLORS = {"section": "1;34", "progress": "36", "success": "32", "warning": "33", "error": "31"}
+RULE = "-" * 78
 
 
 def status(kind: str, message: str) -> None:
@@ -23,7 +24,21 @@ def status(kind: str, message: str) -> None:
     # Resource names and diagnostics must not inject terminal control sequences.
     text = "".join(char if char.isprintable() else " " for char in message)
     prefix, suffix = (f"\033[{code}m", "\033[0m") if colored else ("", "")
-    print(f"{prefix}[{kind}] {text}{suffix}", file=sys.stderr, flush=True)
+    entity, separator, detail = text.partition(": ")
+    if kind == "section":
+        heading = f"{entity.upper()}\n{detail[:1].upper()}{detail[1:]}" if separator else text
+        print(f"\n\n{prefix}{heading}\n{RULE}{suffix}\n", file=sys.stderr, flush=True)
+        return
+    if separator:
+        text = f"{entity:<26}  {detail}"
+    marker = {
+        "progress": "    ",
+        "success": "\u2705  " if colored else "OK  ",
+        "warning": "WARNING: ",
+        "error": "ERROR: ",
+    }[kind]
+    ending = "\n\n" if kind in {"success", "error"} else "\n"
+    print(f"{prefix}  {marker}{text}{suffix}", end=ending, file=sys.stderr, flush=True)
 
 
 @contextmanager

@@ -2,7 +2,7 @@
 param clusterName string
 param location string
 param kubernetesVersion string
-param nodeVmSize string = 'Standard_D4s_v5'
+param nodeVmSize string
 @minValue(2)
 param nodeCount int = 2
 param nodeSubnetId string
@@ -80,6 +80,10 @@ resource cluster 'Microsoft.ContainerService/managedClusters@2025-05-01' = {
         count: nodeCount
         maxPods: 110
         osDiskSizeGB: 64
+        osDiskType: 'Managed'
+        upgradeSettings: {
+          maxSurge: '1'
+        }
         enableNodePublicIP: false
         vnetSubnetID: nodeSubnetId
         tags: tags

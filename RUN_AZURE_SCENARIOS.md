@@ -102,11 +102,13 @@ make check-bicep
 generates type extensions; it does not deploy resources. `make check` runs the
 full source checks if you want that checkpoint before deploying.
 
-All Make workflows use colored sections and labeled status: blue headings, cyan
-progress, green success, yellow warnings, and red errors. Quiet waits print elapsed
-time every 15 seconds. `COLOR=always` forces status color; `COLOR=never` or nonempty
-`NO_COLOR` disables it. Redirected output is plain by default. Status goes to stderr;
-JSON/API stdout and complete native tool diagnostics and build/push logs are preserved.
+Make workflows separate sections with headings and rules, and align entities
+with their messages. Progress has no bracketed label or icon. Styled terminals
+show green check marks for completed operations; plain output uses `OK`.
+Warnings and errors remain explicit. Quiet waits print elapsed time every
+15 seconds. `COLOR=always` forces styling; `COLOR=never` or nonempty `NO_COLOR`
+disables it. Redirected output is plain by default. Status goes to stderr;
+JSON/API stdout, native diagnostics, and complete build/push logs are preserved.
 
 ### Select operator configuration
 
@@ -153,6 +155,11 @@ Choose the subscription and a short project/deployment name:
 make init ENV=azure
 make show-config
 ```
+
+> **Notice:** Azure can retain old subscription deployment records after their
+> resource groups are deleted. If bootstrap reports `Old or incomplete resource-group layout`,
+> use a fresh `--deployment` name, such as `learning2`, in the explicit initialization
+> command below. Do not bypass the layout guard.
 
 Initialization writes or replaces the private, git-ignored `.env`. The default
 uses the active Azure subscription, project `radplanes`, deployment `learning`,
@@ -213,15 +220,47 @@ bootstrap checks its exit code, then queries provider state separately.
 After registration starts, ARM validation checks the selected deployment before
 creation; a provider need not finish registering in every unrelated region first.
 
-The current templates require no preview feature registrations. In particular,
-`Microsoft.Network/AllowBringYourOwnPublicIpAddress` is not an intended dependency:
 NAT and Application Gateway use Azure-assigned Standard Static addresses, not
-customer-owned IP ranges. If Azure requests that feature, inspect the failed ARM
-operation and its request rather than enabling it blindly. Bootstrap prints the
+customer-owned IP ranges. However, inherited Azure Policies can append
+`FirstPartyUsage` IP tags that require
+`Microsoft.Network/AllowBringYourOwnPublicIpAddress`. Every confirmed Azure
+bootstrap checks this feature and automatically requests registration when it is
+unregistered. It waits for `Registered`, then refreshes `Microsoft.Network` before
+ARM validation or resource creation. Feature registration is subscription-wide
+and remains after cleanup; bootstrap does not modify or exempt Azure Policies.
+
+Denied registration, an unexpected response, or a registration timeout stops
+bootstrap without claiming success. A `Pending` feature needs Azure service
+approval, not repeated deployment attempts. If deployment still reports a BYOIP
+requirement, inspect the failed public IP's Activity Log for policy append events
+and ask the policy owner to review the required allocation. Bootstrap prints the
 selected deployment name and a scoped inspection command when creation fails.
-Denied registration or an unexpected response stops bootstrap without claiming
-success. A genuinely required approval-pending feature needs service approval,
-not repeated deployment attempts.
+
+#### Choose node capacity
+
+Before creating the foundation, bootstrap reads current VM availability,
+capabilities, and vCPU quotas for the selected subscription and region. On the
+first run, choose one of up to three eligible sizes by entering its number.
+Enter `q` to cancel without deploying the foundation. The menu shows vCPUs,
+memory, and estimated Linux retail compute costs per VM and for the full demo.
+Disks and other Azure services are extra. Choices are ranked by available prices;
+if pricing cannot be read, the menu reports that and ranks by CPU and memory.
+
+The selector offers x64 D/E sizes with 4-16 vCPUs and 16-64 GiB RAM, compatible
+with Generation 2 Azure Linux images and managed OS disks. The node pools remain
+non-zonal, so zone-only SKU restrictions do not exclude a regional choice.
+Quota must cover all five clusters and one additional upgrade node per cluster.
+At two four-core nodes per cluster, this means 40 vCPUs plus 20 for upgrades.
+Existing owned running nodes are not counted twice; other subscription usage
+still reduces available quota. Missing capacity information or no eligible
+choice stops bootstrap before foundation creation.
+
+Bootstrap saves only the chosen size as `AZURE_NODE_VM_SIZE` in the private
+`.env`, preserving the other settings and credentials. Later runs recheck and
+reuse it while it remains eligible. Management and child clusters use the same
+selection. Rerunning `make init` resets this choice with the rest of the starting
+configuration. Bootstrap does not automatically resize an existing foundation.
+An eligible SKU is not a reservation or a guarantee of allocation.
 
 Checkpoint: bootstrap completed and management AKS and Radius exist. The
 management application and tenant clusters have not been deployed yet.

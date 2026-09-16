@@ -56,7 +56,7 @@ help: ## Show grouped commands; use GROUP=setup, checks, local, or azure
 	    printf "  %-16s  %s%s%s\n", label, bold, command, reset; \
 	  } \
 	  function info_heading(title) { \
-	    printf "\n\n  %s[info] %s%s\n\n", bold, title, reset; \
+	    printf "\n\n  %s%s%s\n\n", bold, title, reset; \
 	  } \
 	  function info_row(label, text) { \
 	    printf "    %-16s  %s\n", label, text; \

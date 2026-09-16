@@ -277,6 +277,24 @@ def test_physical_names_include_deployment_identity():
         first.namespace("foreign")
 
 
+def test_selected_node_size_round_trips_without_changing_deployment_identity(tmp_path):
+    plain = config.DemoConfig("azure", "demo", "first", SUBSCRIPTION, "centralus")
+    selected = config.DemoConfig(
+        "azure", "demo", "first", SUBSCRIPTION, "centralus", node_vm_size="Standard_D4as_v7"
+    )
+    path = tmp_path / ".env"
+    config.initialize_config(selected, path)
+    assert config.load_config(path) == selected
+    assert selected.public_values()["AZURE_NODE_VM_SIZE"] == "Standard_D4as_v7"
+    assert selected.identity_hash == plain.identity_hash
+    with pytest.raises(config.ConfigError, match="Azure settings"):
+        local(node_vm_size="Standard_D4as_v7")
+    with pytest.raises(config.ConfigError, match="VM size"):
+        config.DemoConfig(
+            "azure", "demo", "first", SUBSCRIPTION, "centralus", node_vm_size="$(unsafe)"
+        )
+
+
 def test_git_and_docker_exclude_actual_dotenv(tmp_path):
     root = Path(__file__).resolve().parents[2]
     result = subprocess.run(
@@ -315,9 +333,11 @@ def test_make_init_and_show_config_use_the_selected_checkout(tmp_path):
         "scripts/__init__.py",
         "scripts/operations/__init__.py",
         "scripts/operations/config.py",
+        "scripts/operations/output.py",
         "scripts/operations/demo.py",
         "scripts/operations/init.sh",
         "scripts/lib/output.sh",
+        "scripts/lib/progress.sh",
         "scripts/lib/env.sh",
     ):
         (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
