@@ -483,10 +483,16 @@ class AzureProvider:
     def recipe_map(self, slot: str) -> dict:
         allocation = self.config.allocation(slot)
         foundation = self.config.foundation
+        if not slot.endswith("-data") and (
+            not foundation.get("postgresSkuName") or not foundation.get("postgresSkuTier")
+        ):
+            raise ProvisioningError("postgresql_selection_missing")
         common = {"location": foundation["location"], "tags": plain(foundation["tags"])}
         parameters = {
             "postgresql": {
                 **common,
+                "skuName": foundation.get("postgresSkuName"),
+                "skuTier": foundation.get("postgresSkuTier"),
                 "delegatedSubnetId": allocation["postgresqlSubnetId"],
                 "privateDnsZoneId": foundation["postgresqlDnsZoneId"],
             },

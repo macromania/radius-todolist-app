@@ -310,6 +310,41 @@ def test_git_and_docker_exclude_actual_dotenv(tmp_path):
     assert "!.env.example" in (root / ".gitignore").read_text()
 
 
+def test_postgres_selection_round_trips_and_is_not_part_of_deployment_identity(tmp_path):
+    plain = config.DemoConfig("azure", "demo", "first", SUBSCRIPTION, "eastus2")
+    selected = config.DemoConfig(
+        "azure",
+        "demo",
+        "first",
+        SUBSCRIPTION,
+        "eastus2",
+        postgres_sku_name="Standard_D2ads_v5",
+        postgres_sku_tier="GeneralPurpose",
+    )
+    path = tmp_path / ".env"
+    config.initialize_config(selected, path)
+    assert config.load_config(path) == selected
+    assert selected.identity_hash == plain.identity_hash
+    assert selected.public_values()["AZURE_POSTGRES_SKU"] == "Standard_D2ads_v5"
+    assert selected.public_values()["AZURE_POSTGRES_TIER"] == "GeneralPurpose"
+    with pytest.raises(config.ConfigError, match="Azure settings"):
+        local(postgres_sku_name="Standard_D2ads_v5", postgres_sku_tier="GeneralPurpose")
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"postgres_sku_name": "Standard_D2ads_v5"},
+        {"postgres_sku_tier": "GeneralPurpose"},
+        {"postgres_sku_name": "$(unsafe)", "postgres_sku_tier": "GeneralPurpose"},
+        {"postgres_sku_name": "Standard_D2ads_v5", "postgres_sku_tier": "unknown"},
+    ],
+)
+def test_postgres_configuration_requires_a_valid_complete_pair(fields):
+    with pytest.raises(config.ConfigError):
+        config.DemoConfig("azure", "demo", "first", SUBSCRIPTION, "eastus2", **fields)
+
+
 def test_script_help_does_not_create_configuration(tmp_path):
     root = Path(__file__).resolve().parents[2]
     result = subprocess.run(

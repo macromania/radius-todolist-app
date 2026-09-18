@@ -40,7 +40,13 @@ demo_validate_env() {
         demo_error 'AZURE_NODE_VM_SIZE must be an Azure VM size'; return 1;
       }
     fi
-  elif [[ -n "${AZURE_SUBSCRIPTION_ID+x}${AZURE_LOCATION+x}${DEMO_KEY_VAULT+x}${AZURE_NODE_VM_SIZE+x}" ]]; then
+    if [[ -n "${AZURE_POSTGRES_SKU+x}${AZURE_POSTGRES_TIER+x}" ]]; then
+      [[ "${AZURE_POSTGRES_SKU:-}" =~ ^Standard_[A-Za-z0-9_]{1,64}$ \
+        && "${AZURE_POSTGRES_TIER:-}" =~ ^(Burstable|GeneralPurpose|MemoryOptimized)$ ]] || {
+        demo_error 'AZURE_POSTGRES_SKU and AZURE_POSTGRES_TIER must contain a valid SKU and tier'; return 1;
+      }
+    fi
+  elif [[ -n "${AZURE_SUBSCRIPTION_ID+x}${AZURE_LOCATION+x}${DEMO_KEY_VAULT+x}${AZURE_NODE_VM_SIZE+x}${AZURE_POSTGRES_SKU+x}${AZURE_POSTGRES_TIER+x}" ]]; then
     demo_error 'Local configuration must not contain Azure settings'; return 1
   fi
   if [[ -n "${DEMO_KEY_VAULT+x}" ]]; then
@@ -71,6 +77,7 @@ demo_load_env() {
   clean_bytes=$(tr -d '\000' < "$file" | wc -c) || return
   [[ "$bytes" -eq "$clean_bytes" ]] || { demo_error '.env contains a null byte'; return 1; }
   unset DEMO_ENV DEMO_PROJECT DEMO_DEPLOYMENT AZURE_SUBSCRIPTION_ID AZURE_LOCATION AZURE_NODE_VM_SIZE \
+    AZURE_POSTGRES_SKU AZURE_POSTGRES_TIER \
     DEMO_KEY_VAULT DEMO_REVISION DEMO_KEY_MANAGEMENT DEMO_KEY_SHARED_CONTROL DEMO_KEY_SHARED_DATA \
     DEMO_KEY_ISOLATED_1_CONTROL DEMO_KEY_ISOLATED_1_DATA
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -80,7 +87,7 @@ demo_load_env() {
     [[ "$line" == *=* ]] || { demo_error 'Invalid .env assignment'; return 1; }
     key="${line%%=*}" raw="${line#*=}"
     case "$key" in
-      DEMO_ENV|DEMO_PROJECT|DEMO_DEPLOYMENT|AZURE_SUBSCRIPTION_ID|AZURE_LOCATION|AZURE_NODE_VM_SIZE|DEMO_KEY_VAULT|DEMO_REVISION|\
+      DEMO_ENV|DEMO_PROJECT|DEMO_DEPLOYMENT|AZURE_SUBSCRIPTION_ID|AZURE_LOCATION|AZURE_NODE_VM_SIZE|AZURE_POSTGRES_SKU|AZURE_POSTGRES_TIER|DEMO_KEY_VAULT|DEMO_REVISION|\
       DEMO_KEY_MANAGEMENT|DEMO_KEY_SHARED_CONTROL|DEMO_KEY_SHARED_DATA|DEMO_KEY_ISOLATED_1_CONTROL|DEMO_KEY_ISOLATED_1_DATA) ;;
       *) demo_error 'Unknown .env key'; return 1 ;;
     esac

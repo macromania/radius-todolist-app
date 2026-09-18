@@ -101,6 +101,8 @@ def raw_config():
             "tags": {"SecurityControl": "Ignore", "project": "radplanes"},
             "nodeVmSize": "Standard_D4s_v5",
             "nodeCount": 2,
+            "postgresSkuName": "Standard_D2ads_v5",
+            "postgresSkuTier": "GeneralPurpose",
             "kubernetesVersion": "1.35.7",
             "egressIp": "5.6.7.8",
             "authorizedIpRanges": ["1.2.3.4/32", "5.6.7.8/32"],
@@ -344,6 +346,56 @@ def test_maximum_selected_prefix_stays_within_kubernetes_namespace_limit():
     for slot in SLOTS[1:]:
         assert len(provisioning_namespace(identity.stem, slot) + f"-cluster-{slot}") <= 63
         assert len(identity.namespace(slot)) <= 63
+
+
+@pytest.mark.parametrize("sku", ["Standard_D2ads_v5", "Standard_D2ds_v5"])
+def test_selected_postgres_compute_reaches_each_database_recipe(
+    selected_config, tmp_path, monkeypatch, sku
+):
+    raw = selected_config.to_dict()
+    raw["foundation"].update(postgresSkuName=sku, postgresSkuTier="GeneralPurpose")
+    selected = OperatorConfig.from_dict(raw, identity=selected_config.identity)
+    provider = AzureProvider(
+        selected, tmp_path, credentials(tmp_path / "credentials.json", selected)
+    )
+    provider._verified = True
+    monkeypatch.setattr(provider, "rad", MagicMock())
+    monkeypatch.setattr(provider, "verify_recipes", MagicMock())
+    for slot in ("management", "shared-control", "isolated-1-control"):
+        provider.register(slot)
+        document = json.loads((provider.state / f"{slot}-environment.parameters.json").read_text())
+        parameters = document["parameters"]["recipes"]["value"][
+            "Demo.Platform/postgreSqlDatabases"
+        ]["default"]["parameters"]
+        assert parameters["skuName"] == sku
+        assert parameters["skuTier"] == "GeneralPurpose"
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        {"postgresSkuName": "Standard_D2ads_v5", "postgresSkuTier": "unknown"},
+        {"postgresSkuName": "Standard_D2ads_v5", "postgresSkuTier": None},
+        {"postgresSkuName": None, "postgresSkuTier": "GeneralPurpose"},
+        {"postgresSkuName": "invalid", "postgresSkuTier": "GeneralPurpose"},
+    ],
+)
+def test_foundation_postgres_selection_must_be_valid_and_complete(raw_config, selection):
+    raw_config["foundation"].update(selection)
+    with pytest.raises(ValueError, match="PostgreSQL compute"):
+        OperatorConfig.from_dict(raw_config)
+
+
+def test_old_foundation_cannot_silently_use_a_hardcoded_postgres_size(selected_config, tmp_path):
+    raw = selected_config.to_dict()
+    raw["foundation"].pop("postgresSkuName")
+    raw["foundation"].pop("postgresSkuTier")
+    selected = OperatorConfig.from_dict(raw, identity=selected_config.identity)
+    provider = AzureProvider(
+        selected, tmp_path, credentials(tmp_path / "credentials.json", selected)
+    )
+    with pytest.raises(ProvisioningError, match="postgresql_selection_missing"):
+        provider.recipe_map("shared-control")
 
 
 def test_canonical_management_configuration_and_suspended_job_use_live_inputs(

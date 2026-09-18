@@ -169,6 +169,26 @@ NODE_COUNT=$(jq -er '.nodeCount | select(type == "number" and . >= 2 and floor =
 }
 export AZURE_NODE_VM_SIZE
 
+demo_status section 'Bootstrap: PostgreSQL compute'
+postgres_arguments=(--config "$ROOT/.env")
+if [[ -f "$AZURE_WORKSPACE/existing-foundation.json" ]]; then
+  postgres_arguments+=(--existing-foundation "$AZURE_WORKSPACE/existing-foundation.json")
+fi
+demo_run 'PostgreSQL compute selection' "$ROOT/.venv/bin/python" \
+  "$ROOT/scripts/operations/azure/postgres_sizes.py" "${postgres_arguments[@]}" \
+  > "$AZURE_WORKSPACE/postgres-size.json"
+AZURE_POSTGRES_SKU=$(jq -er '
+  .postgresSkuName | select(type == "string" and test("^Standard_[A-Za-z0-9_]{1,64}$"))
+' "$AZURE_WORKSPACE/postgres-size.json") || {
+  demo_error 'PostgreSQL selection returned an invalid SKU'; exit 1;
+}
+AZURE_POSTGRES_TIER=$(jq -er '
+  .postgresSkuTier | select(. == "GeneralPurpose")
+' "$AZURE_WORKSPACE/postgres-size.json") || {
+  demo_error 'PostgreSQL selection returned an invalid tier'; exit 1;
+}
+export AZURE_POSTGRES_SKU AZURE_POSTGRES_TIER
+
 REGISTRY_EXISTS=false
 for kind in registry vault; do
   if [[ "$kind" == vault && "$VAULT_OWNED" == false ]]; then
@@ -249,6 +269,7 @@ jq -n --arg project "$DEMO_PROJECT" --arg deployment "$DEMO_DEPLOYMENT" \
   --arg operator "$OPERATOR" --arg ip "$OPERATOR_IP" --arg hash "$IDENTITY_HASH" \
   --arg externalVaultGroup "$EXTERNAL_VAULT_GROUP" --argjson credentialNames "$CREDENTIAL_NAMES" \
   --arg nodeVmSize "$AZURE_NODE_VM_SIZE" --argjson nodeCount "$NODE_COUNT" \
+  --arg postgresSkuName "$AZURE_POSTGRES_SKU" --arg postgresSkuTier "$AZURE_POSTGRES_TIER" \
   --argjson registryExists "$REGISTRY_EXISTS" '{
     "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
     contentVersion: "1.0.0.0",
@@ -257,6 +278,7 @@ jq -n --arg project "$DEMO_PROJECT" --arg deployment "$DEMO_DEPLOYMENT" \
       registryName:$registry, vaultName:$vault, operatorObjectId:$operator, operatorIp:$ip,
       deploymentHash:$hash, externalVaultResourceGroup:$externalVaultGroup,
       nodeVmSize:$nodeVmSize, nodeCount:$nodeCount,
+      postgresSkuName:$postgresSkuName, postgresSkuTier:$postgresSkuTier,
       applicationCredentialNames:$credentialNames, registryExists:$registryExists
     } | map_values({value:.}))
   }' > "$AZURE_WORKSPACE/parameters.json"

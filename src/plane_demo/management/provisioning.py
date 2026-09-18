@@ -148,6 +148,25 @@ class OperatorConfig:
                 raise ValueError("bootstrap identity mismatch")
             identity = identity or saved_identity
         foundation = data["foundation"]
+        postgres_name = foundation.get("postgresSkuName")
+        postgres_tier = foundation.get("postgresSkuTier")
+        if postgres_name is not None or postgres_tier is not None:
+            if (
+                not isinstance(postgres_name, str)
+                or not re.fullmatch(r"Standard_[A-Za-z0-9_]{1,64}", postgres_name)
+                or not isinstance(postgres_tier, str)
+                or postgres_tier not in {"Burstable", "GeneralPurpose", "MemoryOptimized"}
+            ):
+                raise ValueError("invalid foundation PostgreSQL compute selection")
+        if (
+            identity is not None
+            and identity.postgres_sku_name is not None
+            and (
+                postgres_name != identity.postgres_sku_name
+                or postgres_tier != identity.postgres_sku_tier
+            )
+        ):
+            raise ValueError("foundation PostgreSQL compute does not match the selected deployment")
         if identity is not None:
             if foundation.get("resourceGroupLayout") != AZURE_GROUP_LAYOUT:
                 raise ValueError("unsupported resource group layout; use a fresh deployment")

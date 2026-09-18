@@ -200,6 +200,7 @@ azure_foundation() {
     --arg stem "$STEM" --arg registry "$REGISTRY" --arg vault "$VAULT" \
     --arg vaultId "$VAULT_ID" --arg vaultGroup "$VAULT_RESOURCE_GROUP" --argjson vaultOwned "$VAULT_OWNED" \
     --arg nodeVmSize "${AZURE_NODE_VM_SIZE:-}" \
+    --arg postgresSkuName "${AZURE_POSTGRES_SKU:-}" --arg postgresSkuTier "${AZURE_POSTGRES_TIER:-}" \
     --arg scope "$SUBSCRIPTION_SCOPE" --arg platform "$PLATFORM_SCOPE" '
       (.properties.outputs | map_values(.value)) as $o |
       .properties.provisioningState == "Succeeded" and
@@ -212,6 +213,9 @@ azure_foundation() {
       ($o.foundation.subscriptionId | ascii_downcase) == $subscription and
       $o.foundation.location == $location and
       ($nodeVmSize == "" or $o.foundation.nodeVmSize == $nodeVmSize) and
+      ($postgresSkuName == "" or
+        ($o.foundation.postgresSkuName == $postgresSkuName and
+         $o.foundation.postgresSkuTier == $postgresSkuTier)) and
       $o.foundation.platformResourceGroup == ("rg-" + $stem + "-platform") and
       $o.foundation.registryName == $registry and
       $o.foundation.registryLoginServer == ($registry + ".azurecr.io") and

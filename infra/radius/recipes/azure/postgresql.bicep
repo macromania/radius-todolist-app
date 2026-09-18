@@ -3,9 +3,9 @@ param location string = resourceGroup().location
 param delegatedSubnetId string
 @description('Linked private zone ending in .postgres.database.azure.com; not a private-endpoint zone.')
 param privateDnsZoneId string
-param skuName string = 'Standard_D2ds_v5'
+param skuName string
 @allowed(['Burstable', 'GeneralPurpose', 'MemoryOptimized'])
-param skuTier string = 'GeneralPurpose'
+param skuTier string
 param administratorLogin string = 'plane_setup'
 @description('Generated setup-only credential. Reapply may rotate it; never put it in readable environment Recipe parameters.')
 @secure()

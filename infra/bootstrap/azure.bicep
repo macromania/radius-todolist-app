@@ -37,6 +37,11 @@ param operatorObjectId string
 param kubernetesVersion string = '1.35.7'
 @description('Operator-selected x64 size checked against current regional availability and quota before deployment.')
 param nodeVmSize string
+@description('Operator-selected PostgreSQL compute advertised by the regional Flexible Server capability API.')
+@minLength(1)
+param postgresSkuName string
+@allowed(['Burstable', 'GeneralPurpose', 'MemoryOptimized'])
+param postgresSkuTier string
 @description('Current AKS system-pool guidance requires at least two nodes and four vCPUs per node.')
 @minValue(2)
 param nodeCount int = 2
@@ -547,6 +552,8 @@ output foundation object = union(network.outputs.foundation, {
   nodeVmSize: nodeVmSize
   nodeCount: nodeCount
   harnessIdentity: harness.outputs.identity
+  postgresSkuName: postgresSkuName
+  postgresSkuTier: postgresSkuTier
   roleDefinitionIds: {
     certificateImporter: issuerRole.id
     acmeStateWriter: acmeStateRole.id

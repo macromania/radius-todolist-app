@@ -242,6 +242,8 @@ def test_shell_output_is_readable_by_typed_runtime_configuration(checkout):
         'AZURE_LOCATION=""',
         'DEMO_KEY_VAULT=""',
         'DEMO_REVISION=""',
+        'AZURE_POSTGRES_SKU="Standard_D2ads_v5"',
+        'AZURE_POSTGRES_TIER="GeneralPurpose"',
         'DEMO_PROJECT="demo" trailing',
         'DEMO_KEY_MANAGEMENT="x\\n' + "x" * 32 + '"',
     ],
@@ -267,3 +269,48 @@ def test_shell_loader_rejects_unknown_duplicate_executable_or_invalid_keys(check
     )
     assert result.returncode != 0
     assert "secret" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    "fields,valid",
+    [
+        (
+            {"AZURE_POSTGRES_SKU": "Standard_D2ads_v5", "AZURE_POSTGRES_TIER": "GeneralPurpose"},
+            True,
+        ),
+        ({"AZURE_POSTGRES_SKU": "Standard_D2ads_v5"}, False),
+        ({"AZURE_POSTGRES_TIER": "GeneralPurpose"}, False),
+        ({"AZURE_POSTGRES_SKU": "invalid", "AZURE_POSTGRES_TIER": "GeneralPurpose"}, False),
+        ({"AZURE_POSTGRES_SKU": "Standard_D2ads_v5", "AZURE_POSTGRES_TIER": "invalid"}, False),
+    ],
+)
+def test_shell_loader_validates_postgres_selection_and_clears_inherited_settings(
+    checkout, fields, valid
+):
+    assert (
+        run_init(checkout, "--environment", "azure", "--subscription", SUBSCRIPTION).returncode == 0
+    )
+    with (checkout / ".env").open("a") as stream:
+        for key, value in fields.items():
+            stream.write(f"{key}={json.dumps(value)}\n")
+    result = subprocess.run(
+        [
+            "bash",
+            "-euo",
+            "pipefail",
+            "-c",
+            'source "$1"; demo_load_env "$2"',
+            "check",
+            str(checkout / "scripts/lib/env.sh"),
+            str(checkout / ".env"),
+        ],
+        env={
+            **os.environ,
+            "AZURE_POSTGRES_SKU": "inherited",
+            "AZURE_POSTGRES_TIER": "GeneralPurpose",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (result.returncode == 0) == valid, result.stderr

@@ -68,7 +68,7 @@ file unchanged.
 
 | Information | Owner |
 |---|---|
-| Operator choices | `.env`: environment, project/deployment name, Azure selection, and chosen AKS node size when applicable |
+| Operator choices | `.env`: environment, project/deployment name, Azure selection, and chosen AKS and PostgreSQL compute when applicable |
 | Stable application credentials | Key Vault on Azure; Kubernetes Secrets locally |
 | Endpoints and cluster access | Current Azure, Radius, Kubernetes, or Docker APIs |
 | Tenant configuration and provisioning progress | PostgreSQL |

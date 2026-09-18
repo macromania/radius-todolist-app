@@ -8,7 +8,6 @@ import json
 import math
 import os
 import re
-import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -17,6 +16,17 @@ from urllib.parse import urlencode, urlsplit
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path[:0] = [str(ROOT), str(ROOT / "src")]
+from scripts.operations.azure.compute_selection import (  # noqa: E402
+    Discovery as ComputeDiscovery,
+)
+from scripts.operations.azure.compute_selection import (  # noqa: E402
+    SelectionCancelled,
+    integer,
+    read_selection,
+)
+from scripts.operations.azure.compute_selection import (  # noqa: E402
+    SelectionError as NodeSizeError,
+)
 from scripts.operations.config import (  # noqa: E402
     SLOTS,
     ConfigError,
@@ -24,23 +34,9 @@ from scripts.operations.config import (  # noqa: E402
     initialize_config,
     load_config,
 )
-from scripts.operations.output import pause_progress, progress, status  # noqa: E402
+from scripts.operations.output import pause_progress, status  # noqa: E402
 
 PRICES = "https://prices.azure.com/api/retail/prices"
-
-
-class NodeSizeError(RuntimeError):
-    pass
-
-
-class SelectionCancelled(Exception):
-    pass
-
-
-def integer(value, label):
-    if isinstance(value, bool) or not re.fullmatch(r"\d+", str(value)):
-        raise NodeSizeError(f"{label}: expected a nonnegative integer")
-    return int(value)
 
 
 @dataclass(frozen=True)
@@ -226,36 +222,7 @@ def quota_problem(size, budget, quotas, credits):
     return None
 
 
-class Discovery:
-    def __init__(self, config, *, runner=subprocess.run):
-        self.config, self.runner = config, runner
-
-    def command(self, argv, label):
-        with progress(label):
-            try:
-                result = self.runner(
-                    argv, stdout=subprocess.PIPE, text=True, check=False, timeout=180
-                )
-            except (OSError, subprocess.TimeoutExpired) as error:
-                raise NodeSizeError(f"{label}: command unavailable or timed out") from error
-        if result.returncode:
-            raise NodeSizeError(f"{label}: failed (exit {result.returncode}); see diagnostic above")
-        try:
-            value = json.loads(result.stdout)
-        except ValueError as error:
-            raise NodeSizeError(f"{label}: returned invalid JSON") from error
-        status("success", f"{label} completed")
-        return value
-
-    def az(self, *args):
-        value = self.command(
-            ["az", *args, "--subscription", self.config.subscription, "--output", "json"],
-            f"Azure: {' '.join(args[:2])}",
-        )
-        if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
-            raise NodeSizeError("Azure node-size discovery returned an invalid list")
-        return value
-
+class Discovery(ComputeDiscovery):
     def available(self, budget):
         with ThreadPoolExecutor(max_workers=3) as pool:
             sku_request = pool.submit(
@@ -443,17 +410,7 @@ def select_size(eligible, problems, config, budget, discovery, *, existing=None)
             "  Availability is not a capacity reservation.\n",
             file=sys.stderr,
         )
-        while True:
-            print(
-                f"  Select 1-{len(choices)}, or q to cancel: ", end="", file=sys.stderr, flush=True
-            )
-            answer = sys.stdin.readline()
-            if not answer or answer.strip().lower() == "q":
-                raise SelectionCancelled
-            answer = answer.strip()
-            if answer in {str(number) for number in range(1, len(choices) + 1)}:
-                return choices[int(answer) - 1]
-            status("warning", f"Enter a number from 1 to {len(choices)}, or q")
+        return choices[read_selection(len(choices))]
 
 
 def main():

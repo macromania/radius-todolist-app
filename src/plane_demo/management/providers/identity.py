@@ -28,6 +28,8 @@ PUBLIC_KEYS = {
     "AZURE_SUBSCRIPTION_ID",
     "AZURE_LOCATION",
     "AZURE_NODE_VM_SIZE",
+    "AZURE_POSTGRES_SKU",
+    "AZURE_POSTGRES_TIER",
     "DEMO_KEY_VAULT",
     "DEMO_REVISION",
 }
@@ -54,6 +56,8 @@ class DemoConfig:
     revision: str | None = None
     demo_keys: Mapping[str, str] = field(default_factory=dict, repr=False)
     node_vm_size: str | None = None
+    postgres_sku_name: str | None = None
+    postgres_sku_tier: str | None = None
 
     def __post_init__(self) -> None:
         if self.environment not in {"azure", "local"}:
@@ -81,7 +85,14 @@ class DemoConfig:
                 raise ConfigError("AZURE_LOCATION must be an Azure location identifier")
         elif any(
             value is not None
-            for value in (self.subscription, self.location, self.key_vault, self.node_vm_size)
+            for value in (
+                self.subscription,
+                self.location,
+                self.key_vault,
+                self.node_vm_size,
+                self.postgres_sku_name,
+                self.postgres_sku_tier,
+            )
         ):
             raise ConfigError("Local configuration must not contain Azure settings")
         if self.node_vm_size is not None and (
@@ -89,6 +100,15 @@ class DemoConfig:
             or not re.fullmatch(r"Standard_[A-Za-z0-9_]{1,64}", self.node_vm_size)
         ):
             raise ConfigError("AZURE_NODE_VM_SIZE must be an Azure VM size")
+        if (self.postgres_sku_name is None) != (self.postgres_sku_tier is None):
+            raise ConfigError("AZURE_POSTGRES_SKU and AZURE_POSTGRES_TIER must be set together")
+        if self.postgres_sku_name is not None and (
+            not isinstance(self.postgres_sku_name, str)
+            or not re.fullmatch(r"Standard_[A-Za-z0-9_]{1,64}", self.postgres_sku_name)
+            or not isinstance(self.postgres_sku_tier, str)
+            or self.postgres_sku_tier not in {"Burstable", "GeneralPurpose", "MemoryOptimized"}
+        ):
+            raise ConfigError("Invalid PostgreSQL SKU or tier")
         if self.key_vault is not None and (
             not isinstance(self.key_vault, str)
             or not re.fullmatch(r"[a-z][a-z0-9-]{1,22}[a-z0-9]", self.key_vault)
@@ -164,6 +184,8 @@ class DemoConfig:
             ("AZURE_SUBSCRIPTION_ID", self.subscription),
             ("AZURE_LOCATION", self.location),
             ("AZURE_NODE_VM_SIZE", self.node_vm_size),
+            ("AZURE_POSTGRES_SKU", self.postgres_sku_name),
+            ("AZURE_POSTGRES_TIER", self.postgres_sku_tier),
             ("DEMO_KEY_VAULT", self.key_vault),
             ("DEMO_REVISION", self.revision),
         ):
@@ -191,6 +213,8 @@ class DemoConfig:
             subscription=values.get("AZURE_SUBSCRIPTION_ID"),
             location=values.get("AZURE_LOCATION"),
             node_vm_size=values.get("AZURE_NODE_VM_SIZE"),
+            postgres_sku_name=values.get("AZURE_POSTGRES_SKU"),
+            postgres_sku_tier=values.get("AZURE_POSTGRES_TIER"),
             key_vault=values.get("DEMO_KEY_VAULT"),
             revision=values.get("DEMO_REVISION"),
             demo_keys={slot: values[key] for key, slot in SECRET_KEYS.items() if key in values},

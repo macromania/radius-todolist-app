@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from plane_demo.management.providers.secret_store import CredentialScope
+from scripts.operations.config import load_config
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts/operations/azure"))
@@ -18,6 +19,7 @@ SUBSCRIPTION = "11111111-1111-1111-1111-111111111111"
 REVISION = "c" * 40
 COMPILER = "Bicep CLI version 0.42.1 (test)"
 NODE_SIZE = "Standard_D4as_v7"
+POSTGRES_SIZE = "Standard_D2ads_v5"
 TOOLS = ("az", "rad", "docker", "curl", "git", "bicep", "kubectl", "kubelogin")
 FAKE = r"""
 import base64,gzip,hashlib,importlib.util,io,json,marshal,os,re,stat,sys,tarfile
@@ -136,6 +138,8 @@ def foundation():
         "location":spec["location"],"platformResourceGroup":f"rg-{stem}-platform",
         "nodeVmSize":state.get("node_vm_size",spec.get("node_vm_size","Standard_D4as_v7")),
         "nodeCount":2,
+        "postgresSkuName":state.get("postgres_sku",spec.get("postgres_sku","Standard_D2ads_v5")),
+        "postgresSkuTier":"GeneralPurpose",
         "registryName":registry,"registryLoginServer":host,"registryRoleAssignmentMode":registry_mode,
         "registryId":f"{platform}/providers/Microsoft.ContainerRegistry/registries/{registry}",
         "vaultName":vault,"vaultId":vault_id,"vaultOwned":not bool(external),
@@ -145,6 +149,9 @@ def foundation():
              f"Microsoft.ContainerService/managedClusters/aks-{stem}-management"}}
     if mode=="foreign-foundation": values["foundation"]["deploymentName"]="foreign"
     if mode=="old-group-layout": values["foundation"].pop("resourceGroupLayout")
+    if mode=="old-postgres-selection":
+        values["foundation"].pop("postgresSkuName")
+        values["foundation"].pop("postgresSkuTier")
     if mode=="foreign-registry-host":
         values["foundation"]["registryLoginServer"]="foreign.azurecr.io"
     status="Failed" if mode=="unready-foundation" else "Succeeded"
@@ -213,6 +220,13 @@ elif tool=="az":
                          "StandardEasv7Family")]))
     elif args[:2]==["aks","list"]:
         emit(spec.get("existing_clusters",[]))
+    elif args[:3]==["postgres","flexible-server","list-skus"]:
+        emit(spec.get("postgres_capabilities",[{
+            "supportedServerVersions":[{"name":"16","status":None,"reason":None}],
+            "supportedServerEditions":[{"name":"GeneralPurpose","supportedServerSkus":[
+                {"name":name,"vCores":2,"supportedMemoryPerVcoreMb":4096,
+                 "supportedZones":["1","2","3"],"status":None,"reason":None}
+                for name in ("Standard_D2ads_v5","Standard_D2ds_v4","Standard_D2ds_v5")]}]}]))
     elif args[:2]==["provider","show"]:
         registered=arg("--namespace") in state.get("providers",[])
         if mode=="unregistered-providers":
@@ -261,7 +275,7 @@ elif tool=="az":
             emit([{"name":f"rg-{stem}-platform".upper(),"tags":owner}])
         elif mode in ("existing-owned-nodes","foreign-node-cluster"):
             emit([{"name":f"rg-{stem}-management-nodes","tags":{"aks-managed":"true"}}])
-        elif mode in ("foreign-group","foreign-resource","existing-owned"):
+        elif mode in ("foreign-group","foreign-resource","existing-owned","old-postgres-selection"):
             owner={**tags,**({"deployment":"foreign"} if mode=="foreign-group" else {})}
             emit([{"name":f"rg-{stem}-platform","tags":owner}])
         else: emit([])
@@ -331,9 +345,10 @@ elif tool=="az":
             prior["properties"]["parameters"]["deploymentName"]["value"]="foreign"
         emit([prior] if mode in ("foreign-deployment","existing-owned","active-bootstrap",
                                 "owned-case-group","existing-owned-nodes",
-                                "old-group-layout") else [])
+                                "old-group-layout","old-postgres-selection") else [])
     elif args[:3]==["deployment","sub","create"]:
         state["node_vm_size"]=entry["parameters"]["nodeVmSize"]["value"]
+        state["postgres_sku"]=entry["parameters"]["postgresSkuName"]["value"]
         save()
         if not entry["parameters"]["registryExists"]["value"]:
             state["arm_tags"]={}
@@ -702,6 +717,8 @@ def checkout(tmp_path):
         "scripts/operations/output.py",
         "scripts/operations/azure/prerequisites.py",
         "scripts/operations/azure/node_sizes.py",
+        "scripts/operations/azure/compute_selection.py",
+        "scripts/operations/azure/postgres_sizes.py",
         "scripts/operations/config.py",
         "scripts/lib/env.sh",
         "scripts/lib/discovery.sh",
@@ -812,6 +829,9 @@ def configure(root, **changes):
         values.update(AZURE_SUBSCRIPTION_ID=SUBSCRIPTION, AZURE_LOCATION=spec["location"])
         if spec.get("node_vm_size", NODE_SIZE) is not None:
             values["AZURE_NODE_VM_SIZE"] = spec.get("node_vm_size", NODE_SIZE)
+        if spec.get("postgres_sku", POSTGRES_SIZE) is not None:
+            values["AZURE_POSTGRES_SKU"] = spec.get("postgres_sku", POSTGRES_SIZE)
+            values["AZURE_POSTGRES_TIER"] = "GeneralPurpose"
     values.update(spec.get("extra_env", {}))
     (root / ".env").write_text(
         "".join(f"{key}={json.dumps(value)}\n" for key, value in values.items())
@@ -1047,6 +1067,8 @@ def test_bootstrap_uses_selected_identity_and_fresh_successful_outputs(checkout,
         "registryExists": mode == "existing-owned",
         "nodeVmSize": NODE_SIZE,
         "nodeCount": 2,
+        "postgresSkuName": POSTGRES_SIZE,
+        "postgresSkuTier": "GeneralPurpose",
     }
     assert create["args"][create["args"].index("--name") + 1] == "sample-learn-azure-bootstrap"
     (show,) = selected(checkout, "az", ["deployment", "sub", "show"])
@@ -1258,6 +1280,61 @@ def test_cancelled_node_selection_does_not_create_resources_or_replace_env(check
     assert (checkout / ".env").read_bytes() == before
     assert "selection cancelled" in result.stderr
     assert not selected(checkout, "az", ["deployment", "sub", "validate"])
+    assert not selected(checkout, "az", ["deployment", "sub", "create"])
+
+
+def test_bootstrap_selects_postgres_compute_before_arm_create(checkout):
+    configure(checkout, postgres_sku=None)
+    result = run(checkout, "bootstrap", input="2\n")
+    assert result.returncode == 0, result.stderr
+    assert "PostgreSQL compute: choose an available option" not in result.stdout
+    assert "PostgreSQL compute" in result.stderr and "Select 1-3" in result.stderr
+    saved = (checkout / ".env").read_text()
+    assert 'AZURE_POSTGRES_SKU="Standard_D2ds_v4"' in saved
+    assert 'AZURE_POSTGRES_TIER="GeneralPurpose"' in saved
+    (create,) = selected(checkout, "az", ["deployment", "sub", "create"])
+    assert create["parameters"]["postgresSkuName"]["value"] == "Standard_D2ds_v4"
+    assert create["parameters"]["postgresSkuTier"]["value"] == "GeneralPurpose"
+    assert json.loads(result.stdout)["foundation"]["postgresSkuName"] == "Standard_D2ds_v4"
+    (discovery,) = selected(checkout, "az", ["postgres", "flexible-server", "list-skus"])
+    assert discovery["args"][-4:] == ["--subscription", SUBSCRIPTION, "--output", "json"]
+    assert calls(checkout).index(discovery) < calls(checkout).index(create)
+
+
+def test_bootstrap_prompts_for_both_compute_choices_on_first_run(checkout):
+    configure(checkout, node_vm_size=None, postgres_sku=None)
+    result = run(checkout, "bootstrap", input="1\n3\n")
+    assert result.returncode == 0, result.stderr
+    (create,) = selected(checkout, "az", ["deployment", "sub", "create"])
+    assert create["parameters"]["nodeVmSize"]["value"] == NODE_SIZE
+    assert create["parameters"]["postgresSkuName"]["value"] == "Standard_D2ds_v5"
+
+
+@pytest.mark.parametrize("answer", ["q\n", ""])
+def test_cancelled_postgres_selection_does_not_submit_a_foundation(checkout, answer):
+    configure(checkout, postgres_sku=None)
+    before = load_config(checkout / ".env")
+    result = run(checkout, "bootstrap", input=answer)
+    assert result.returncode != 0 and not result.stdout
+    assert load_config(checkout / ".env") == before
+    assert "PostgreSQL selection cancelled" in result.stderr
+    assert not selected(checkout, "az", ["deployment", "sub", "validate"])
+    assert not selected(checkout, "az", ["deployment", "sub", "create"])
+
+
+@pytest.mark.parametrize("capabilities", [[], {"unexpected": "shape"}])
+def test_postgres_discovery_failure_prevents_foundation_creation(checkout, capabilities):
+    configure(checkout, postgres_capabilities=capabilities)
+    result = run(checkout, "bootstrap")
+    assert result.returncode != 0 and not result.stdout
+    assert not selected(checkout, "az", ["deployment", "sub", "validate"])
+    assert not selected(checkout, "az", ["deployment", "sub", "create"])
+
+
+def test_existing_foundation_without_postgres_selection_requires_a_fresh_demo(checkout):
+    configure(checkout, mode="old-postgres-selection")
+    result = run(checkout, "bootstrap")
+    assert result.returncode != 0 and "fresh deployment name" in result.stderr
     assert not selected(checkout, "az", ["deployment", "sub", "create"])
 
 

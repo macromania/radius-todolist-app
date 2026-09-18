@@ -263,6 +263,39 @@ selection. Rerunning `make init` resets this choice with the rest of the startin
 configuration. Bootstrap does not automatically resize an existing foundation.
 An eligible SKU is not a reservation or a guarantee of allocation.
 
+#### Choose PostgreSQL compute
+
+Bootstrap also reads PostgreSQL Flexible Server capabilities for the selected
+subscription and region, then asks you to choose one of up to three eligible
+SKUs. This is a separate check from AKS VM availability. It runs before ARM
+validation and foundation creation, not during tenant onboarding.
+
+The menu preserves the demo's General Purpose tier and PostgreSQL 16. It offers
+2-8 vCores and 8-64 GiB RAM, shows advertised zones, and ranks choices by vCores,
+RAM and name, not price. Management and both control databases use the same
+selection. Each database starts with 32 GiB storage; database compute and storage
+costs are separate from the AKS estimates.
+
+Choose a number, or enter `q` to cancel before creating the foundation. Elapsed-time
+updates pause during the prompt. Bootstrap saves `AZURE_POSTGRES_SKU` and
+`AZURE_POSTGRES_TIER` together in the private `.env`, preserving credentials and
+the AKS choice. Later runs recheck and reuse an eligible saved choice. Invalid,
+restricted or missing capability data stops bootstrap rather than selecting a
+default. `make show-config` displays both compute selections.
+
+The foundation records the PostgreSQL choice, and management and child Radius
+Recipes receive it explicitly. There is no hardcoded database SKU fallback.
+Bootstrap refuses to change an existing foundation's selection or resize a
+database. Existing foundations without this selection need a **fresh deployment
+name** for the new workflow; they are not automatically adopted or migrated.
+Repeating `make init` resets both compute choices with the other starting settings.
+
+The capability catalog does not reserve hardware or guarantee quota. Azure can
+still return `SkuNotAvailable` when it allocates a server later. If that happens,
+stop and read the failed operation's logs. Do not submit another tenant or reset
+database state to force a retry. Review another advertised SKU for a fresh run,
+or ask Azure support to confirm capacity.
+
 Checkpoint: bootstrap completed and management AKS and Radius exist. The
 management application and tenant clusters have not been deployed yet.
 
