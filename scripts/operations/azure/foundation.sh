@@ -10,7 +10,7 @@ source "$ROOT/scripts/lib/discovery.sh"
 
 if [[ "${1:-}" == --help ]]; then
   printf '%s\n' 'Usage: CONFIRM_AZURE=yes bash scripts/operations/azure/foundation.sh' \
-    'Internal first-time stage: creates only the default foundation and management Radius.' \
+    'Internal first-time stage: creates the default Azure foundation. Radius is installed in a separate guarded phase.' \
     'Prints freshly queried ARM outputs. An external DEMO_KEY_VAULT remains externally owned and unmodified.'
   exit 0
 fi
