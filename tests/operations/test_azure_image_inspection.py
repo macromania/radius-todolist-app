@@ -2,6 +2,7 @@ import importlib.util
 import io
 import json
 import marshal
+import os
 import shutil
 import stat
 import subprocess
@@ -298,6 +299,69 @@ def test_private_runtime_files_cannot_be_omitted_from_the_dockerfile(source):
     )
     with pytest.raises(inspection.InspectionError, match="private_runtime_source_missing"):
         inspection.expected_files(source, "provisioner")
+
+
+@pytest.mark.parametrize("helper", ["scripts/lib/output.sh", "scripts/operations/output.py"])
+def test_provisioner_cannot_omit_runtime_output_helpers(source, helper):
+    dockerfile = source / "images/provisioner/Dockerfile"
+    dockerfile.write_text(
+        "\n".join(
+            line
+            for line in dockerfile.read_text().splitlines()
+            if not line.startswith(f"COPY {helper} ")
+        )
+    )
+    with pytest.raises(
+        inspection.InspectionError, match="private_runtime_helper_missing"
+    ) as caught:
+        inspection.expected_files(source, "provisioner")
+    assert helper in str(caught.value)
+
+
+@pytest.mark.parametrize("helper", ["scripts/lib/output.sh", "scripts/operations/output.py"])
+@pytest.mark.parametrize("replacement", [None, b"changed runtime helper"])
+def test_provisioner_image_requires_runtime_output_helper_contents(source, helper, replacement):
+    archive = exported(source, "provisioner", changes={f"app/{helper}": replacement})
+    with pytest.raises(inspection.InspectionError, match="image_source_content_mismatch"):
+        inspect(source, archive, "provisioner")
+
+
+def test_packaged_provisioner_entrypoints_load_their_runtime_helpers(source, tmp_path):
+    image = tmp_path / "packaged"
+    for name, original in inspection.expected_files(source, "provisioner").items():
+        destination = image / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(original, destination)
+    app = image / "app"
+    environment = {
+        **os.environ,
+        "PYTHONPATH": str(app / "src"),
+        "NO_COLOR": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    shell = subprocess.run(
+        ["bash", str(app / "scripts/operations/install-radius.sh")],
+        cwd=app,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert shell.returncode == 1
+    assert "Invalid context" in shell.stderr
+    assert "No such file" not in shell.stderr
+    python = subprocess.run(
+        [sys.executable, str(app / "scripts/operations/demo.py"), "--help"],
+        cwd=app,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert python.returncode == 0, python.stderr
+    assert "{init,config}" in python.stdout
 
 
 def test_public_dockerfile_cannot_expand_its_approved_source_allowlist(source):

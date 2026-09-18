@@ -48,6 +48,10 @@ PUBLIC_MODULES = {
     "setup/acme_responder",
 }
 PUBLIC_FILES = {f"app/src/plane_demo/{name}.py" for name in PUBLIC_MODULES}
+PROVISIONER_RUNTIME_HELPERS = {
+    "app/scripts/lib/output.sh",
+    "app/scripts/operations/output.py",
+}
 TRANSIENT_COPIES = {
     "images/provisioner/requirements.txt": "/tmp/provisioner-requirements.txt",
     "images/provisioner/azure-cli.txt": "/tmp/azure-cli-requirements.txt",
@@ -176,6 +180,11 @@ def expected_files(root: Path, component: str) -> dict[str, Path]:
             if path.is_file()
         }
         require(python_sources == complete, "private_runtime_source_missing")
+        missing_helpers = PROVISIONER_RUNTIME_HELPERS - result.keys()
+        require(
+            not missing_helpers,
+            f"private_runtime_helper_missing: {json.dumps(sorted(missing_helpers))}",
+        )
     return result
 
 

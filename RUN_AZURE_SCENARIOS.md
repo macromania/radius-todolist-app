@@ -485,6 +485,17 @@ installs child Radius and deploys their applications. Require both
 `provisioning_status: succeeded` and `onboarding_status: ready`.
 Stop on `failed` or `interrupted`; do not reset state to force a retry.
 
+HTTP 200 and `api completed` mean the status request succeeded, not that
+provisioning succeeded. For `command_failed`, read the provisioner logs for the
+underlying executable, exit code and stderr.
+
+If `control-radius` fails because `scripts/lib/output.sh` is missing, the
+provisioner image is missing a runtime helper. The image must include both
+`scripts/lib/output.sh` and `scripts/operations/output.py`. Commit the packaging
+fix before building and inspecting a new image; uncommitted Dockerfile changes
+do not update the selected source or the running image. Rebuilding or restarting
+the provisioner does not resume an operation already marked `failed`.
+
 ```bash
 make report
 make api ARGS='control:shared GET /tenants/shared-a'
@@ -939,6 +950,7 @@ resources; it does not require an empty plane group.
 | Artifact inspection | Check the source revision and selected registry. Do not overwrite/unlock artifacts to bypass a mismatch. |
 | Management deployment | Read `job/deploy-management` status and logs with `make kube`. A failed or interrupted Job is not automatically replayed. |
 | Tenant stays pending | Read its operation and management provisioner logs. Management readiness still requires a control record. |
+| Provisioning fails at `control-radius` or `data-radius` | Read management provisioner logs for the failed command's stderr. Missing files under `/app/scripts/` indicate an incomplete provisioner image. Rebuild and verify the corrected image; updating it does not replay a failed tenant operation. Retain the existing resources and do not reset database status values. |
 | Control is ready but data is stale | Read the control data report, data-reconciler logs and tenant ConfigMap. Check for a paused reconciler or active fault. |
 | SQL observation fails | Preserve credentials and the database. Missing/drifted schema metadata does not authorize reinitialization. |
 | Cleanup refuses an owner or journal | Inspect the named resource and restore its fault first. Do not remove guards or force-delete children. |

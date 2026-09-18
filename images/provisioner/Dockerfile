@@ -42,6 +42,8 @@ COPY scripts/operations/__init__.py scripts/operations/config.py scripts/operati
     scripts/operations/register-radius.py scripts/operations/issue-certificate.py scripts/operations/acme-hook.py \
     scripts/operations/run-certificate-job.py /app/scripts/operations/
 COPY scripts/operations/install-radius.sh /app/scripts/operations/
+COPY scripts/lib/output.sh /app/scripts/lib/
+COPY scripts/operations/output.py /app/scripts/operations/
 COPY scripts/operations/management_job.py /app/scripts/operations/
 COPY scripts/operations/azure/registry_policy.py scripts/operations/azure/registry-policy.json /app/scripts/operations/azure/
 COPY src/plane_demo/management/provisioner.py src/plane_demo/management/provisioning.py /app/src/plane_demo/management/
