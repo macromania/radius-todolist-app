@@ -196,9 +196,48 @@ class StoredCredentials:
     def demo_key(self, slot: str) -> str:
         return self._value(slot, "demoKey")
 
-    def seed_provided_keys(self) -> None:
+    def seed_provided_keys(self, slots: set[str] | None = None) -> None:
         for slot in self._provided:
-            self._value(slot, "demoKey", create=True)
+            if slots is None or slot in slots:
+                self._value(slot, "demoKey", create=True)
+
+    def retain_administrator(self, password: str) -> None:
+        if not self.config.prepared_environments or self.environment != "azure":
+            raise ProvisioningError("administrative_credentials_not_enabled")
+        if self._guard is None or self._protect is None:
+            raise ProvisioningError("credential_source_not_bound")
+        self._guard()
+        self._protect(password)
+        try:
+            self.store.get_or_create("management", "management_admin", provided_value=password)
+        except StoreError as error:
+            raise ProvisioningError(error.code) from None
+        self._guard()
+
+    def administrator_dsn(self) -> str:
+        if (
+            not self.config.prepared_environments
+            or self.environment != "azure"
+            or self._reader is None
+            or self._protect is None
+        ):
+            raise ProvisioningError("administrative_credentials_not_enabled")
+        value = database_dsn(
+            self._reader("management"),
+            "plane_setup",
+            self._value("management", "management_admin"),
+            environment="azure",
+        )
+        self._protect(value)
+        return value
+
+    def reporting_password(self, pair: str) -> str:
+        if not self.config.prepared_environments:
+            raise ProvisioningError("administrative_credentials_not_enabled")
+        matches = [item for item in self.config.pair_slots if item["pair_id"] == pair]
+        if len(matches) != 1:
+            raise ProvisioningError("invalid_pair_assignment")
+        return self._value("management", matches[0]["reporting_role"], create=True)
 
     def ensure(self, slot: str, roles: set[str], *, require_existing: bool = False) -> dict:
         if roles != credential_roles(self.config, slot):

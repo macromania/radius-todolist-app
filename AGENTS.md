@@ -15,7 +15,7 @@ Do not redesign authentication, reconciliation, or SQL during documentation work
 ## Runtime map
 
 - `src/plane_demo/management/api.py` accepts validated tenant requests.
-- `src/plane_demo/management/provisioner.py` owns the non-public singleton loop.
+- `src/plane_demo/management/provisioner.py` owns the local singleton loop and shared operator provider factory.
 - `src/plane_demo/management/provisioning.py` defines the administrative sequence.
 - `src/plane_demo/management/providers/` owns provider access and scoped commands.
 - `src/plane_demo/control/` owns configuration and polls management PostgreSQL.
@@ -30,6 +30,7 @@ database status values when changing module paths.
 ## Infrastructure map
 
 - `infra/bootstrap/azure.bicep` creates management AKS and its Azure foundation.
+- `infra/bootstrap/isolated.bicep` adds only one named isolated pair's foundation.
 - `infra/radius/apps/` declares only management, control, and data.
 - `infra/radius/modules/` contains shared workload and dependency declarations.
 - `infra/radius/types/*.yaml` defines custom types; adjacent `.tgz` files are generated.
@@ -48,7 +49,9 @@ child Radius owns its apps. Do not replace this with direct Python cluster creat
 - `scripts/operations/{api,endpoints,kube}.sh` discover current access per invocation.
 - `make report` prints live observations; `fault-status.sh` reads a selected fault journal.
 - `scripts/operations/azure/` and `local/` contain native bootstrap/build operations.
+- Azure `bootstrap.py`, `environment_operator.py`, and `catalog.py` prepare and discover environments.
 - `scripts/operations/run-management-job.py` and `deploy-plane.py` own the Azure Job path.
+- `environment_job.py` and `prepare-environment.py` guard Azure environment attempts.
 - `scripts/operations/local/deploy-demo.py` uses the guarded local operator factory.
 - `scripts/harness/export-state.py` and its local counterpart print optional reports.
 - `scripts/harness/test-e2e.py` and `fault-parent-link.py` drive acceptance and owned faults.
@@ -80,6 +83,8 @@ Preserve plain machine-readable stdout and tool diagnostics; do not hide failure
 - Repeated control polls preserve control-owned updates.
 - Data requests use only local ConfigMaps, Redis, and their own API key.
 - Keep singleton locking and explicit interrupted-operation behavior.
+- Azure admission uses prepared capacity only; no tenant request creates infrastructure.
+- Default Azure has three clusters; named isolated pairs are additive. Local stays on demand.
 - Keep Azure PostgreSQL verified TLS and Redis `tls: true`; local non-TLS is explicit/internal.
 - Keep the lowercase `redis` connection and existing password encoding.
 - Data API uses `data-api-runtime` with ConfigMap get only, never namespace Secret access.

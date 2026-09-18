@@ -11,7 +11,7 @@ outstanding. The checkpoints describe expected results to verify.
 Run this guide from the repository root. The order is:
 
 1. [Prepare the workspace](#1-prepare-the-workspace).
-2. [Deploy Azure management](#2-deploy-azure-management).
+2. [Prepare the default Azure environment](#2-prepare-the-default-azure-environment).
 3. [Run the manual scenarios](#3-run-the-manual-scenarios).
 4. [Clean up Azure](#4-clean-up-azure).
 
@@ -31,30 +31,32 @@ Configuration -> control API    -> control PostgreSQL
 Application   -> data API       -> local ConfigMap + Redis
 ```
 
-The management API saves requests; a separate provisioner asks management
-Radius to create control/data clusters. A Recipe is the provider-specific
-template Radius executes. The provisioner installs Radius in each child,
-then that child's Radius deploys its applications and dependencies.
+The operator prepares environments before accepting tenants. Management Radius
+creates child clusters; each child's Radius deploys its applications and
+dependencies. A Recipe is the provider-specific template Radius executes.
+There is no permanent Azure infrastructure provisioner in the tenant request path.
 
 Each plane has its own cluster. Shared tenants reuse a control/data pair;
-an isolated tenant gets another pair. Reconciler processes poll their parent
+an isolated tenant receives an unused pair prepared explicitly by the operator.
+Reconciler processes poll their parent
 databases and report local progress. An API request does not push configuration
 through all three planes.
 
 ### Azure resource groups
 
-Bootstrap creates six groups with the prefix `rg-<project>-<deployment>-azure-`:
+Default bootstrap creates four groups with the prefix `rg-<project>-<deployment>-azure-`:
 
 | Suffix | Resources |
 |---|---|
 | `platform` | Shared networking, registry, private DNS and default Key Vault |
 | `management` | Management AKS, managed identities, PostgreSQL and Application Gateway |
-| `shared-control`, `isolated-1-control` | Each control instance's AKS, identities, PostgreSQL and Application Gateway |
-| `shared-data`, `isolated-1-data` | Each data instance's AKS, identities, Redis, private endpoint and Application Gateway |
+| `shared-control` | Shared control AKS, identities, PostgreSQL and Application Gateway |
+| `shared-data` | Shared data AKS, identities, Redis, private endpoint and Application Gateway |
 
-AKS adds a separate `*-nodes` group per cluster. The complete demo has eleven
-groups, including node groups. The six bootstrap groups reserve permissions
-upfront; their existence does not mean all five clusters are running.
+AKS adds a separate `*-nodes` group per cluster, giving seven groups for the
+three-cluster default. An explicit isolated addition creates two plane groups
+and their two node groups. No isolated group, cluster, database, identity or
+subnet is created by default.
 
 Management Radius still owns child clusters. Each child's Radius owns its
 applications. Management/control application roles permit PostgreSQL and gateway
@@ -66,7 +68,8 @@ resource-scoped grants.
 | Check | Meaning |
 |---|---|
 | Management `onboarding_status: ready` | Control created the tenant record |
-| Management `provisioning_status: succeeded` | The provisioning operation finished |
+| Environment `stage: available` | Operator setup completed for that pair |
+| Management `provisioning_status: succeeded` | The tenant was assigned prepared capacity; no infrastructure work was queued |
 | Control `data_config.status: applied` | Data applied the requested ConfigMap version |
 | Data returns message, version, and counter | The request used local configuration and Redis |
 | `/healthz` returns 200 | The API process is alive; this is not dependency readiness |
@@ -145,8 +148,9 @@ production configuration. Use a dedicated demo subscription or temporary access.
 
 ### Select deployment identity
 
-Use a **new deployment name** for this layout. Existing `*-cluster` / `*-app`
-deployments are not migrated. Keep their matching checkout and private `.env`
+Use a **new deployment name** for this workflow. Existing on-demand deployments,
+including prior `plane-v2` foundations, and `*-cluster` / `*-app` deployments are
+not migrated. Keep their matching checkout and private `.env`
 for operation and cleanup. The new command path rejects old or mixed layouts.
 
 Choose the subscription and a short project/deployment name:
@@ -193,16 +197,18 @@ its own runtime settings. Access and endpoints come from current APIs, and
 temporary CLI files are discarded. PostgreSQL owns tenant and operation records;
 Radius and Kubernetes own infrastructure and fault progress.
 
-## 2. Deploy Azure management
+## 2. Prepare the default Azure environment
 
-The order is bootstrap, build, then management deployment. The commands discover
-their inputs and inspect artifacts; you do not assemble an inventory by hand.
+One bootstrap command drives the default foundation, verified artifact build,
+management deployment and shared environment preparation. It discovers the
+inputs; you do not assemble an inventory by hand.
 
 ### Create the foundation
 
-Bootstrap creates management AKS, networking, registry, vault integration and
-the preassigned identities, then installs management Radius. It reserves the
-child scopes and permissions but does not create tenant clusters or databases.
+Bootstrap first creates management AKS, networking, registry, vault integration
+and scoped identities. It builds and inspects artifacts, then installs management
+Radius and deploys management and the shared control/data pair,
+including Radius, PostgreSQL, Redis, gateways, certificates and workloads.
 
 ```bash
 make bootstrap CONFIRM_AZURE=yes
@@ -250,8 +256,8 @@ if pricing cannot be read, the menu reports that and ranks by CPU and memory.
 The selector offers x64 D/E sizes with 4-16 vCPUs and 16-64 GiB RAM, compatible
 with Generation 2 Azure Linux images and managed OS disks. The node pools remain
 non-zonal, so zone-only SKU restrictions do not exclude a regional choice.
-Quota must cover all five clusters and one additional upgrade node per cluster.
-At two four-core nodes per cluster, this means 40 vCPUs plus 20 for upgrades.
+Initial quota must cover three clusters and one additional upgrade node per cluster.
+At two four-core nodes per cluster, this means 24 vCPUs plus 12 for upgrades.
 Existing owned running nodes are not counted twice; other subscription usage
 still reduces available quota. Missing capacity information or no eligible
 choice stops bootstrap before foundation creation.
@@ -272,7 +278,7 @@ validation and foundation creation, not during tenant onboarding.
 
 The menu preserves the demo's General Purpose tier and PostgreSQL 16. It offers
 2-8 vCores and 8-64 GiB RAM, shows advertised zones, and ranks choices by vCores,
-RAM and name, not price. Management and both control databases use the same
+RAM and name, not price. Management and prepared control databases use the same
 selection. Each database starts with 32 GiB storage; database compute and storage
 costs are separate from the AKS estimates.
 
@@ -296,10 +302,11 @@ stop and read the failed operation's logs. Do not submit another tenant or reset
 database state to force a retry. Review another advertised SKU for a fresh run,
 or ask Azure support to confirm capacity.
 
-Checkpoint: bootstrap completed and management AKS and Radius exist. The
-management application and tenant clusters have not been deployed yet.
+Checkpoint: bootstrap returns `environment_prepared` for `shared`. Management,
+shared control and shared data are deployed. No tenants or isolated resources
+have been created.
 
-Bootstrap and subsequent build/deployment commands check the five Radius
+Bootstrap and subsequent build/deployment commands check the selected Radius
 identities' grants, including inherited and group-based assignments. Missing
 reads, unexpected grants or changed custom roles fail explicitly. These are
 point-in-time grant checks, not a substitute for the manual scenarios.
@@ -315,7 +322,9 @@ access.
 
 ### Build and inspect artifacts
 
-Build publishes Recipes and the API/provisioner images. A separate Linux ACR
+Bootstrap builds Recipes and API/private-operator images. The private image
+retains the `plane-provisioner` repository name but runs only administrative Jobs
+on Azure. A separate Linux ACR
 task verifies each candidate's contents using pinned Docker/Python tooling and
 trusted inspection code, not code from the candidate image. It creates and exports
 a stopped, network-isolated container; the candidate is never started.
@@ -323,9 +332,11 @@ Your workstation uploads the small verification context and retrieves a small
 verification report, rather than downloading the application images.
 
 ```bash
-make build CONFIRM_AZURE=yes
 make inspect-build
 ```
+
+`make build CONFIRM_AZURE=yes` remains available for a separate artifact
+checkpoint, but is not an additional required step after successful bootstrap.
 
 Require successful inspection before deployment. The API image excludes
 provider tools and deployment credentials. The separate provisioner image has
@@ -387,23 +398,18 @@ never replaced. This explicit legacy recovery path is limited to API builds;
 new API and provisioner builds both use resumable receipts. Recovery cannot be
 combined with `--inspect` or `--recipes-only`.
 
-### Deploy management and wait for completion
+### Inspect setup completion
 
-This starts management PostgreSQL, its API and the provisioner through an
-owned deployment Job.
-
-Inspect the discovered inputs and proposed Job without submitting it:
-
-```bash
-make deploy-management-preview
-```
-
-Then deploy:
+Bootstrap starts management PostgreSQL and its API through `deploy-management`,
+then prepares the shared pair through `prepare-shared`. There is no running
+Azure provisioner Deployment.
 
 ```bash
-make deploy-management CONFIRM_AZURE=yes
 make kube ARGS='management get job/deploy-management'
 make kube ARGS='management logs job/deploy-management --all-containers=true'
+make kube ARGS='management get job/prepare-shared'
+make kube ARGS='management logs job/prepare-shared --all-containers=true'
+make report
 ```
 
 The command waits for the Job and workloads. Require `Complete=True`;
@@ -411,8 +417,11 @@ The command waits for the Job and workloads. Require `Complete=True`;
 The Job owns its temporary inputs; Key Vault and PostgreSQL own credentials
 and initialization progress.
 
-Checkpoint: management's API, PostgreSQL and provisioner are ready, with no
-tenant clusters yet. Radius registration is part of this deployment command.
+Require three endpoints and `shared.stage: available` in the report before
+onboarding. Repeating bootstrap observes completed phases without recreating
+the foundation or administrative Jobs. Failed or interrupted setup retains its
+Lease, attempt record and diagnostics for explicit recovery; do not delete those
+records or reset tenant rows to force replay.
 
 ## 3. Run the manual scenarios
 
@@ -424,63 +433,71 @@ shells, temporary kubeconfigs and credential permissions:
 ```bash
 make report
 make kube ARGS='management get pods,pvc'
-make kube ARGS='management logs deployment/provisioner --tail=20'
+make kube ARGS='management logs job/prepare-shared --tail=20'
 make api ARGS='management GET /healthz'
 ```
 
-Initially the report contains only the management endpoint and no tenants.
-Require `provisioner_ready` and HTTP 200 before onboarding. There are no shell
+Initially the report contains three prepared endpoints and no tenants.
+Require shared environment availability and HTTP 200 before onboarding. There are no shell
 functions to define, detached worktrees to create, or provisioning files to
 assemble. `make fault-status ARGS='SLOT COMPONENT'` reads a fault's Kubernetes
 journal; the running fault helper performs the network checks.
 
-### Prepare response comparisons
+### Prepare direct API requests
 
-The later examples compare API responses. Create a private temporary directory
-for those notes, and enable failure reporting for shell pipelines:
+Read the management URL and demo key into shell variables. The key is captured
+without printing the Secret or putting its value in shell history:
 
 ```bash
 set -o pipefail
-NOTES=$(mktemp -d "${TMPDIR:-/tmp}/plane-manual.XXXXXX")
+MANAGEMENT_URL=$(make endpoints ARGS=management | jq -er '.url') || exit 1
+MANAGEMENT_KEY=$(make kube ARGS='management get secret management-api-runtime -o json' | \
+  jq -er '.data.DEMO_KEY | @base64d') || exit 1
 ```
 
-`$NOTES` is only for your comparisons. Deployment, discovery, credentials and
-cleanup never read it. You can discard the notes after the demo.
-
-Pass the target, method and path through `ARGS`. Pipe JSON request bodies into
-`make api` so message text is not interpreted by Make. Keep the inner quotes
-shown around query URLs and variable arguments.
+The first admission uses two direct `curl` requests. Other examples use
+`make api` to discover the selected plane's current endpoint and key per call.
+For that helper, pass the target, method and path through `ARGS`, and pipe JSON
+request bodies into it so message text is not interpreted by Make. Keep the
+inner quotes shown around query URLs and variable arguments.
 
 Successful reads return HTTP 200; tenant acceptance returns 202. The helper
 prints status to stderr and JSON to stdout. Expected 401/404/409/422/503 checks
 return nonzero, so run the blocks individually rather than as one unattended
-script. Two matching error responses do not prove unchanged application state.
+script. Compare the displayed responses at each checkpoint; two matching error
+responses do not prove unchanged application state.
 
-For a new terminal, return to this checkout and run `make show-config`. Create
-a new notes directory if you need comparisons, then capture fresh baselines.
+For a new terminal, return to this checkout, run `make show-config`, and repeat
+the setup above before using `curl`.
 Resume with checkpoint reads, not deployment commands or tenant POSTs.
 Restore any active fault or paused workload before taking a break.
 
 ### A. Provision the first shared tenant
 
-You follow one request from acceptance to infrastructure creation and a working
-data response.
+You follow one request from acceptance into the prepared shared environment
+and a working data response.
 
 ```bash
 make api ARGS='management GET /healthz'
 make api ARGS='management GET /tenants/shared-a'
 ```
 
-Expect 200, then 404. Send the request once:
+Expect 200, then 404. Send the POST once. Copy the returned `operation_id` into
+`<operation-id>` in the second request:
 
 ```bash
-printf '%s\n' '{"tenant_id":"shared-a","isolation":"shared","initial_message":"alpha"}' | \
-  make api ARGS='management POST /tenants' > "$NOTES/shared-a-request.json"
-OP_A=$(jq -er '.operation_id' "$NOTES/shared-a-request.json") || exit 1
-make api ARGS="management GET '/operations/$OP_A'"
+curl -i -sS --fail-with-body "$MANAGEMENT_URL/tenants" \
+  -H "X-Demo-Key: $MANAGEMENT_KEY" \
+  -H 'Content-Type: application/json' \
+  --data '{"tenant_id":"shared-a","isolation":"shared","initial_message":"alpha"}'
+
+curl -i -sS --fail-with-body "$MANAGEMENT_URL/operations/<operation-id>" \
+  -H "X-Demo-Key: $MANAGEMENT_KEY"
 ```
 
-Expect HTTP 202 and an operation ID.
+Expect HTTP 202 with an operation ID from the POST, then HTTP 200 with the
+operation's status from the GET. Its infrastructure status should already be
+`succeeded`, with stage `available`. Control-record readiness follows asynchronously.
 
 #### Optional admission checks
 
@@ -491,43 +508,36 @@ printf '%s\n' '{"tenant_id":"shared-a","isolation":"shared","initial_message":"a
   make api ARGS='management POST /tenants'
 ```
 
-While the first operation is still `pending` or `running`, you can also test
-the single-active-operation rule. Skip these two calls if it already finished:
+Before preparing any isolated environment, verify that isolated admission does
+not start infrastructure work:
 
 ```bash
-printf '%s\n' '{"tenant_id":"busy-check","isolation":"shared","initial_message":"not accepted"}' | \
+printf '%s\n' '{"tenant_id":"capacity-check","isolation":"isolated","initial_message":"not accepted"}' | \
   make api ARGS='management POST /tenants'
-make api ARGS='management GET /tenants/busy-check'
+make api ARGS='management GET /tenants/capacity-check'
 ```
 
-Expect 503 `provisioner_busy`, then 404. If you get 202, you accepted another
-tenant: wait for that operation too and do not count this as a successful busy
-check.
+Expect 503 `allocation_unavailable`, then 404. No tenant, operation, cluster or
+database should be created. Skip this check if unused isolated capacity already
+exists, because that request would then be accepted.
 
 #### Follow provisioning
 
-Repeat these reads while the first operation is pending or running:
+Repeat these reads until control reports the tenant record:
 
 ```bash
 make api ARGS='management GET /tenants/shared-a' | jq '{pair_id, provisioning_status, provisioning_stage, onboarding_status, control_record}'
-make kube ARGS='management logs deployment/provisioner --tail=20'
+make kube ARGS='shared-control logs deployment/control-reconciler --tail=20'
 ```
 
-Management Radius should create the shared control/data clusters. The provisioner
-installs child Radius and deploys their applications. Require both
+No infrastructure should change during admission. Require both
 `provisioning_status: succeeded` and `onboarding_status: ready`.
 Stop on `failed` or `interrupted`; do not reset state to force a retry.
 
 HTTP 200 and `api completed` mean the status request succeeded, not that
-provisioning succeeded. For `command_failed`, read the provisioner logs for the
-underlying executable, exit code and stderr.
-
-If `control-radius` fails because `scripts/lib/output.sh` is missing, the
-provisioner image is missing a runtime helper. The image must include both
-`scripts/lib/output.sh` and `scripts/operations/output.py`. Commit the packaging
-fix before building and inspecting a new image; uncommitted Dockerfile changes
-do not update the selected source or the running image. Rebuilding or restarting
-the provisioner does not resume an operation already marked `failed`.
+the tenant is ready. Infrastructure command failures now belong to setup Jobs,
+not tenant operations. Read their logs before accepting tenants; never reset
+database status values to bypass a failed setup.
 
 ```bash
 make report
@@ -540,14 +550,16 @@ Expect three discovered endpoints. Control should become `applied`; data should
 return `alpha`, version 1, and counter 0. Match the `onboarding_id` across
 the three APIs.
 
-Save the logical placement for the reuse check. Management does not store or
-return endpoint URLs; endpoint and cluster discovery use provider APIs.
+Read the logical placement and cluster UIDs for the reuse check in section B.
+Management does not store or return endpoint URLs; endpoint and cluster
+discovery use provider APIs.
 
 ```bash
-make api ARGS='management GET /tenants/shared-a' | jq '{pair_id}' > "$NOTES/shared-pair.json"
+make api ARGS='management GET /tenants/shared-a' | jq '{tenant_id, pair_id}'
 for slot in shared-control shared-data; do
+  printf '%s ' "$slot"
   make kube ARGS="'$slot' get namespace kube-system -o json" | jq -er .metadata.uid
-done > "$NOTES/shared-clusters-before.txt"
+done
 ```
 
 ### B. Reuse the pair while data reconciliation is paused
@@ -588,28 +600,48 @@ make api ARGS='data:shared GET /tenants/shared-b'
 Wait for `applied` and the `bravo` response, then compare placement:
 
 ```bash
-make api ARGS='management GET /tenants/shared-b' | jq '{pair_id}' > "$NOTES/shared-b-pair.json"
-diff -u "$NOTES/shared-pair.json" "$NOTES/shared-b-pair.json"
+make api ARGS='management GET /tenants/shared-a' | jq '{tenant_id, pair_id}'
+make api ARGS='management GET /tenants/shared-b' | jq '{tenant_id, pair_id}'
 make report | jq '.endpoints | keys'
 for slot in shared-control shared-data; do
+  printf '%s ' "$slot"
   make kube ARGS="'$slot' get namespace kube-system -o json" | jq -er .metadata.uid
-done > "$NOTES/shared-clusters-after.txt"
-diff -u "$NOTES/shared-clusters-before.txt" "$NOTES/shared-clusters-after.txt"
+done
 ```
 
-Expect no diff and still three slots. The new shared tenant added records,
-not another cluster pair.
+Require matching `pair_id` values, unchanged cluster UIDs from section A, and
+still three slots. The new shared tenant added records, not another cluster pair.
 
 ### C. Provision an isolated tenant
 
-This tenant should get its own control/data pair. The two pairs must not serve
-each other's tenant records.
+This section is optional. Skip isolated commands in later sections if you want
+only the shared demo. Before accepting an isolated tenant, add its environment
+using the same bootstrap workflow. This example names the environment `1` to
+retain the `isolated-1` API targets used below; descriptive names such as `blue`
+are also supported.
+
+```bash
+make bootstrap CONFIRM_AZURE=yes ARGS='--isolated 1'
+make kube ARGS='management get job/prepare-isolated-1'
+make kube ARGS='management logs job/prepare-isolated-1 --tail=40'
+make report
+```
+
+Require `isolated-1.stage: available`. The command creates only that pair's
+foundation, clusters and dependencies; it does not redeploy management or the
+shared applications. New environments inherit the base compute selections and
+recheck node capacity. Names use 1-12 lowercase letters/digits with internal
+hyphens; the address layout supports six isolated pairs. Allocation indices and
+retired names are not reused.
+
+The tenant receives an available unused isolated pair. The two pairs must not
+serve each other's tenant records.
 
 ```bash
 printf '%s\n' '{"tenant_id":"isolated-c","isolation":"isolated","initial_message":"charlie"}' | \
   make api ARGS='management POST /tenants'
 make api ARGS='management GET /tenants/isolated-c'
-make kube ARGS='management logs deployment/provisioner --tail=20'
+make kube ARGS='isolated-1-control logs deployment/control-reconciler --tail=20'
 ```
 
 Wait for provisioning success and management readiness:
@@ -682,37 +714,36 @@ Management supplied the initial message; control owns subsequent changes.
 Check that repeated polling preserves control's changes, then inspect paginated
 events and API access.
 
-Capture a baseline after updates have applied:
+Read the responses after updates have applied, then compare them with the
+responses after a successful poll:
 
 ```bash
 POLL_FROM=$(uv run --no-sync python -c \
   'from datetime import UTC, datetime; print(datetime.now(UTC).isoformat())')
-make api ARGS='management GET /tenants/shared-a' > "$NOTES/m-before.json"
-make api ARGS='control:shared GET /tenants/shared-a' > "$NOTES/c-before.json"
-make api ARGS='data:shared GET /tenants/shared-a' > "$NOTES/d-before.json"
+make api ARGS='management GET /tenants/shared-a'
+make api ARGS='control:shared GET /tenants/shared-a'
+make api ARGS='data:shared GET /tenants/shared-a'
 sleep 15
 make kube ARGS="shared-control logs deployment/control-reconciler '--since-time=$POLL_FROM' --timestamps=true --tail=20"
-make api ARGS='management GET /tenants/shared-a' > "$NOTES/m-after.json"
-make api ARGS='control:shared GET /tenants/shared-a' > "$NOTES/c-after.json"
-make api ARGS='data:shared GET /tenants/shared-a' > "$NOTES/d-after.json"
-diff -u "$NOTES/m-before.json" "$NOTES/m-after.json"
-diff -u "$NOTES/c-before.json" "$NOTES/c-after.json"
-diff -u "$NOTES/d-before.json" "$NOTES/d-after.json"
+make api ARGS='management GET /tenants/shared-a'
+make api ARGS='control:shared GET /tenants/shared-a'
+make api ARGS='data:shared GET /tenants/shared-a'
 ```
 
 Require a successful `control_poll` after `$POLL_FROM`, with `succeeded` greater
-than zero and `failed=0`, plus unchanged snapshots. That shows control retained
+than zero and `failed=0`, plus unchanged tenant responses. That shows control retained
 its updates while polling management. No successful poll means no proof yet.
 
 Read a timeline in small pages:
 
 ```bash
-make api ARGS="control:shared GET '/tenants/shared-a?limit=2'" > "$NOTES/page.json"
-jq '{timeline, next_after_event_id}' "$NOTES/page.json"
-CURSOR=$(jq -r '.next_after_event_id' "$NOTES/page.json")
-if [ "$CURSOR" != null ]; then
-  make api ARGS="control:shared GET '/tenants/shared-a?limit=2&after_event_id=$CURSOR'"
-fi
+make api ARGS="control:shared GET '/tenants/shared-a?limit=2'" | jq '{timeline, next_after_event_id}'
+```
+
+If `next_after_event_id` is not `null`, replace `<event-id>` with that value:
+
+```bash
+make api ARGS="control:shared GET '/tenants/shared-a?limit=2&after_event_id=<event-id>'"
 ```
 
 Continue with each returned cursor until `null`. IDs increase but need not be
@@ -788,7 +819,7 @@ Require `shared-control`, `control-reconciler`, and `blocked_verified` before
 continuing. While the helper holds the fault:
 
 ```bash
-make api ARGS='management GET /tenants/shared-a' > "$NOTES/m-blocked-before.json"
+make api ARGS='management GET /tenants/shared-a'
 printf '%s\n' '{"message":"without-management"}' | \
   make api ARGS='control:shared PUT /tenants/shared-a/configuration'
 make api ARGS='data:shared GET /tenants/shared-a'
@@ -799,12 +830,11 @@ The new message should reach data through control's own database. Keep reading
 and incrementing for at least 60 seconds, then:
 
 ```bash
-make api ARGS='management GET /tenants/shared-a' > "$NOTES/m-blocked-after.json"
-diff -u "$NOTES/m-blocked-before.json" "$NOTES/m-blocked-after.json"
+make api ARGS='management GET /tenants/shared-a'
 ```
 
-Expect no new management reports during blockage. After the fault terminal
-finishes:
+Compare the management response with the one displayed before the control update.
+Expect no new management reports during blockage. After the fault terminal finishes:
 
 ```bash
 make fault-status ARGS="'$FAULT_SLOT' '$FAULT_COMPONENT'" | jq '{outcome, restored, physical_restored, restoration_started_at, restored_at}'
@@ -821,11 +851,11 @@ control poll after restoration. Recovery must not add a duplicate
 Data should keep serving its applied configuration through the outage and an
 API restart, then apply the newest control version after reconnection.
 
-Start only after the preceding fault is restored. Save the current data response:
+Start only after the preceding fault is restored. Read the current data response
+and identify its applied message, version, and counter:
 
 ```bash
-make api ARGS='data:shared GET /tenants/shared-a' > "$NOTES/outage-baseline.json"
-jq . "$NOTES/outage-baseline.json"
+make api ARGS='data:shared GET /tenants/shared-a'
 ```
 
 In the fault terminal:
@@ -857,7 +887,7 @@ make api ARGS='data:shared POST /tenants/shared-a/counter'
 ```
 
 Control should report the latest version as `pending`. Data must keep returning
-the baseline message/version while its counter still works.
+the message and version observed before the outage while its counter still works.
 
 Replace only the data API while the link remains blocked:
 
@@ -910,9 +940,29 @@ clear a fault. Do not proceed until the original link is confirmed restored.
 
 ## 4. Clean up Azure
 
-Cleanup destroys the selected demo's application data. Save any response
-comparisons you need, restore faults and paused workloads, and finish or inspect
-active provisioning before proceeding. Check that `.env` still selects Azure:
+### Remove only an unused isolated environment
+
+This deletes only the selected isolated pair's applications, clusters, groups
+and subnet resources. It refuses an environment assigned to a tenant and never
+removes the default management/shared environment. Tenant deletion is not
+implemented, so a pair already used by these scenarios requires the normal
+whole-demo cleanup instead.
+
+```bash
+make environment-clean-plan ARGS='--isolated blue'
+make environment-clean CONFIRM_AZURE=yes ARGS='--isolated blue'
+```
+
+Review the exact target before execution. Cleanup serializes with setup and
+atomically disables admission before deleting anything. Credential/certificate
+objects and allocation tombstones are retained; the result is
+`isolated_environment_removed`, not a claim that every historical object is gone.
+
+### Remove the whole demo
+
+Cleanup destroys the selected demo's application data. Restore faults and paused
+workloads, and finish or inspect active provisioning before proceeding.
+Check that `.env` still selects Azure:
 
 ```bash
 make show-config
@@ -982,8 +1032,9 @@ resources; it does not require an empty plane group.
 | Bootstrap or access | Check `.env`, Azure login, permissions and AKS reachability. Do not broaden database access or change global contexts. |
 | Artifact inspection | Check the source revision and selected registry. Do not overwrite/unlock artifacts to bypass a mismatch. |
 | Management deployment | Read `job/deploy-management` status and logs with `make kube`. A failed or interrupted Job is not automatically replayed. |
-| Tenant stays pending | Read its operation and management provisioner logs. Management readiness still requires a control record. |
-| Provisioning fails at `control-radius` or `data-radius` | Read management provisioner logs for the failed command's stderr. Missing files under `/app/scripts/` indicate an incomplete provisioner image. Rebuild and verify the corrected image; updating it does not replay a failed tenant operation. Retain the existing resources and do not reset database status values. |
+| Tenant stays pending | Read its operation and control-reconciler logs. Management readiness still requires a control record. |
+| Environment preparation fails | Read `job/prepare-<pair>` in management for the failed command's stderr. Preserve its Lease, attempt record, credentials and resources. No tenant operation is created by setup. |
+| No isolated capacity | Add a named isolated environment with `make bootstrap ... ARGS='--isolated NAME'`. Do not submit tenant requests to create clusters. |
 | Control is ready but data is stale | Read the control data report, data-reconciler logs and tenant ConfigMap. Check for a paused reconciler or active fault. |
 | SQL observation fails | Preserve credentials and the database. Missing/drifted schema metadata does not authorize reinitialization. |
 | Cleanup refuses an owner or journal | Inspect the named resource and restore its fault first. Do not remove guards or force-delete children. |
@@ -1006,12 +1057,20 @@ make test-e2e CONFIRM_AZURE=yes
 make test-outages CONFIRM_AZURE=yes
 ```
 
-The first command creates the tenants and checks reuse, isolation, configuration,
-counters and access. The second checks the parent outages and recovery. A single
+By default, the first command creates the two shared tenants and checks reuse,
+isolated-capacity rejection, configuration, counters and access. Use it before
+adding an isolated pair. The second checks parent outages and recovery. A single
 `all` run is another option:
 
 ```bash
 uv run --no-sync python scripts/harness/test-e2e.py --environment azure --mode all --execute
+```
+
+To include an already prepared isolated pair, pass it explicitly:
+
+```bash
+uv run --no-sync python scripts/harness/test-e2e.py --environment azure --mode all \
+  --isolated-environment isolated-1 --execute
 ```
 
 After a manual run, `--mode verify-existing` observes existing tenants and runs
@@ -1035,7 +1094,7 @@ use the [journal restoration procedure](#interrupted-fault).
 ## Limits to keep in mind
 
 Use synthetic data. Per-plane demo keys do not provide production tenant
-authentication. The singleton provisioner has no HA scheduler or automatic
+authentication. Administrative setup has no HA scheduler or automatic
 replay of interrupted infrastructure work; tenant migration and deletion APIs
 are outside the demo.
 

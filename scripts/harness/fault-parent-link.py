@@ -432,7 +432,12 @@ class LiveConfiguration:
 
     def target(self, slot):
         self.current()
-        require(slot in LOCAL_SLOTS, "invalid_slot")
+        if self.environment == "azure":
+            from plane_demo.management.providers.identity import azure_slot
+
+            require(azure_slot(slot), "invalid_slot")
+        else:
+            require(slot in LOCAL_SLOTS, "invalid_slot")
         if slot in self.targets:
             return self.targets[slot]
         work = Path(tempfile.mkdtemp(prefix="access-", dir=self.root))
@@ -595,7 +600,14 @@ class LiveConfiguration:
     def fault_target(self, slot, component):
         require(component in COMPONENT_DSN, "unsupported_fault_component")
         suffix = "-control" if component == "control-reconciler" else "-data"
-        require(slot in LOCAL_SLOTS[1:] and slot.endswith(suffix), "fault_component_slot_mismatch")
+        if self.environment == "azure":
+            from plane_demo.management.providers.identity import azure_slot
+
+            require(azure_slot(slot) and slot.endswith(suffix), "fault_component_slot_mismatch")
+        else:
+            require(
+                slot in LOCAL_SLOTS[1:] and slot.endswith(suffix), "fault_component_slot_mismatch"
+            )
         target = self.target(slot)
         parent_slot = (
             "management"

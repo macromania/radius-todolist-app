@@ -62,7 +62,7 @@ def _validate_reference(slot: str, role: str) -> None:
     if not isinstance(slot, str) or not isinstance(role, str):
         raise StoreError("invalid_credential_reference")
     if slot == "management":
-        valid = role in {"demoKey", "mgmt_api", "mgmt_provisioner"} or bool(
+        valid = role in {"demoKey", "mgmt_api", "mgmt_provisioner", "management_admin"} or bool(
             re.fullmatch(r"cp_[a-z](?:[a-z0-9_]{0,30}[a-z0-9])?", role)
         )
     else:

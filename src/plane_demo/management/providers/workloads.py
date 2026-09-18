@@ -14,6 +14,7 @@ from plane_demo.management.providers.commands import Commands
 from plane_demo.management.providers.credentials import (
     Credentials,
     CredentialSource,
+    StoredCredentials,
     credential_roles,
     database_dsn,
 )
@@ -105,6 +106,8 @@ def initialize_database(provider: PlaneRuntime, slot: str) -> None:
     variables = {"BOOTSTRAP_KIND": role}
     if role == "management":
         variables["PAIR_SLOTS_JSON"] = json.dumps(provider.config.pair_slots)
+        if provider.config.prepared_environments:
+            variables["ADMISSION_MODE"] = "prepared"
     else:
         variables["PAIR_ID"] = slot.removesuffix("-control")
     if provider.database_resource_exists(slot):
@@ -148,6 +151,10 @@ def initialize_database(provider: PlaneRuntime, slot: str) -> None:
         raise ProvisioningError("postgres_setup_secret_missing")
     password = base64.b64decode(setup["data"]["password"], validate=True).decode()
     provider.commands.protect(password)
+    if role == "management" and provider.config.prepared_environments:
+        if not isinstance(provider.credentials, StoredCredentials):
+            raise ProvisioningError("service_credentials_required")
+        provider.credentials.retain_administrator(password)
     dsn = database_dsn(
         properties, properties["username"], password, environment=provider.credentials.environment
     )
@@ -230,16 +237,19 @@ def runtime_secrets(provider: PlaneRuntime, slot: str) -> None:
                 "DEMO_KEY": provider.credentials.demo_key(slot),
             },
         )
-        provider.secret(
-            slot,
-            namespace,
-            "provisioner-runtime",
-            {
-                "MANAGEMENT_DSN": provider.credentials.dsn(slot, "mgmt_provisioner"),
-                "PROVIDER": provider.credentials.environment,
-            },
-        )
-        if not isinstance(provider.credentials, Credentials):
+        if not provider.config.prepared_environments:
+            provider.secret(
+                slot,
+                namespace,
+                "provisioner-runtime",
+                {
+                    "MANAGEMENT_DSN": provider.credentials.dsn(slot, "mgmt_provisioner"),
+                    "PROVIDER": provider.credentials.environment,
+                },
+            )
+        if not provider.config.prepared_environments and not isinstance(
+            provider.credentials, Credentials
+        ):
             remove_credential_seed(provider, slot, namespace)
     elif role == "control":
         pair = slot.removesuffix("-control")

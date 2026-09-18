@@ -36,7 +36,7 @@ printf '\n\n%s== %s ==%s\n%s%s%s\n\n' \
   "$$bold$$accent" '$@' "$$reset" "$$accent" "$(SEPARATOR)" "$$reset" >&2
 endef
 
-.PHONY: help init show-config endpoints report api kube fault fault-status check lint test test-integration check-bicep check-shell check-terraform check-work \
+.PHONY: help init show-config endpoints report api kube fault fault-status environment-clean-plan environment-clean check lint test test-integration check-bicep check-shell check-terraform check-work \
         require-azure confirm-azure build inspect-build bootstrap deploy-management \
         deploy-management-preview export-state test-e2e test-outages clean-plan clean clean-azure verify-clean \
         confirm-local local-build local-inspect-build local-bootstrap \
@@ -247,15 +247,23 @@ inspect-build: ## Revalidate selected artifacts and inspection evidence
 	$(SECTION)
 	@$(OPERATE) $(STAGE) inspect-build
 
-bootstrap: ## Deploy the selected foundation and install management Radius
+bootstrap: ## Prepare default Azure capacity; ARGS='--isolated NAME' adds a pair
 	$(SECTION)
-	@$(OPERATE) $(STAGE) bootstrap
+	@$(OPERATE) $(STAGE) bootstrap $(ARGS)
+
+environment-clean-plan: ## Inspect isolated teardown; ARGS='--isolated NAME'
+	$(SECTION)
+	@$(OPERATE) $(RUN) python scripts/operations/azure/clean-environment.py $(ARGS)
+
+environment-clean: ## Remove an unassigned isolated pair; ARGS='--isolated NAME'
+	$(SECTION)
+	@$(OPERATE) $(RUN) python scripts/operations/azure/clean-environment.py $(ARGS) --execute
 
 deploy-management-preview: ## Inspect management deployment inputs without submission
 	$(SECTION)
 	@$(OPERATE) $(STAGE) preview-management
 
-deploy-management: ## Deploy management and wait for actual completion
+deploy-management: ## Legacy management Job; prepared Azure uses bootstrap
 	$(SECTION)
 	@$(OPERATE) $(STAGE) deploy-management
 

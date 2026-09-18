@@ -59,6 +59,10 @@ class LocalConfig:
     management_cluster: Mapping
     identity: DemoConfig | None = None
 
+    @property
+    def prepared_environments(self) -> bool:
+        return False
+
     @classmethod
     def load(cls, path: Path) -> LocalConfig:
         return cls.from_dict(json.loads(path.read_text()))

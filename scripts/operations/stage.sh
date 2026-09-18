@@ -15,14 +15,14 @@ fi
 stage=$1
 shift
 case "$stage" in
-  inspect-build|bootstrap|deploy-management|preview-management|setup|clean-plan|clean|verify-clean)
+  inspect-build|deploy-management|preview-management|setup|clean-plan|clean|verify-clean)
     (( $# == 0 )) || { demo_error 'This stage takes no extra arguments'; exit 1; } ;;
-  build|fault) ;;
+  build|bootstrap|fault) ;;
   *) demo_error 'Unknown stage'; exit 1 ;;
 esac
 demo_load_env "$ROOT/.env"
-if [[ "$stage" == build && "$DEMO_ENV" == local && $# != 0 ]]; then
-  demo_error 'Local build takes no extra arguments'; exit 1
+if [[ ( "$stage" == build || "$stage" == bootstrap ) && "$DEMO_ENV" == local && $# != 0 ]]; then
+  demo_error 'Local build and bootstrap take no extra arguments'; exit 1
 fi
 if [[ -n "${PLANE_DEMO_EXPECT_ENV:-}" && "$PLANE_DEMO_EXPECT_ENV" != "$DEMO_ENV" ]]; then
   demo_error 'The selected .env environment does not match this command'
@@ -41,7 +41,7 @@ demo_status section "$DEMO_ENV: $stage"
 case "$DEMO_ENV:$stage" in
   azure:build) exec bash scripts/operations/azure/build.sh "$@" ;;
   azure:inspect-build) exec bash scripts/operations/azure/build.sh --inspect ;;
-  azure:bootstrap) exec bash scripts/operations/azure/bootstrap.sh ;;
+  azure:bootstrap) exec bash scripts/operations/azure/bootstrap.sh "$@" ;;
   azure:deploy-management) exec uv run --no-sync python scripts/operations/run-management-job.py --execute ;;
   azure:preview-management) exec uv run --no-sync python scripts/operations/run-management-job.py ;;
   azure:setup) demo_error 'Azure management deployment includes Radius registration'; exit 1 ;;

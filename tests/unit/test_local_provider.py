@@ -1022,6 +1022,11 @@ def test_selected_main_reads_service_credentials_and_discards_worker_workspace(
 ):
     from kubernetes import config as kube_config
 
+    from plane_demo.management.providers.identity import PUBLIC_KEYS
+
+    for key in PUBLIC_KEYS:
+        monkeypatch.delenv(key, raising=False)
+
     identity = DemoConfig("local", "sample", "demo")
     raw_local["projectName"] = identity.project
     for slot, allocation in raw_local["allocations"].items():

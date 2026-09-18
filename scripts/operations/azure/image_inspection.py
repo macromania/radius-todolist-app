@@ -51,6 +51,8 @@ PUBLIC_FILES = {f"app/src/plane_demo/{name}.py" for name in PUBLIC_MODULES}
 PROVISIONER_RUNTIME_HELPERS = {
     "app/scripts/lib/output.sh",
     "app/scripts/operations/output.py",
+    "app/scripts/operations/environment_job.py",
+    "app/scripts/operations/prepare-environment.py",
 }
 TRANSIENT_COPIES = {
     "images/provisioner/requirements.txt": "/tmp/provisioner-requirements.txt",

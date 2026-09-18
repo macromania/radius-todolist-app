@@ -69,6 +69,12 @@ def require_stopped_writer(
 
 @contextmanager
 def bootstrap_guards(configuration: OperatorConfig):
+    if configuration.prepared_environments:
+        from environment_job import environment_guards
+
+        with environment_guards(configuration) as guards:
+            yield guards
+        return
     identity = configuration.identity
     if identity is None:
         raise ProvisioningError("bootstrap_identity_required")

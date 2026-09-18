@@ -77,7 +77,11 @@ def test_manual_guide_shell_blocks_parse_and_use_current_targets(environment):
     assert "git worktree add" not in text
     assert ".state/azure/provisioning.json" not in text
     assert "Assemble protected" not in text
-    assert "shared-clusters-before.txt" in text and "shared-clusters-after.txt" in text
+    if environment == "LOCAL":
+        assert "shared-clusters-before.txt" in text and "shared-clusters-after.txt" in text
+    else:
+        assert "unchanged cluster UIDs" in text
+        assert "matching `pair_id` values" in text
     assert "make verify-clean" in text
 
 
@@ -112,9 +116,26 @@ def test_cleanup_checkpoint_matches_the_live_entrypoint(environment, source, cla
 def test_busy_check_precedes_waiting_for_provisioning(environment):
     text = (ROOT / f"RUN_{environment}_SCENARIOS.md").read_text()
     section = text.split("### A.", 1)[1].split("### B.", 1)[0]
-    assert section.index('"tenant_id":"busy-check"') < section.index("#### Follow provisioning")
+    check = "capacity-check" if environment == "AZURE" else "busy-check"
+    assert section.index(f'"tenant_id":"{check}"') < section.index("#### Follow provisioning")
     assert "--prompt-demo-key" not in text
     assert "--demo-key-from-env SLOT=VARIABLE" in text
+
+
+def test_azure_admission_uses_two_direct_requests_without_saved_responses():
+    text = (ROOT / "RUN_AZURE_SCENARIOS.md").read_text()
+    assert not re.search(r"\bnotes\b", text, re.IGNORECASE)
+    assert "plane-manual." not in text and "diff -u" not in text
+    section = text.split("### A.", 1)[1].split("#### Optional admission checks", 1)[0]
+    blocks = re.findall(r"```bash\n(.*?)```", section, re.DOTALL)
+    requests = next(block for block in blocks if '"initial_message":"alpha"' in block)
+    assert len(re.findall(r"^curl ", requests, re.MULTILINE)) == 2
+    assert "$MANAGEMENT_URL/tenants" in requests
+    assert "$MANAGEMENT_URL/operations/<operation-id>" in requests
+    assert requests.count("X-Demo-Key: $MANAGEMENT_KEY") == 2
+    assert "--fail-with-body" in requests
+    assert "make api" not in requests and "jq " not in requests and "> " not in requests
+    assert "management get secret management-api-runtime" in text
 
 
 def test_local_prerequisites_cover_native_stage_tools():

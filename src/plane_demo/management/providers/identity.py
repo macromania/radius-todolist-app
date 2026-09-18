@@ -20,6 +20,9 @@ IDENTITY_PURPOSES = {
     "certificateIssuer": "certificate-issuer",
 }
 SLOTS = ("management", "shared-control", "shared-data", "isolated-1-control", "isolated-1-data")
+AZURE_DEFAULT_SLOTS = ("management", "shared-control", "shared-data")
+AZURE_ENVIRONMENT_MODE = "prepared-v1"
+ISOLATED_NAME = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,10}[a-z0-9])?")
 SECRET_KEYS = {f"DEMO_KEY_{slot.upper().replace('-', '_')}": slot for slot in SLOTS}
 PUBLIC_KEYS = {
     "DEMO_ENV",
@@ -39,10 +42,41 @@ class ConfigError(ValueError):
     """Configuration errors never include supplied values."""
 
 
-def provisioning_namespace(prefix: str, slot: str) -> str:
-    if not re.fullmatch(r"[a-z][a-z0-9-]{0,24}", prefix) or slot not in SLOTS[1:]:
+def isolated_pair(name: str) -> str:
+    if not isinstance(name, str):
+        raise ConfigError("Invalid isolated environment name")
+    short = name.removeprefix("isolated-")
+    if not ISOLATED_NAME.fullmatch(short) or short in {"shared", "management"}:
+        raise ConfigError("Isolated environment names require 1-12 lowercase letters or digits")
+    return f"isolated-{short}"
+
+
+def azure_slot(slot: str) -> bool:
+    if slot in AZURE_DEFAULT_SLOTS:
+        return True
+    if not isinstance(slot, str):
+        return False
+    pair, separator, role = slot.rpartition("-")
+    if not separator or role not in {"control", "data"} or not pair.startswith("isolated-"):
+        return False
+    try:
+        return isolated_pair(pair) == pair
+    except ConfigError:
+        return False
+
+
+def provisioning_namespace(prefix: str, slot: str, *, index: int | None = None) -> str:
+    if not re.fullmatch(r"[a-z][a-z0-9-]{0,24}", prefix) or (
+        slot == "management" or not azure_slot(slot)
+    ):
         raise ConfigError("Invalid child provisioning namespace selection")
-    return f"{prefix}-p-{SLOTS.index(slot)}"
+    if index is None:
+        if slot not in SLOTS[1:]:
+            raise ConfigError("Named environments require an explicit allocation index")
+        index = SLOTS.index(slot)
+    if isinstance(index, bool) or not isinstance(index, int) or not 1 <= index <= 14:
+        raise ConfigError("Invalid child allocation index")
+    return f"{prefix}-p-{index}"
 
 
 @dataclass(frozen=True)
@@ -146,7 +180,7 @@ class DemoConfig:
         return f"acr{self.identity_hash}"
 
     def slot_name(self, slot: str) -> str:
-        if slot not in SLOTS:
+        if not (azure_slot(slot) if self.environment == "azure" else slot in SLOTS):
             raise ConfigError("Unknown plane slot")
         return f"{self.stem}-{slot}"
 

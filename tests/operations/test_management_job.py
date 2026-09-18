@@ -61,6 +61,7 @@ def test_selected_job_is_serialized_without_pvc_and_keeps_keys_out_of_configurat
         "azure", "sample", "demo", "11111111-1111-1111-1111-111111111111", "centralus"
     )
     selected = SimpleNamespace(
+        prepared_environments=False,
         identity=identity,
         namespace=identity.namespace,
         bootstrap_settings=identity.public_values(),

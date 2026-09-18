@@ -45,6 +45,7 @@ COPY scripts/operations/install-radius.sh /app/scripts/operations/
 COPY scripts/lib/output.sh /app/scripts/lib/
 COPY scripts/operations/output.py /app/scripts/operations/
 COPY scripts/operations/management_job.py /app/scripts/operations/
+COPY scripts/operations/environment_job.py scripts/operations/prepare-environment.py /app/scripts/operations/
 COPY scripts/operations/azure/registry_policy.py scripts/operations/azure/registry-policy.json /app/scripts/operations/azure/
 COPY src/plane_demo/management/provisioner.py src/plane_demo/management/provisioning.py /app/src/plane_demo/management/
 COPY src/plane_demo/management/providers /app/src/plane_demo/management/providers

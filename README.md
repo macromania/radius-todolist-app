@@ -5,19 +5,20 @@ planes. Run it on Azure, then run the same scenarios locally with Docker Desktop
 
 | Plane | Responsibility |
 |---|---|
-| Management | Accept tenant requests and provision control/data clusters through Radius |
+| Management | Accept tenant requests and assign prepared Azure capacity; provision local capacity on demand |
 | Control | Own tenant configuration in PostgreSQL and report control-record creation |
 | Data | Apply local ConfigMaps and serve Redis-backed requests without querying parent databases |
 
-Each plane runs in its own cluster. Two shared tenants use the same control/data
-pair; an isolated tenant gets a separate pair. The complete demo has five
-clusters: management, shared control/data, and isolated control/data.
+Each plane runs in its own cluster. Azure starts with three: management, shared
+control, and shared data. An operator can add a named isolated control/data pair
+later. Tenant onboarding never creates Azure infrastructure. Local scenarios
+retain the original on-demand five-cluster workflow.
 
 Azure uses one resource group per plane instance and one shared platform group.
 AKS creates a separate node group for each provisioned cluster. Each Radius
 identity has resource-type-specific permissions instead of Contributor on its
-plane group. This layout requires a fresh deployment name; it does not migrate
-older deployments with separate `*-cluster` and `*-app` groups.
+plane group. This workflow requires a fresh deployment name; it does not migrate existing
+on-demand deployments or older `*-cluster` and `*-app` group layouts.
 
 Control pulls tenant records from management PostgreSQL. Data pulls configuration
 from control PostgreSQL and writes local ConfigMaps. Data API requests use only
@@ -37,6 +38,12 @@ what changes and what to check before continuing.
 Use either the manual scenarios or the automated harness for a run. They use the
 same tenant names, so do not run both concurrently. Each guide includes the
 automated alternative.
+
+On Azure, `make bootstrap CONFIRM_AZURE=yes` prepares the default environment,
+including verified images, databases, gateways and workloads. Later,
+`make bootstrap CONFIRM_AZURE=yes ARGS='--isolated blue'` adds only that isolated
+pair. Both commands use the same selected `.env` and preserve existing
+environment identities. The Azure guide describes readiness and scoped cleanup.
 
 Run `make help` for commands, or narrow it with `GROUP=azure`, `GROUP=local`,
 `GROUP=setup`, or `GROUP=checks`. `COLOR=never` or `NO_COLOR=1` disables styling;
@@ -107,9 +114,10 @@ to check; they are not a record of a passing deployment.
 ## Demo boundaries
 
 Use synthetic data and a trusted operator. Shared demo keys are simple per-plane
-API access, not production tenant authentication. There is one provisioner,
-with no automatic replay of interrupted infrastructure work or tenant
-migration/deletion API.
+API access, not production tenant authentication. Azure setup uses serialized,
+owned administrative Jobs; local uses one provisioner. Neither path
+automatically replays interrupted infrastructure work. Tenant migration/deletion
+APIs are outside the demo.
 
 Management readiness means control created a tenant record. Control's `applied`
 report means data applied a ConfigMap. Neither report asserts that every

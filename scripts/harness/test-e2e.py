@@ -160,6 +160,9 @@ COORDINATOR_SCRIPTS = [
     "demo.py",
     "project.py",
     "management_job.py",
+    "environment_job.py",
+    "prepare-environment.py",
+    "output.py",
     "azure/registry_policy.py",
     "azure/registry-policy.json",
     "install-radius.py",
@@ -178,6 +181,7 @@ def source_files(component):
             [f"src/plane_demo/{name}.py" for name in MODULES]
             + [
                 "sql/management.sql",
+                "sql/management-prepared.sql",
                 "sql/control.sql",
             ]
         )
@@ -190,6 +194,7 @@ def source_files(component):
         ROOT / "infra/radius/bicepconfig.json",
         ROOT / "infra/radius/environments/azure.bicep",
         ROOT / "scripts/__init__.py",
+        ROOT / "scripts/lib/output.sh",
         *(ROOT / "scripts/operations" / name for name in COORDINATOR_SCRIPTS),
     ]
     return sorted(str(path.relative_to(ROOT)) for path in paths)
@@ -212,7 +217,11 @@ def local_source_hashes(component):
         paths += [
             *ROOT.glob("src/plane_demo/**/*.py"),
             ROOT / "scripts/__init__.py",
-            *(ROOT / "scripts/operations" / name for name in COORDINATOR_SCRIPTS),
+            *(
+                ROOT / "scripts/operations" / name
+                for name in COORDINATOR_SCRIPTS
+                if name not in {"environment_job.py", "prepare-environment.py", "output.py"}
+            ),
             *ROOT.glob("scripts/operations/local/*.py"),
             *ROOT.glob("scripts/operations/local/*.yaml"),
             *ROOT.glob("scripts/operations/local/*.sh"),
@@ -574,6 +583,7 @@ class Runner:
         mode: str,
         *,
         continue_first_from: str | None = None,
+        isolated_environment: str | None = None,
         apis=None,
         kube_factory=faults.Kubectl,
         fault_factory=None,
@@ -583,6 +593,16 @@ class Runner:
         self.configuration, self.mode = configuration, mode
         self.journal = None
         self.continue_first_from = continue_first_from
+        self.prepared_azure = configuration.live and configuration.environment == "azure"
+        self.isolated_environment = isolated_environment
+        if isolated_environment is not None:
+            from plane_demo.management.providers.identity import isolated_pair
+
+            require(self.prepared_azure, "isolated_environment_requires_azure")
+            require(
+                isolated_pair(isolated_environment) == isolated_environment,
+                "invalid_isolated_environment",
+            )
         self.apis = apis if apis is not None else APIs(configuration)
         if configuration.live and isinstance(self.apis, APIs):
             self.apis.guard = self.check_journal
@@ -917,6 +937,13 @@ class Runner:
             and headers.get("Location") == accepted["status_url"],
             "duplicate_missing_original_status_url",
         )
+        if self.prepared_azure:
+            operation = management.request("GET", f"/operations/{accepted['operation_id']}")[1]
+            require(
+                operation.get("status") == "succeeded" and operation.get("stage") == "available",
+                "prepared_admission_queued_infrastructure",
+            )
+            check_busy = False
         if check_busy:
             operation = management.request("GET", f"/operations/{accepted['operation_id']}")[1]
             require(operation.get("status") in {"pending", "running"}, "busy_window_not_observed")
@@ -1276,12 +1303,16 @@ class Runner:
     def management_image(self):
         kube = self.kube("management")
         self.verify_workload(kube, "management-api")
-        self.verify_workload(kube, "provisioner")
+        if not self.prepared_azure:
+            self.verify_workload(kube, "provisioner")
 
     def pair_inventory(self):
         result = {}
         for pair in sorted({value["pair_id"] for value in self.tenants.values()}):
-            require(pair in {"shared", "isolated-1"}, "unexpected_pair_assignment")
+            require(
+                pair in {"shared", "isolated-1", self.isolated_environment},
+                "unexpected_pair_assignment",
+            )
             result[pair] = {"pair_id": pair}
             for role in ("control", "data"):
                 target = self.kube(pair + "-" + role).target
@@ -1332,17 +1363,39 @@ class Runner:
         )
         self.check_shared_pair()
 
-        isolated_status = self.onboard(isolated, "isolated")
-        isolated_pair = isolated_status["pair_id"]
-        require(isolated_pair != "shared", "isolated_pair_not_dedicated")
-        self.wait_initial_exports(isolated_pair)
-        self.applied(isolated)
-        isolated_instances = self.workload_evidence(isolated_pair)
-        self.check_pair_isolation(isolated_pair, shared_instances, isolated_instances)
+        if self.prepared_azure and self.isolated_environment is None:
+            _, rejected, _ = management.request(
+                "POST",
+                "/tenants",
+                body={
+                    "tenant_id": isolated,
+                    "isolation": "isolated",
+                    "initial_message": "capacity-check",
+                },
+                statuses=(503,),
+            )
+            require(
+                rejected.get("detail") == "allocation_unavailable", "isolated_capacity_not_empty"
+            )
+            management.request("GET", f"/tenants/{isolated}", statuses=(404,))
+            self.save("isolated_capacity_unavailable", tenant=isolated)
+        else:
+            isolated_status = self.onboard(isolated, "isolated")
+            isolated_pair = isolated_status["pair_id"]
+            require(isolated_pair != "shared", "isolated_pair_not_dedicated")
+            if self.isolated_environment is not None:
+                require(
+                    isolated_pair == self.isolated_environment,
+                    "isolated_capacity_selection_differs",
+                )
+            self.wait_initial_exports(isolated_pair)
+            self.applied(isolated)
+            isolated_instances = self.workload_evidence(isolated_pair)
+            self.check_pair_isolation(isolated_pair, shared_instances, isolated_instances)
         self.check_configuration_and_idempotency()
 
     def verify_existing(self):
-        for tenant in self.names:
+        for tenant in self.active_names:
             value = self.wait_ready(tenant)
             require(
                 value.get("tenant_id") == tenant
@@ -1353,6 +1406,12 @@ class Runner:
             )
             self.wait_operation(value["operation_id"])
         self.check_shared_pair()
+        if self.prepared_azure and self.isolated_environment is None:
+            self.wait_initial_exports("shared")
+            for tenant in self.active_names:
+                self.applied(tenant)
+            self.check_configuration_and_idempotency()
+            return
         isolated_pair = self.tenants[self.names[2]]["pair_id"]
         require(isolated_pair and isolated_pair != "shared", "isolated_pair_not_dedicated")
         for pair in ("shared", isolated_pair):
@@ -1429,6 +1488,14 @@ class Runner:
         self.management_image()
         self.save("three_poll_intervals_idempotent", seconds=15)
 
+    @property
+    def active_names(self):
+        return (
+            self.names[:2]
+            if self.prepared_azure and self.isolated_environment is None
+            else self.names
+        )
+
     def check_updates_and_counters(self):
         first, second, _isolated = self.names
         shared = self.client("data:shared")
@@ -1438,7 +1505,7 @@ class Runner:
             actual = shared.request("POST", f"/tenants/{first}/counter")[1]
             require(actual["counter"] == before + offset, "counter_increment_not_atomic")
         require(shared.get(second)["counter"] == other_before, "shared_counter_scope_broken")
-        for tenant in self.names:
+        for tenant in self.active_names:
             pair = self.tenants[tenant]["pair_id"]
             control = self.client("control:" + pair)
             data = self.client("data:" + pair)
@@ -1486,7 +1553,7 @@ class Runner:
         self.client("management").request(
             "GET", f"/tenants/{first}", key=self.client("control:shared").key, statuses=(401,)
         )
-        self.save("configuration_counter_and_auth_checks", tenants=self.names)
+        self.save("configuration_counter_and_auth_checks", tenants=self.active_names)
 
     def control_poll_observed(self, pair, since):
         kube = self.kube(pair + "-control")
@@ -1508,12 +1575,12 @@ class Runner:
 
     def assert_updates_survived_poll(self):
         require(self.updates_finished_at is not None, "configuration_updates_not_exercised")
-        for pair in {self.tenants[name]["pair_id"] for name in self.names}:
+        for pair in {self.tenants[name]["pair_id"] for name in self.active_names}:
             require(
                 self.control_poll_observed(pair, self.updates_finished_at),
                 "management_poll_not_observed_after_updates",
             )
-        for tenant in self.names:
+        for tenant in self.active_names:
             expected = self.expectations[tenant]
             pair = self.tenants[tenant]["pair_id"]
             control = self.client("control:" + pair).get(tenant)
@@ -1534,7 +1601,7 @@ class Runner:
 
     def collect_timelines(self):
         result = {}
-        for tenant in self.names:
+        for tenant in self.active_names:
             pair = self.tenants[tenant]["pair_id"]
             management = timeline(self.client("management"), tenant, "management")
             control = timeline(self.client("control:" + pair), tenant, "control")
@@ -1842,6 +1909,7 @@ def main(argv=None, *, configuration_factory=faults.LiveConfiguration) -> int:
         help="Resume only the first admission from its owned acceptance ConfigMap NAME@UID@RUN_ID",
     )
     parser.add_argument("--execute", action="store_true", required=True)
+    parser.add_argument("--isolated-environment", help="An already prepared isolated pair ID")
     args = parser.parse_args(argv)
     runner = None
     configuration = None
@@ -1851,7 +1919,12 @@ def main(argv=None, *, configuration_factory=faults.LiveConfiguration) -> int:
             args.environment is None or configuration.environment == args.environment,
             "harness_environment_mismatch",
         )
-        runner = Runner(configuration, args.mode, continue_first_from=args.continue_first_from)
+        runner = Runner(
+            configuration,
+            args.mode,
+            continue_first_from=args.continue_first_from,
+            isolated_environment=args.isolated_environment,
+        )
         with faults.interruption_is_failure():
             runner.run()
         print(

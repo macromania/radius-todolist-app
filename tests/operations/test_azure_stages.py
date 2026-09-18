@@ -70,7 +70,7 @@ def writer_allows(repository, action):
     prefixes=re.findall(r"StringStartsWithIgnoreCase '([^']+)'",condition)
     return action in actions and (
         repository.lower() in names or any(repository.lower().startswith(p) for p in prefixes))
-slots=["management","shared-control","shared-data","isolated-1-control","isolated-1-data"]
+slots=["management","shared-control","shared-data"]
 def arg(name):
     return args[args.index(name)+1]
 def save():
@@ -112,9 +112,10 @@ def source_tag(name):
     return "src-"+hashlib.sha256(content.encode()).hexdigest()
 def foundation():
     allocations=[]
-    for slot in slots:
+    for index,slot in enumerate(slots):
         role="management" if slot=="management" else slot.rsplit("-",1)[1]
         allocations.append({"slot":slot,"clusterName":f"aks-{stem}-{slot}",
+            "slotIndex":index,"gatewaySubnetCidr":f"10.64.{16+index}.0/24",
             "clusterResourceGroup":f"rg-{stem}-{slot}",
             "appResourceGroup":f"rg-{stem}-{slot}","namespace":f"{stem}-{slot}-{role}",
             "certificateName":f"gateway-{stem}-{slot}","acmeStateSecretName":f"acme-{stem}-{slot}",
@@ -132,6 +133,8 @@ def foundation():
         allocations[0]["certificateName"]="gateway-"+identity+"-management"
     values={"foundation":{"projectName":project,"deploymentName":deployment,"environment":"azure",
         "resourceGroupLayout":"plane-v2",
+        "environmentMode":"prepared-v1",
+        "virtualNetworkId":f"{platform}/providers/Microsoft.Network/virtualNetworks/vnet-{stem}",
         "roleDefinitionIds":{key:plane_policy.role_id(subscription,stem,entry[0])
                              for key,entry in plane_policy.ROLE_NAMES.items()},
         "resourcePrefix":stem,"radiusResourceGroup":stem,"subscriptionId":subscription,"tenantId":tenant,
@@ -338,6 +341,8 @@ elif tool=="az":
             sys.exit("wrong vault availability request")
         emit({"nameAvailable":mode!="retained-vault"})
     elif args[:3]==["deployment","sub","list"]:
+        if "environment-" in arg("--query"):
+            emit([]);sys.exit()
         prior=foundation()
         if mode=="active-bootstrap":
             prior["properties"]["provisioningState"]="Running"
@@ -719,6 +724,7 @@ def checkout(tmp_path):
         "scripts/operations/azure/node_sizes.py",
         "scripts/operations/azure/compute_selection.py",
         "scripts/operations/azure/postgres_sizes.py",
+        "scripts/operations/azure/catalog.py",
         "scripts/operations/config.py",
         "scripts/lib/env.sh",
         "scripts/lib/discovery.sh",
@@ -736,10 +742,14 @@ def checkout(tmp_path):
         "scripts/operations/azure/plane-policy.json",
         "scripts/operations/azure/plane_policy.py",
         "src/plane_demo/management/providers/identity.py",
+        "src/plane_demo/management/providers/azure_environments.py",
     ):
         path = tmp_path / relative
         path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(ROOT / relative, path)
+        original = ROOT / relative
+        if relative == "scripts/operations/azure/bootstrap.sh":
+            original = ROOT / "scripts/operations/azure/foundation.sh"
+        shutil.copyfile(original, path)
     for relative in (
         "src/selected.txt",
         "sql/management.sql",
@@ -1044,15 +1054,19 @@ def test_bootstrap_uses_selected_identity_and_fresh_successful_outputs(checkout,
     expected = {
         credential_scope.secret_name(slot, role)
         for slot, roles in {
-            "management": ("demoKey", "mgmt_api", "mgmt_provisioner", "cp_shared", "cp_isolated_1"),
+            "management": (
+                "demoKey",
+                "mgmt_api",
+                "mgmt_provisioner",
+                "cp_shared",
+                "management_admin",
+            ),
             "shared-control": ("demoKey", "cp_api", "cp_reconciler", "dp_reconciler"),
             "shared-data": ("demoKey",),
-            "isolated-1-control": ("demoKey", "cp_api", "cp_reconciler", "dp_reconciler"),
-            "isolated-1-data": ("demoKey",),
         }.items()
         for role in roles
     }
-    assert len(names) == 15 and set(names) == expected
+    assert len(names) == 10 and set(names) == expected
     assert parameters == {
         "projectName": spec["project"],
         "deploymentName": spec["deployment"],
@@ -1073,7 +1087,7 @@ def test_bootstrap_uses_selected_identity_and_fresh_successful_outputs(checkout,
     assert create["args"][create["args"].index("--name") + 1] == "sample-learn-azure-bootstrap"
     (show,) = selected(checkout, "az", ["deployment", "sub", "show"])
     assert calls(checkout).index(show) > calls(checkout).index(create)
-    assert f"{'Bootstrap completed':<26}  Azure foundation and management Radius" in result.stderr
+    assert "Foundation completed" in result.stderr
     for call in calls(checkout):
         assert "synthetic-graph-token" not in json.dumps(call)
         if call["tool"] == "az":
@@ -1117,48 +1131,14 @@ def test_excess_radius_grant_cannot_pass_the_real_foundation_gate(checkout, stag
     assert not selected(checkout, "rad", ["install", "kubernetes"])
 
 
-def test_bootstrap_installs_management_radius_on_the_normal_verified_path(checkout):
+def test_foundation_finishes_before_the_separate_guarded_radius_phase(checkout):
     result = run(checkout, "bootstrap")
     assert result.returncode == 0, result.stderr
-    all_calls = calls(checkout)
-    (show,) = selected(checkout, "az", ["deployment", "sub", "show"])
-    (access,) = selected(checkout, "az", ["aks", "get-credentials"])
-    installs = [
-        call
-        for call in all_calls
-        if call["tool"] == "rad" and "install" in call["args"] and "kubernetes" in call["args"]
-    ]
-    assert len(installs) == 1
-    assert all_calls.index(show) < all_calls.index(access) < all_calls.index(installs[0])
-    args = access["args"]
-    assert "--admin" not in args
-    assert args[args.index("--context") + 1] == "sample-learn-azure-management"
-    assert ".azure-stage." in args[args.index("--file") + 1]
-    radius_calls = [call for call in all_calls if call["tool"] == "rad"]
-    for call in radius_calls:
-        assert call["azure_config_dir"] == str(checkout / "operator-azure-cache")
-        assert "/radius-install-" in call["home"]
-        config = Path(call["args"][call["args"].index("--config") + 1])
-        assert config.is_relative_to(Path(call["home"]).parent)
-    (credentials,) = [call for call in radius_calls if "credential" in call["args"]]
-    assert credentials["args"][credentials["args"].index("--client-id") + 1] == (
-        "55555555-5555-5555-5555-555555555555"
-    )
-    assert credentials["args"][credentials["args"].index("--tenant-id") + 1] == (
-        "33333333-3333-3333-3333-333333333333"
-    )
-    accounts = {
-        call["args"][call["args"].index("serviceaccount") + 1]
-        for call in all_calls
-        if call["tool"] == "kubectl" and "annotate" in call["args"]
-    }
-    assert accounts == {"applications-rp", "bicep-de", "ucp", "dynamic-rp"}
-    for call in all_calls:
-        if call["tool"] == "kubectl":
-            assert not any(word in call["args"] for word in ("namespace", "secret", "job"))
+    assert selected(checkout, "az", ["deployment", "sub", "show"])
+    assert not selected(checkout, "az", ["aks", "get-credentials"])
+    assert not any(call["tool"] == "rad" and "install" in call["args"] for call in calls(checkout))
     assert not selected(checkout, "az", ["acr", "build"])
-    assert not any("recipe" in call["args"] for call in radius_calls)
-    assert "Bootstrap completed" in result.stderr
+    assert "Radius installation is a separate guarded phase" in result.stderr
 
 
 @pytest.mark.parametrize("state", ["Registering", "Registered"])
@@ -1405,11 +1385,6 @@ def test_prerequisite_failure_blocks_actual_bootstrap_create(checkout, failed):
     ("mode", "phase"),
     [
         ("wrong-radius-identity", "live foundation verification"),
-        ("foreign-management-access", "management cluster access"),
-        ("wrong-management-server", "management cluster access"),
-        ("radius-install-failure", "management Radius installation"),
-        ("radius-rollout-failure", "management Radius installation"),
-        ("radius-wi-failure", "management Radius installation"),
     ],
 )
 def test_bootstrap_never_reports_success_when_management_radius_is_incomplete(
@@ -1429,14 +1404,12 @@ def test_bootstrap_never_reports_success_when_management_radius_is_incomplete(
         )
 
 
-def test_partial_radius_install_is_retried_through_normal_bootstrap(checkout):
+def test_radius_fault_is_not_hidden_as_a_successful_radius_installation(checkout):
     configure(checkout, mode="radius-wi-failure")
-    failed = run(checkout, "bootstrap")
-    assert failed.returncode != 0
-    configure(checkout, mode="existing-owned")
-    successful = run(checkout, "bootstrap")
-    assert successful.returncode == 0, successful.stderr
-    assert json.loads((checkout / "fake-state.json").read_text())["radius_installs"] == 2
+    result = run(checkout, "bootstrap")
+    assert result.returncode == 0, result.stderr
+    assert not json.loads((checkout / "fake-state.json").read_text()).get("radius_installs")
+    assert "Radius installation is a separate guarded phase" in result.stderr
 
 
 @pytest.mark.parametrize(

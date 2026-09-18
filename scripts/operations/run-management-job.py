@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from config import load_config
@@ -23,13 +24,27 @@ from plane_demo.management.providers.identity import SECRET_KEYS, DemoConfig  # 
 from plane_demo.management.provisioning import OperatorConfig  # noqa: E402
 
 
-def resources(config: dict, name: str, provided_keys: dict[str, str] | None = None) -> list[dict]:
+def resources(
+    config: dict,
+    name: str,
+    provided_keys: dict[str, str] | None = None,
+    *,
+    lease_uid: str = "",
+) -> list[dict]:
     selected = OperatorConfig.from_dict(config) if "bootstrapIdentity" in config else None
     namespace = selected.namespace("management") if selected else "radplanes-management-management"
     identity = config["coordinatorIdentity"]
     labels = {"project": "radplanes", "plane-demo/operator": "management-deploy"}
     if selected:
-        if name != "deploy-management":
+        allowed = {"deploy-management"}
+        if selected.prepared_environments:
+            allowed.update(f"prepare-{item['pair_id']}" for item in selected.pair_slots)
+            allowed.update(
+                f"retire-{item['pair_id']}"
+                for item in selected.pair_slots
+                if item["pair_id"] != "shared"
+            )
+        if name not in allowed:
             raise ValueError("Selected management deployment uses one fixed operator Job")
         if selected.identity is None:
             raise ValueError("Selected deployment identity is missing")
@@ -179,6 +194,26 @@ def resources(config: dict, name: str, provided_keys: dict[str, str] | None = No
                 },
             }
         ]
+        if selected.prepared_environments:
+            container["env"] += [
+                {"name": "OPERATOR_JOB_NAME", "value": name},
+                {"name": "OPERATOR_LEASE_UID", "value": lease_uid},
+                {
+                    "name": "OPERATOR_POD_UID",
+                    "valueFrom": {"fieldRef": {"apiVersion": "v1", "fieldPath": "metadata.uid"}},
+                },
+            ]
+            if name != "deploy-management":
+                action, pair = name.split("-", 1)
+                container["command"] = [
+                    "python",
+                    "scripts/operations/prepare-environment.py",
+                    "--pair",
+                    pair,
+                    "--config",
+                    "/gate/provisioning.json",
+                    *(["--retire"] if action == "retire" else []),
+                ]
         if keys:
             result.insert(
                 -1,
@@ -235,6 +270,27 @@ def resources(config: dict, name: str, provided_keys: dict[str, str] | None = No
                 ],
             },
         ]
+        if selected.prepared_environments:
+            role, binding = result[1:3]
+            role["metadata"]["name"] = f"{name}-observer"
+            binding["metadata"]["name"] = f"{name}-observer"
+            binding["roleRef"]["name"] = f"{name}-observer"
+            role["rules"] += [
+                {
+                    "apiGroups": ["coordination.k8s.io"],
+                    "resources": ["leases"],
+                    "resourceNames": ["environment-operator"],
+                    "verbs": ["get"],
+                },
+                {"apiGroups": [""], "resources": ["configmaps"], "verbs": ["create"]},
+                {
+                    "apiGroups": [""],
+                    "resources": ["configmaps"],
+                    "resourceNames": [f"{name}-attempt"],
+                    "verbs": ["get"],
+                },
+                {"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["get"]},
+            ]
     return result
 
 
@@ -390,8 +446,16 @@ def management_access(identity: DemoConfig, workspace: Path) -> tuple[str, str]:
     return access["context"], str(path)
 
 
-def deploy_selected(config: OperatorConfig, context: str, kubeconfig: str) -> dict:
-    name, namespace = "deploy-management", config.namespace("management")
+def deploy_selected(
+    config: OperatorConfig,
+    context: str,
+    kubeconfig: str,
+    *,
+    name: str = "deploy-management",
+    on_job: Callable[[dict], None] | None = None,
+    lease_uid: str = "",
+) -> dict:
+    namespace = config.namespace("management")
     if config.identity is None:
         raise ValueError("Selected deployment identity is required")
     keys = {
@@ -399,7 +463,9 @@ def deploy_selected(config: OperatorConfig, context: str, kubeconfig: str) -> di
         for key, slot in SECRET_KEYS.items()
         if slot in config.identity.demo_keys
     }
-    desired = resources(config.to_dict(), name, keys)
+    if config.prepared_environments and (not lease_uid or on_job is None):
+        raise ValueError("Prepared deployments require an owned operator Lease")
+    desired = resources(config.to_dict(), name, keys, lease_uid=lease_uid)
     namespace_resource, job_resource = desired[0], desired[-1]
     labels = job_resource["metadata"]["labels"]
     base = ["kubectl", "--kubeconfig", kubeconfig, "--context", context, "--request-timeout=30s"]
@@ -482,6 +548,8 @@ def deploy_selected(config: OperatorConfig, context: str, kubeconfig: str) -> di
         for item in job.get("status", {}).get("conditions", [])
     ):
         raise ValueError("The canonical operator Job failed; inspect its logs and owned resources")
+    if on_job is not None:
+        on_job(job)
     if job["spec"].get("suspend"):
         for resource in desired[1:-1]:
             if resource["kind"] not in {"ServiceAccount"}:
@@ -545,7 +613,12 @@ def deploy_selected(config: OperatorConfig, context: str, kubeconfig: str) -> di
         if time.monotonic() >= deadline:
             raise ValueError("The canonical operator Job exceeded its completion deadline")
         time.sleep(3)
-    for deployment in ("management-api", "provisioner"):
+    deployments = (
+        (("management-api",) if config.prepared_environments else ("management-api", "provisioner"))
+        if name == "deploy-management"
+        else ()
+    )
+    for deployment in deployments:
         execute(
             [
                 *base,
@@ -580,6 +653,8 @@ def main() -> int:
         require_confirmation("azure")
     status("section", "Management: discover deployment inputs and cluster access")
     config = live_configuration(identity)
+    if args.execute and config.prepared_environments:
+        raise ValueError("Use make bootstrap for prepared Azure environments")
     with tempfile.TemporaryDirectory(prefix="plane-management-") as directory:
         context, kubeconfig = management_access(identity, Path(directory))
         if not args.execute:

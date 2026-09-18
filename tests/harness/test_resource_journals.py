@@ -929,6 +929,7 @@ def test_live_modes_run_real_outage_algorithms_and_persist_restoration(world, mo
     monkeypatch.setattr(faults, "source_metadata", lambda: SOURCE)
     monkeypatch.setattr(runner, "source_hashes", lambda _: {"source.py": "c" * 64})
     monkeypatch.setattr(runner, "local_source_hashes", lambda _: {"source.py": "c" * 64})
+    subject.prepared_azure = False
     subject.run()
     assert subject.record["outcome"] == "passed"
     faults_saved = [
@@ -948,7 +949,7 @@ def test_live_modes_run_real_outage_algorithms_and_persist_restoration(world, mo
 
 
 def prepare_run(world, api, mode, **kwargs):
-    return runner.Runner(
+    subject = runner.Runner(
         world.config,
         mode,
         apis=api.clients(world.config),
@@ -961,6 +962,42 @@ def prepare_run(world, api, mode, **kwargs):
         clock=world.operator.clock,
         sleep=world.operator.clock.sleep,
         **kwargs,
+    )
+    subject.prepared_azure = False
+    return subject
+
+
+def test_prepared_azure_scenario_uses_only_shared_capacity(world, monkeypatch):
+    if world.config.environment != "azure":
+        pytest.skip("Prepared admission is Azure-only")
+    source_doubles(monkeypatch)
+    api = APIs(world.operator)
+    original = api.handle
+
+    def prepared(request):
+        if request.method == "POST" and request.url.path == "/tenants":
+            body = json.loads(request.content)
+            if body["isolation"] == "isolated":
+                return httpx.Response(503, json={"detail": "allocation_unavailable"})
+        response = original(request)
+        if request.url.path.startswith("/operations/") and response.status_code == 200:
+            return httpx.Response(200, json={
+                **response.json(), "status": "succeeded", "stage": "available",
+            })
+        return response
+
+    api.handle = prepared
+    subject = prepare_run(world, api, "scenario")
+    subject.prepared_azure = True
+    subject.run()
+    assert subject.record["outcome"] == "passed"
+    assert set(api.tenants) == {"shared-a", "shared-b"}
+    assert any(
+        event["type"] == "isolated_capacity_unavailable" for event in subject.record["events"]
+    )
+    assert not any(
+        event["type"] == "workload_image" and event.get("component") == "provisioner"
+        for event in subject.record["events"]
     )
 
 
@@ -989,7 +1026,7 @@ def test_continuation_cli_uses_owned_journal_and_finishes_real_outages(world, mo
     original = runner.Runner
 
     def construct(configuration, mode, **kwargs):
-        return original(
+        subject = original(
             configuration,
             mode,
             apis=api.clients(configuration),
@@ -1003,6 +1040,8 @@ def test_continuation_cli_uses_owned_journal_and_finishes_real_outages(world, mo
             sleep=world.operator.clock.sleep,
             **kwargs,
         )
+        subject.prepared_azure = False
+        return subject
 
     monkeypatch.setattr(runner, "Runner", construct)
     monkeypatch.setattr(faults, "read_json", Mock(side_effect=AssertionError("host authority")))

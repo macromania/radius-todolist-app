@@ -22,9 +22,9 @@ param externalVaultResourceGroup string = ''
 @minLength(20)
 @maxLength(20)
 param deploymentHash string
-@description('Exact CredentialScope secret names for the five logical slots. Grants never target a whole vault.')
-@minLength(15)
-@maxLength(15)
+@description('Exact credential names for management and the shared pair, including the operator-only database administrator.')
+@minLength(10)
+@maxLength(10)
 param applicationCredentialNames array
 @description('Validated bare public operator IPv4 address. The template authorizes only its /32, never a broad CIDR.')
 @minLength(7)
@@ -45,14 +45,13 @@ param postgresSkuTier string
 @description('Current AKS system-pool guidance requires at least two nodes and four vCPUs per node.')
 @minValue(2)
 param nodeCount int = 2
-@description('Append slots; never reorder an existing allocation. This is infrastructure capacity, not a tenant product limit.')
-@minLength(1)
-@maxLength(15)
+@description('The default foundation contains only the shared pair. Isolated foundations are separate additive deployments.')
+@allowed(['shared-control', 'shared-data'])
+@minLength(2)
+@maxLength(2)
 param childSlots array = [
   'shared-control'
   'shared-data'
-  'isolated-1-control'
-  'isolated-1-data'
 ]
 param coordinatorServiceAccountSubject string = 'system:serviceaccount:${projectName}-${deploymentName}-${environment}-management-management:provisioner'
 param certificateIssuerServiceAccountSubject string = 'system:serviceaccount:${projectName}-${deploymentName}-${environment}-system:certificate-issuer'
@@ -295,6 +294,7 @@ module platformAccess './platform-access.bicep' = {
     })]
     coordinatorPrincipalId: coordinator.outputs.identity.principalId
     operatorObjectId: operatorObjectId
+    managementRadiusPrincipalId: identity[0].outputs.identity.radius.principalId
   }
   dependsOn: [
     platformGroup
@@ -542,6 +542,7 @@ output foundation object = union(network.outputs.foundation, {
   deploymentHash: deploymentHash
   environment: environment
   resourceGroupLayout: planePolicy.layout
+  environmentMode: 'prepared-v1'
   resourcePrefix: prefix
   radiusResourceGroup: prefix
   subscriptionId: subscription().subscriptionId
@@ -568,6 +569,8 @@ output foundation object = union(network.outputs.foundation, {
   tags: requiredTags
 })
 output allocations array = [for (slot, i) in slots: union(network.outputs.allocations[i], {
+  slotIndex: i
+  roleDefinitionPrefix: prefix
   namespace: '${prefix}-${slot}-${slot == 'management' ? 'management' : last(split(slot, '-'))}'
   clusterName: 'aks-${prefix}-${slot}'
   clusterResourceGroup: 'rg-${prefix}-${slot}'

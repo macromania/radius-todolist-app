@@ -21,6 +21,8 @@ from plane_demo.management.provisioning import ProvisioningError
 
 
 class Configuration:
+    prepared_environments = False
+
     def __init__(self, environment):
         self.identity = DemoConfig(
             environment,
@@ -116,6 +118,47 @@ def test_missing_existing_value_is_not_regenerated():
     with pytest.raises(ProvisioningError, match="credential_missing"):
         credentials.ensure("shared-data", set(), require_existing=True)
     assert not store.created
+
+
+def test_prepared_runtime_has_no_provisioner_secret_or_credential_seed_cleanup():
+    config, store = Configuration("azure"), Store("azure")
+    config.prepared_environments = True
+    credentials = StoredCredentials(config, store)
+    credentials.bind(
+        lambda _: {**database("azure"), "database": "management"}, lambda _: None, lambda: None
+    )
+    credentials.ensure("management", {"mgmt_api", "mgmt_provisioner", "cp_shared", "cp_isolated_1"})
+    provider = SimpleNamespace(
+        config=config,
+        credentials=credentials,
+        names=lambda _: ("management", config.identity.namespace("management")),
+        secret=MagicMock(),
+        kubectl=MagicMock(side_effect=AssertionError("Unused Secret lookup")),
+    )
+    AzureProvider.runtime_secrets(provider, "management")
+    assert [call.args[2] for call in provider.secret.call_args_list] == ["management-api-runtime"]
+    provider.kubectl.assert_not_called()
+
+
+def test_prepared_administrator_is_stable_and_never_becomes_a_runtime_role():
+    config, store = Configuration("azure"), Store("azure")
+    config.prepared_environments = True
+    protected = []
+    credentials = StoredCredentials(config, store)
+    credentials.bind(
+        lambda _: {**database("azure"), "database": "management"}, protected.append, lambda: None
+    )
+    password = "synthetic-operator-admin-" + "x" * 40
+    credentials.retain_administrator(password)
+    credentials.retain_administrator(password)
+    assert store.created == [("management", "management_admin")]
+    connection = conninfo_to_dict(credentials.administrator_dsn())
+    assert connection["user"] == "plane_setup" and connection["password"] == password
+    assert connection["sslmode"] == "verify-full"
+    with pytest.raises(ProvisioningError, match="credential_conflict"):
+        credentials.retain_administrator(password + "changed")
+    with pytest.raises(ProvisioningError, match="database_credentials_missing"):
+        credentials.dsn("management", "management_admin")
 
 
 def test_credential_source_rejects_another_service_scope_before_access():

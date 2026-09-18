@@ -952,6 +952,8 @@ class LiveClusterCleanup:
         self.config = load_config(ROOT / ".env")
         require(self.config.environment == environment, "Cleanup environment differs from .env")
         self.environment, self.execute = environment, execute
+        self.slots = SLOTS
+        self.children = CHILDREN
         self.runner = runner or subprocess.run
         self.clock, self.sleep = clock, sleep
         self.confirmation = "CONFIRM_AZURE" if environment == "azure" else "CONFIRM_LOCAL"
@@ -1021,7 +1023,7 @@ class LiveClusterCleanup:
         return array(value)
 
     def open_cluster(self, slot):
-        require(slot in SLOTS, "Unknown cleanup slot")
+        require(slot in self.slots, "Unknown cleanup slot")
         if slot in self.targets:
             return self.targets[slot]
         work = Path(tempfile.mkdtemp(prefix="access-", dir=self.work))
@@ -1188,7 +1190,7 @@ class LiveClusterCleanup:
         apps = self.rows(self.rad(slot, "app", "list"))
         resources = self.native_resources(slot)
         allowed = {role} | (
-            {f"cluster-{child}" for child in CHILDREN} if slot == "management" else set()
+            {f"cluster-{child}" for child in self.children} if slot == "management" else set()
         )
         require(len({item["name"] for item in apps}) == len(apps), "Duplicate Radius applications")
         bindings, owners = {}, {}
@@ -1209,7 +1211,7 @@ class LiveClusterCleanup:
             namespaces = (
                 {self.config.slot_name(slot), self.config.namespace(slot)}
                 if name == role
-                else {provisioning_namespace(self.config.stem, name.removeprefix("cluster-"))}
+                else {self.provisioning_namespace(name.removeprefix("cluster-"))}
             )
             require(
                 compute["kind"] == "kubernetes" and compute["namespace"] in namespaces,
@@ -1243,7 +1245,7 @@ class LiveClusterCleanup:
                 child = properties.get("slot")
                 require(
                     slot == "management"
-                    and child in CHILDREN
+                    and child in self.children
                     and item["name"] == child
                     and app == "cluster-" + child
                     and child not in owners,
@@ -1426,6 +1428,18 @@ class LiveClusterCleanup:
     def before_child_delete(self, slot, record):
         self.verify_cluster("management")
 
+    def provisioning_namespace(self, slot):
+        if self.environment == "azure" and getattr(self, "allocation_catalog", None) is not None:
+            from plane_demo.management.providers.azure_environments import allocation_index
+
+            allocation = next(
+                item for item in self.allocation_catalog["allocations"] if item["slot"] == slot
+            )
+            return provisioning_namespace(
+                self.config.stem, slot, index=allocation_index(allocation)
+            )
+        return provisioning_namespace(self.config.stem, slot)
+
     def fault_target(self, slot, namespace):
         helpers = fault_helpers()
         role = "management" if slot == "management" else slot.rsplit("-", 1)[1]
@@ -1487,7 +1501,7 @@ class LiveClusterCleanup:
         )
         if not clusters:
             return
-        for slot in [*CHILDREN, "management"]:
+        for slot in [*self.children, "management"]:
             if slot in clusters:
                 self.open_cluster(slot)
                 self.inventories[slot] = self.inventory(slot)
@@ -1499,13 +1513,13 @@ class LiveClusterCleanup:
         )
         self.preflight_dependencies(clusters, owners)
         self.quiesce()
-        for slot in CHILDREN:
+        for slot in self.children:
             if slot in clusters:
                 for app in self.inventories[slot]["apps"]:
                     self.delete_app(slot, app["name"])
                 if self.execute:
                     self.child_apps_absent(slot)
-        for slot in CHILDREN:
+        for slot in self.children:
             if slot in owners:
                 if self.execute and slot in clusters:
                     self.child_apps_absent(slot)
@@ -1556,6 +1570,99 @@ class LiveAzureCleanup(LiveClusterCleanup):
         self.external = None
         self.group_resources = {}
         self.bootstrap_record = None
+        self.environment_records = {}
+        self.allocation_catalog = None
+        self.role_domains = {key: (self.config.stem, key, SLOTS) for key in self.roles}
+        self.cleanup_operator = None
+        self.management_removed = False
+
+    def current(self):
+        super().current()
+        if self.cleanup_operator is not None and not self.management_removed:
+            self.cleanup_operator.guard()
+
+    def close(self):
+        try:
+            if (
+                self.cleanup_operator is not None
+                and not self.management_removed
+                and self.cleanup_operator.release_safe
+            ):
+                self.cleanup_operator.release()
+        finally:
+            super().close()
+
+    def discover_topology(self):
+        from plane_demo.management.providers.azure_environments import (
+            deployment_outputs,
+            merge_foundations,
+        )
+        from plane_demo.management.providers.identity import AZURE_ENVIRONMENT_MODE
+
+        records = self.rows(
+            self.az(
+                "deployment", "sub", "list", "--query", f"[?name=='{self.config.stem}-bootstrap']"
+            )
+        )
+        require(len(records) <= 1, "Ambiguous base foundation")
+        if not records:
+            return
+        properties = records[0].get("properties") if isinstance(records[0], dict) else None
+        outputs = properties.get("outputs") if isinstance(properties, dict) else None
+        entry = outputs.get("foundation") if isinstance(outputs, dict) else None
+        foundation = entry.get("value") if isinstance(entry, dict) else None
+        if (
+            not isinstance(foundation, dict)
+            or foundation.get("environmentMode") != AZURE_ENVIRONMENT_MODE
+        ):
+            return
+        base = deployment_outputs(records[0])
+        additions = self.rows(
+            self.az(
+                "deployment",
+                "sub",
+                "list",
+                "--query",
+                f"[?starts_with(name, '{self.config.stem}-environment-')]",
+            )
+        )
+        self.allocation_catalog = merge_foundations(self.config, base, additions)
+        self.environment_records = {
+            record["name"]: json.dumps(record.get("properties", {}), sort_keys=True)
+            for record in additions
+        }
+        self.slots = tuple(item["slot"] for item in self.allocation_catalog["allocations"])
+        self.children = tuple(
+            slot for role in ("data", "control") for slot in self.slots if slot.endswith("-" + role)
+        )
+        self.groups = [self.platform] + [
+            self.group_name(slot, kind) for slot in self.slots for kind in ("plane", "nodes")
+        ]
+        self.role_domains = {
+            key: (self.config.stem, key, ("management", "shared-control", "shared-data"))
+            for key in self.roles
+        }
+        for pair in self.allocation_catalog["foundation"].get("environmentFoundations", {}):
+            members = (f"{pair}-control", f"{pair}-data")
+            prefix = f"{self.config.stem}-{pair}"
+            for key in (
+                "postgresApplication",
+                "redisApplication",
+                "childClusterRecipe",
+                "childIdentityFederation",
+            ):
+                identifier = f"{pair}/{key}"
+                self.roles[identifier] = (
+                    f"/subscriptions/{self.config.subscription}/providers/Microsoft.Authorization/"
+                    "roleDefinitions/"
+                    + str(
+                        uuid5(
+                            GUID_NAMESPACE,
+                            f"/subscriptions/{self.config.subscription}-{prefix}-{PLANE_ROLE_NAMES[key][0]}",
+                        )
+                    )
+                )
+                self.role_domains[identifier] = (prefix, key, members)
 
     def gid(self, name):
         return f"/subscriptions/{self.config.subscription}/resourceGroups/{name}"
@@ -1592,6 +1699,12 @@ class LiveAzureCleanup(LiveClusterCleanup):
     def az(self, *args, mutation=False):
         if mutation and self.bootstrap_record is not None:
             self.bootstrap_properties()
+            for name, record in self.environment_records.items():
+                current = self.az("deployment", "sub", "show", "--name", name)
+                require(
+                    json.dumps(current.get("properties", {}), sort_keys=True) == record,
+                    "Isolated foundation changed during cleanup",
+                )
         raw = self.call(
             [
                 "az",
@@ -1605,6 +1718,12 @@ class LiveAzureCleanup(LiveClusterCleanup):
             mutation=mutation,
             timeout=7200 if mutation else 180,
         )
+        if (
+            mutation
+            and args[:2] == ("aks", "delete")
+            and "aks-" + self.config.slot_name("management") in args
+        ):
+            self.management_removed = True
         return None if mutation else json.loads(raw)
 
     def external_vault(self):
@@ -1750,7 +1869,7 @@ class LiveAzureCleanup(LiveClusterCleanup):
                 and all(
                     isinstance(item, dict)
                     and isinstance(item.get("slot"), str)
-                    and item["slot"] in SLOTS
+                    and item["slot"] in self.slots
                     for item in allocations
                 ),
                 "Bootstrap allocations output is malformed",
@@ -1782,17 +1901,22 @@ class LiveAzureCleanup(LiveClusterCleanup):
                 self.gid(self.platform)
                 + f"/providers/Microsoft.Network/privateEndpoints/pe-{self.config.stem}-vault",
             )
-            and foundation.get("roleDefinitionIds") == self.roles,
+            and foundation.get("roleDefinitionIds")
+            == {key: value for key, value in self.roles.items() if "/" not in key},
             "Live bootstrap outputs differ from the selected identity",
         )
-        allocations = outputs["allocations"]
+        allocations = (
+            self.allocation_catalog["allocations"]
+            if self.allocation_catalog is not None
+            else outputs["allocations"]
+        )
         require(
             isinstance(allocations, list)
-            and len(allocations) == len(SLOTS)
+            and len(allocations) == len(self.slots)
             and all(
                 isinstance(item, dict) and isinstance(item.get("slot"), str) for item in allocations
             )
-            and {item["slot"] for item in allocations} == set(SLOTS),
+            and {item["slot"] for item in allocations} == set(self.slots),
             "Bootstrap allocations differ",
         )
         for item in allocations:
@@ -1926,15 +2050,18 @@ class LiveAzureCleanup(LiveClusterCleanup):
                     "Unknown deployment custom role; retained",
                 )
                 continue
+            domain, purpose, members = self.role_domains[key]
             expected_scopes = (
                 {self.gid(self.platform).lower(), self.vault_id.lower()}
-                if key in {"certificateImporter", "acmeStateWriter"}
-                else {self.gid(self.group_name(slot, "plane")).lower() for slot in role_slots(key)}
+                if purpose in {"certificateImporter", "acmeStateWriter"}
+                else {
+                    self.gid(self.group_name(slot, "plane")).lower()
+                    for slot in role_slots(purpose, members)
+                }
             )
             require(
                 value.get("roleType") == "CustomRole"
-                and value.get("roleName")
-                == self.config.stem + PLANE_ROLE_NAMES[key][1][len(PROJECT) :]
+                and value.get("roleName") == domain + PLANE_ROLE_NAMES[purpose][1][len(PROJECT) :]
                 and {scope.lower() for scope in value["assignableScopes"]} == expected_scopes,
                 "Custom role ownership or scopes differ",
             )
@@ -1976,7 +2103,7 @@ class LiveAzureCleanup(LiveClusterCleanup):
 
     def clusters(self):
         result = {}
-        for slot in SLOTS:
+        for slot in self.slots:
             group = self.group_name(slot, "cluster")
             if self.group_resources[group] is None:
                 continue
@@ -2041,7 +2168,7 @@ class LiveAzureCleanup(LiveClusterCleanup):
             kube.policies(reject_faults=True)
 
     def preflight_dependencies(self, clusters, owners):
-        for slot in SLOTS:
+        for slot in self.slots:
             resources = self.application_resources(slot)
             require(
                 slot in clusters or not resources,
@@ -2197,7 +2324,9 @@ class LiveAzureCleanup(LiveClusterCleanup):
                 ),
                 "A cluster remains; group deletion would bypass its owner",
             )
-            slot = next((slot for slot in SLOTS if self.group_name(slot, "plane") == name), None)
+            slot = next(
+                (slot for slot in self.slots if self.group_name(slot, "plane") == name), None
+            )
             if slot is not None:
                 require(
                     not self.application_resources(slot), "Unowned or application resources remain"
@@ -2210,8 +2339,53 @@ class LiveAzureCleanup(LiveClusterCleanup):
                 "Azure group deletion is incomplete",
             )
 
+    def management_cluster_present(self):
+        group = self.group_name("management", "cluster")
+        exists = self.az("group", "exists", "--name", group)
+        require(type(exists) is bool, "Invalid management group existence response")
+        if not exists:
+            self.management_removed = True
+            return False
+        clusters = self.rows(self.az("aks", "list", "--resource-group", group))
+        resources = self.group(group) or []
+        observed = {
+            item["id"].lower()
+            for item in resources
+            if item["type"].lower() == "microsoft.containerservice/managedclusters"
+        }
+        require(
+            observed == {item["id"].lower() for item in clusters}
+            and observed <= {self.cluster_id("management").lower()},
+            "Management cluster absence or identity cannot be verified",
+        )
+        if not clusters:
+            self.management_removed = True
+            return False
+        return True
+
     def clean(self, *, radius_only=False):
         status("section", "Cleanup: discover and validate live ownership")
+        self.discover_topology()
+        if (
+            self.execute
+            and self.allocation_catalog is not None
+            and self.management_cluster_present()
+        ):
+            from scripts.operations.azure.environment_operator import EnvironmentOperator
+
+            base = {
+                **self.allocation_catalog,
+                "allocations": [
+                    item
+                    for item in self.allocation_catalog["allocations"]
+                    if item["slot"] in {"management", "shared-control", "shared-data"}
+                ],
+            }
+            directory = Path(tempfile.mkdtemp(prefix="environment-cleanup-", dir=self.work))
+            operator = EnvironmentOperator(self.config, directory, base)
+            operator.acquire(cleanup_target="all")
+            self.cleanup_operator = operator
+        self.discover_topology()
         self.external_vault()
         self.unexpected()
         self.group_resources = {name: self.group(name) for name in self.groups}
@@ -2221,7 +2395,7 @@ class LiveAzureCleanup(LiveClusterCleanup):
         clusters = self.clusters()
         if not clusters:
             require(
-                not any(self.application_resources(slot) for slot in SLOTS),
+                not any(self.application_resources(slot) for slot in self.slots),
                 "App resources remain without Radius; normal cleanup cannot bypass it",
             )
             self.partial_without_clusters()
@@ -2241,7 +2415,7 @@ class LiveAzureCleanup(LiveClusterCleanup):
                 "steps": self.steps,
             }
         status("section", "Cleanup: remove owned foundation resources")
-        for slot in CHILDREN:
+        for slot in self.children:
             self.delete_group(self.group_name(slot, "plane"))
             self.delete_group(self.group_name(slot, "nodes"))
         if "management" in clusters:

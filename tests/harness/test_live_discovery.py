@@ -456,6 +456,10 @@ def test_export_entrypoint_is_an_optional_live_api_report(
     live, monkeypatch, capsys, provisioning_status
 ):
     config, commands = live
+    monkeypatch.setattr(
+        "scripts.operations.azure.catalog.discover",
+        lambda _: {"foundation": {}, "allocations": []},
+    )
 
     def handle(request):
         if request.url.path == "/healthz":
@@ -698,6 +702,7 @@ class LiveScenarioTests(HarnessRunCase):
             sleep=self.clock.sleep,
         )
         self.runner = subject
+        subject.prepared_azure = False
         subject.collect_timelines = Mock(return_value={"unchanged": True})
         subject.control_poll_observed = Mock(return_value=True)
         with (

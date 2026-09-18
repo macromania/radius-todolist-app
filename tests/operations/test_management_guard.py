@@ -30,6 +30,7 @@ def guarded_job(tmp_path, monkeypatch):
     monkeypatch.setenv("OPERATOR_JOB_UID", uid)
     image = "registry.azurecr.io/provisioner@sha256:" + "a" * 64
     configuration = SimpleNamespace(
+        prepared_environments=False,
         identity=identity,
         namespace=lambda slot: namespace,
         images={"provisioner": image},

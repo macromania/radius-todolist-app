@@ -1,4 +1,4 @@
-"""Check the configured grants of the five Radius identities, without changing access."""
+"""Check the configured grants of verified Radius identities, without changing access."""
 
 from __future__ import annotations
 
@@ -14,10 +14,13 @@ from uuid import UUID, uuid5
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
 
 from plane_demo.management.providers.identity import (  # noqa: E402
+    AZURE_DEFAULT_SLOTS,
+    AZURE_ENVIRONMENT_MODE,
     AZURE_GROUP_LAYOUT,
     IDENTITY_PURPOSES,
     SLOTS,
     DemoConfig,
+    azure_slot,
 )
 
 POLICY = json.loads(Path(__file__).with_name("plane-policy.json").read_text())
@@ -61,12 +64,12 @@ def application_actions(key):
     return POLICY["deploymentActions"] + POLICY["gatewayActions"] + POLICY["roles"][key]["actions"]
 
 
-def role_slots(key):
+def role_slots(key, slots=SLOTS):
     if key in POLICY["roles"]:
         return tuple(
-            slot for slot in SLOTS if slot.endswith("-data") == (key == "redisApplication")
+            slot for slot in slots if slot.endswith("-data") == (key == "redisApplication")
         )
-    return SLOTS[1:]
+    return tuple(slot for slot in slots if slot != "management")
 
 
 def expected_grants(config, document):
@@ -89,11 +92,20 @@ def expected_grants(config, document):
     allocations = document["allocations"]
     require(
         isinstance(allocations, list)
-        and len(allocations) == len(SLOTS)
-        and {item["slot"] for item in allocations} == set(SLOTS),
+        and 3 <= len(allocations) <= 15
+        and all(isinstance(item, dict) and azure_slot(item.get("slot")) for item in allocations)
+        and len({item["slot"] for item in allocations}) == len(allocations)
+        and set(AZURE_DEFAULT_SLOTS) <= {item["slot"] for item in allocations},
         "Invalid plane allocations",
     )
     allocations = {item["slot"]: item for item in allocations}
+    slots = tuple(allocations)
+    pairs = {slot.removesuffix("-control") for slot in slots if slot.endswith("-control")}
+    require(
+        set(slots)
+        == {"management", *(f"{pair}-{role}" for pair in pairs for role in ("control", "data"))},
+        "Incomplete plane pair",
+    )
     principals, expected, definitions = {}, set(), {}
     prefix = (
         f"/subscriptions/{config.subscription}/providers/Microsoft.Authorization/roleDefinitions/"
@@ -115,7 +127,7 @@ def expected_grants(config, document):
             )
             UUID(identity["principalId"])
         principals[slot] = allocation["identities"]["radius"]["principalId"].lower()
-    require(len(set(principals.values())) == len(SLOTS), "Radius identities must be distinct")
+    require(len(set(principals.values())) == len(slots), "Radius identities must be distinct")
     platform = f"/subscriptions/{config.subscription}/resourceGroups/rg-{config.stem}-platform"
     vnet = platform + f"/providers/Microsoft.Network/virtualNetworks/vnet-{config.stem}"
     registry = (
@@ -131,35 +143,58 @@ def expected_grants(config, document):
             )
         )
 
-    for key in (*POLICY["roles"], "childClusterRecipe", "childIdentityFederation"):
-        identifier = role_id(config.subscription, config.stem, ROLE_NAMES[key][0])
+    domains = {}
+    prepared = foundation.get("environmentMode") == AZURE_ENVIRONMENT_MODE
+    for slot, allocation in allocations.items():
+        domain = (
+            config.stem
+            if slot in AZURE_DEFAULT_SLOTS or not prepared
+            else f"{config.stem}-{slot.rsplit('-', 1)[0]}"
+        )
         require(
-            foundation["roleDefinitionIds"].get(key) == identifier, "Custom role identity differs"
+            allocation.get("roleDefinitionPrefix", config.stem) == domain,
+            "Custom role scope does not match its environment",
         )
-        actions = (
-            application_actions(key)
-            if key in POLICY["roles"]
-            else POLICY["deploymentActions"] + POLICY["clusterActions"]
-            if key == "childClusterRecipe"
-            else [
-                "Microsoft.ManagedIdentity/userAssignedIdentities/read",
-                *[
-                    "Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials/"
-                    + action
-                    for action in ("read", "write", "delete")
+        domains.setdefault(domain, []).append(slot)
+    selected_roles = {}
+    for domain, members in domains.items():
+        selected_roles[domain] = {}
+        for key in (*POLICY["roles"], "childClusterRecipe", "childIdentityFederation"):
+            identifier = role_id(config.subscription, domain, ROLE_NAMES[key][0])
+            selected_roles[domain][key] = identifier
+            if domain == config.stem:
+                require(
+                    foundation["roleDefinitionIds"].get(key) == identifier,
+                    "Custom role identity differs",
+                )
+            actions = (
+                application_actions(key)
+                if key in POLICY["roles"]
+                else POLICY["deploymentActions"] + POLICY["clusterActions"]
+                if key == "childClusterRecipe"
+                else [
+                    "Microsoft.ManagedIdentity/userAssignedIdentities/read",
+                    *[
+                        "Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials/"
+                        + action
+                        for action in ("read", "write", "delete")
+                    ],
+                ]
+            )
+            definitions[identifier.lower()] = {
+                "roleName": domain + ROLE_NAMES[key][1][len("radplanes") :],
+                "assignableScopes": [
+                    config.plane_group_id(slot) for slot in role_slots(key, members)
                 ],
-            ]
-        )
-        definitions[identifier.lower()] = {
-            "roleName": config.stem + ROLE_NAMES[key][1][len("radplanes") :],
-            "assignableScopes": [config.plane_group_id(slot) for slot in role_slots(key)],
-            "permissions": [
-                {"actions": actions, "notActions": [], "dataActions": [], "notDataActions": []}
-            ],
-        }
-    for slot in SLOTS:
+                "permissions": [
+                    {"actions": actions, "notActions": [], "dataActions": [], "notDataActions": []}
+                ],
+            }
+    for slot in slots:
+        domain = allocations[slot].get("roleDefinitionPrefix", config.stem)
+        role_ids = selected_roles[domain]
         role = "redisApplication" if slot.endswith("-data") else "postgresApplication"
-        grant(slot, foundation["roleDefinitionIds"][role], config.plane_group_id(slot))
+        grant(slot, role_ids[role], config.plane_group_id(slot))
         grant(slot, "reader", vnet)
         grant(slot, "repositoryReader", registry)
         grant(slot, "network", vnet + f"/subnets/snet-{slot}-gateway")
@@ -175,7 +210,7 @@ def expected_grants(config, document):
         if slot != "management":
             grant(
                 "management",
-                foundation["roleDefinitionIds"]["childClusterRecipe"],
+                role_ids["childClusterRecipe"],
                 config.plane_group_id(slot),
             )
             for purpose in ("control-plane", "kubelet"):
@@ -183,7 +218,7 @@ def expected_grants(config, document):
             for purpose in ("radius", "certificate-issuer"):
                 grant(
                     "management",
-                    foundation["roleDefinitionIds"]["childIdentityFederation"],
+                    role_ids["childIdentityFederation"],
                     config.managed_identity_id(slot, purpose),
                 )
     return set(principals.values()), expected, definitions

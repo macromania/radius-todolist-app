@@ -577,8 +577,9 @@ class Platform:
                         )
                 del self.groups[name]
                 value = None
-            elif args[:3] == ["deployment", "sub", "show"]:
-                assert args[args.index("--name") + 1] == self.config.stem + "-bootstrap"
+            elif args[:3] in (["deployment", "sub", "show"], ["deployment", "sub", "list"]):
+                if args[2] == "show":
+                    assert args[args.index("--name") + 1] == self.config.stem + "-bootstrap"
                 foundation = {
                     "projectName": self.config.project,
                     "deploymentName": self.config.deployment,
@@ -615,6 +616,8 @@ class Platform:
                 }
                 if hasattr(self, "bootstrap_response"):
                     value = copy.deepcopy(self.bootstrap_response)
+                if args[2] == "list":
+                    value = [value]
             elif args[:3] == ["role", "definition", "list"]:
                 value = (
                     self.roles

@@ -111,6 +111,12 @@ azure_init() {
   REGISTRY="acr$IDENTITY_HASH"
   HOST="$REGISTRY.azurecr.io"
   VAULT="${DEMO_KEY_VAULT:-kv-$IDENTITY_HASH}"
+  [[ "${PLANE_DEMO_EXPECT_STEM:-$STEM}" == "$STEM" \
+    && "${PLANE_DEMO_EXPECT_SUBSCRIPTION:-$AZURE_SUBSCRIPTION_ID}" == "$AZURE_SUBSCRIPTION_ID" \
+    && "${PLANE_DEMO_EXPECT_LOCATION:-$AZURE_LOCATION}" == "$AZURE_LOCATION" \
+    && "${PLANE_DEMO_EXPECT_VAULT:-$VAULT}" == "$VAULT" ]] || {
+    demo_error 'Operator selection changed during the parent workflow'; return 1;
+  }
   VAULT_OWNED=true
   [[ -z "${DEMO_KEY_VAULT+x}" ]] || VAULT_OWNED=false
   PLATFORM_GROUP="rg-$STEM-platform"
@@ -169,9 +175,9 @@ azure_discover_vault() {
 azure_credential_names() {
   local slot role tuple digest
   local roles=()
-  for slot in management shared-control shared-data isolated-1-control isolated-1-data; do
+  for slot in management shared-control shared-data; do
     case "$slot" in
-      management) roles=(demoKey mgmt_api mgmt_provisioner cp_shared cp_isolated_1) ;;
+      management) roles=(demoKey mgmt_api mgmt_provisioner cp_shared management_admin) ;;
       *-control) roles=(demoKey cp_api cp_reconciler dp_reconciler) ;;
       *-data) roles=(demoKey) ;;
     esac
@@ -230,7 +236,10 @@ azure_foundation() {
           $stem + "-management") | ascii_downcase) and
       $o.managementCluster.name == ("aks-" + $stem + "-management") and
       ($o.allocations | map(.slot) | sort) ==
-        ["isolated-1-control", "isolated-1-data", "management", "shared-control", "shared-data"] and
+        (if $o.foundation.environmentMode == "prepared-v1"
+         then ["management", "shared-control", "shared-data"]
+         else ["isolated-1-control", "isolated-1-data", "management", "shared-control", "shared-data"]
+         end) and
       ($o.allocations | all(.[];
         .clusterName == ("aks-" + $stem + "-" + .slot) and
         .clusterResourceGroup == ("rg-" + $stem + "-" + .slot) and
@@ -244,6 +253,11 @@ azure_foundation() {
   }
   jq '.properties.outputs | map_values(.value)' "$AZURE_WORKSPACE/deployment.json" \
     > "$AZURE_WORKSPACE/foundation.json" || return
+  if jq -e '.foundation.environmentMode == "prepared-v1"' "$AZURE_WORKSPACE/foundation.json" >/dev/null; then
+    "$ROOT/.venv/bin/python" "$ROOT/scripts/operations/azure/catalog.py" \
+      --base "$AZURE_WORKSPACE/foundation.json" > "$AZURE_WORKSPACE/catalog.json" || return
+    mv "$AZURE_WORKSPACE/catalog.json" "$AZURE_WORKSPACE/foundation.json" || return
+  fi
   demo_run 'Radius plane grant verification' "$ROOT/.venv/bin/python" \
     "$ROOT/scripts/operations/azure/plane_policy.py" \
     --foundation "$AZURE_WORKSPACE/foundation.json" \

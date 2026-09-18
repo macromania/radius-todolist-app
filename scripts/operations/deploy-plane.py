@@ -46,7 +46,10 @@ def main() -> int:
                 provider.register("management")
                 if not isinstance(provider.credentials, StoredCredentials):
                     raise ProvisioningError("service_credentials_required")
-                provider.credentials.seed_provided_keys()
+                if config.prepared_environments:
+                    provider.credentials.seed_provided_keys(set(config.allocations))
+                else:
+                    provider.credentials.seed_provided_keys()
                 url = provider.deploy_plane("management")
         print(json.dumps({"slot": "management", "url": url}))
         return 0

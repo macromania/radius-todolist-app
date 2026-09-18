@@ -15,6 +15,8 @@ case "$target" in
   data:shared) slot=shared-data ;;
   control:isolated-1) slot=isolated-1-control ;;
   data:isolated-1) slot=isolated-1-data ;;
+  control:isolated-*) slot="${target#control:}-control" ;;
+  data:isolated-*) slot="${target#data:}-data" ;;
   *) demo_error 'Unknown API target'; exit 1 ;;
 esac
 case "$method" in GET|POST|PUT) ;; *) demo_error 'Unsupported API method'; exit 1 ;; esac

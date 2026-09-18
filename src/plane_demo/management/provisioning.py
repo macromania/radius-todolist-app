@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 from plane_demo.management.providers.identity import (
+    AZURE_ENVIRONMENT_MODE,
     AZURE_GROUP_LAYOUT,
     IDENTITY_PURPOSES,
     PUBLIC_KEYS,
@@ -148,6 +149,8 @@ class OperatorConfig:
                 raise ValueError("bootstrap identity mismatch")
             identity = identity or saved_identity
         foundation = data["foundation"]
+        if foundation.get("environmentMode") not in (None, AZURE_ENVIRONMENT_MODE):
+            raise ValueError("unsupported environment preparation mode")
         postgres_name = foundation.get("postgresSkuName")
         postgres_tier = foundation.get("postgresSkuTier")
         if postgres_name is not None or postgres_tier is not None:
@@ -327,6 +330,10 @@ class OperatorConfig:
         return self.foundation["projectName"]
 
     @property
+    def prepared_environments(self) -> bool:
+        return self.foundation.get("environmentMode") == AZURE_ENVIRONMENT_MODE
+
+    @property
     def resource_prefix(self) -> str:
         return self.identity.stem if self.identity else "radplanes"
 
@@ -380,6 +387,9 @@ class PairResult:
 
 class ProvisioningConfig(Protocol):
     @property
+    def prepared_environments(self) -> bool: ...
+
+    @property
     def identity(self) -> DemoConfig | None: ...
 
     @property
@@ -414,6 +424,8 @@ def provision_pair(
     observe: Callable[[str], None],
 ) -> PairResult:
     """Infrastructure only: never send tenant state to a child API."""
+    if provider.config.prepared_environments:
+        raise ProvisioningError("tenant_infrastructure_disabled")
     if (
         request.pair_id != pair["pair_id"]
         or request.isolation != pair["isolation"]
@@ -433,6 +445,14 @@ def provision_pair(
             for slot, url in zip(slots, (result.control_url, result.data_url), strict=True)
         ]
         return PairResult(*expected_ids, *urls)
+    return prepare_pair(request.pair_id, provider, observe)
+
+
+def prepare_pair(pair_id: str, provider: Provider, observe: Callable[[str], None]) -> PairResult:
+    """Operator-only preparation of an allocated pair, independent of tenant requests."""
+    if pair_id not in {item["pair_id"] for item in provider.config.pair_slots}:
+        raise ProvisioningError("invalid_pair_assignment")
+    slots = [f"{pair_id}-{role}" for role in ("control", "data")]
     clusters = []
     for role, slot in zip(("control", "data"), slots, strict=True):
         observe(f"{role}-cluster")

@@ -15,6 +15,7 @@ from uuid import UUID
 import yaml
 
 from plane_demo.management.providers import workloads
+from plane_demo.management.providers.azure_environments import allocation_index
 from plane_demo.management.providers.commands import (
     Commands,
     write_json,
@@ -560,7 +561,9 @@ class AzureProvider:
         parameters = {
             "environmentName": name,
             "namespace": (
-                provisioning_namespace(self.config.resource_prefix, slot)
+                provisioning_namespace(
+                    self.config.resource_prefix, slot, index=allocation_index(allocation)
+                )
                 if self.config.identity
                 else f"radplanes-p-{slot}"
             ),
@@ -1304,6 +1307,7 @@ class AzureProvider:
         if role == "management":
             values.update(
                 provisionerImage=self.config.images["provisioner"],
+                provisionerEnabled=not self.config.prepared_environments,
                 provisionerWorkloadIdentity=True,
                 provisionerClientId=self.config.coordinator_identity["clientId"],
             )

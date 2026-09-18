@@ -60,6 +60,7 @@ class CompiledInfrastructureTests(unittest.TestCase):
         cls.cluster_recipe = compile_template("infra/radius/recipes/azure/cluster.bicep")
         cls.postgresql_recipe = compile_template("infra/radius/recipes/azure/postgresql.bicep")
         cls.redis_recipe = compile_template("infra/radius/recipes/azure/redis.bicep")
+        cls.isolated = compile_template("infra/bootstrap/isolated.bicep")
 
     def test_redis_recipe_emits_no_nic_or_tags_extension_for_radius_to_track(self):
         template = self.redis_recipe
@@ -105,6 +106,47 @@ class CompiledInfrastructureTests(unittest.TestCase):
 
     def test_bootstrap_has_no_unbound_copy_indices(self):
         assert_bound_copy_indices(self.bootstrap)
+        assert_bound_copy_indices(self.isolated)
+
+    def test_isolated_foundation_has_no_base_cluster_or_network_replacement(self):
+        native = list(nested_resources(self.isolated))
+        self.assertNotIn(
+            "Microsoft.ContainerService/managedClusters", {item["type"] for item in native}
+        )
+        self.assertNotIn("Microsoft.Network/virtualNetworks", {item["type"] for item in native})
+        self.assertNotIn(
+            "Microsoft.ContainerRegistry/registries", {item["type"] for item in native}
+        )
+        self.assertIn(
+            "Microsoft.Network/virtualNetworks/subnets", {item["type"] for item in native}
+        )
+        self.assertEqual(
+            self.isolated["parameters"]["allocationStart"]["allowedValues"], [3, 5, 7, 9, 11, 13]
+        )
+        modules = {
+            item.get("copy", {}).get("name", item["name"]): item
+            for item in resources(self.isolated)
+            if item["type"] == "Microsoft.Resources/deployments"
+        }
+        access = next(
+            item
+            for name, item in modules.items()
+            if isinstance(name, str) and "platform-access" in name
+        )
+        parameters = access["properties"]["parameters"]
+        self.assertIs(parameters["includePlatformOperatorGrants"]["value"], False)
+        self.assertIs(parameters["includeCoordinatorPull"]["value"], False)
+        self.assertIn("managementRadius", parameters["managementRadiusPrincipalId"]["value"])
+
+    def test_named_cluster_dns_prefix_is_bounded_without_renaming_the_resource(self):
+        cluster = next(
+            item
+            for item in resources(self.cluster_recipe)
+            if item["type"] == "Microsoft.ContainerService/managedClusters"
+        )
+        self.assertIn("allocation", cluster["name"])
+        self.assertIn("take(", cluster["properties"]["dnsPrefix"])
+        self.assertIn("54", cluster["properties"]["dnsPrefix"])
 
     def test_one_plane_group_collection_replaces_both_old_scopes(self):
         groups = [
@@ -117,7 +159,10 @@ class CompiledInfrastructureTests(unittest.TestCase):
         self.assertEqual(planes["copy"]["name"], "planeGroups")
         self.assertNotIn("-cluster", planes["name"])
         self.assertNotIn("-app", planes["name"])
-        self.assertEqual(len(self.bootstrap["parameters"]["childSlots"]["defaultValue"]), 4)
+        self.assertEqual(
+            self.bootstrap["parameters"]["childSlots"]["defaultValue"],
+            ["shared-control", "shared-data"],
+        )
         loaded = next(
             value
             for value in self.bootstrap["variables"].values()

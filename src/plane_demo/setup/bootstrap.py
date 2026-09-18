@@ -98,6 +98,7 @@ def schema_contract(
     slots: list[dict[str, str]],
     schema_directory: Path,
     pair_id: str,
+    admission_mode: str = "on_demand",
 ) -> tuple[set[str], str, dict]:
     if kind not in {"management", "control"}:
         raise ValueError("BOOTSTRAP_KIND must be management or control")
@@ -117,7 +118,13 @@ def schema_contract(
         raise ValueError("control initialization requires PAIR_ID")
     if any(not re.fullmatch(r"[a-z][a-z0-9_]{0,62}", role) or role in OWNERS for role in roles):
         raise ValueError("invalid runtime role name")
+    if admission_mode not in {"on_demand", "prepared"} or (
+        kind != "management" and admission_mode != "on_demand"
+    ):
+        raise ValueError("invalid admission mode")
     schema = (schema_directory / f"{kind}.sql").read_text()
+    if admission_mode == "prepared":
+        schema += "\n" + (schema_directory / "management-prepared.sql").read_text()
     expected = {
         "configuration": {
             "pair_id": pair_id,
@@ -125,7 +132,78 @@ def schema_contract(
         },
         "schema_sha256": hashlib.sha256(schema.encode()).hexdigest(),
     }
+    if admission_mode == "prepared":
+        expected["configuration"]["admission_mode"] = admission_mode
     return roles, schema, expected
+
+
+def grant_setup_memberships(connection):
+    setup_role = connection.execute("SELECT session_user").fetchone()[0]
+    restored = []
+    for role in sorted(OWNERS):
+        membership = connection.execute(
+            "SELECT m.inherit_option,m.set_option FROM pg_auth_members m "
+            "JOIN pg_roles r ON r.oid=m.roleid JOIN pg_roles u ON u.oid=m.member "
+            "WHERE r.rolname=%s AND u.rolname=session_user",
+            (role,),
+        ).fetchone()
+        is_superuser = connection.execute(
+            "SELECT rolsuper FROM pg_roles WHERE rolname=session_user"
+        ).fetchone()[0]
+        if not is_superuser and membership != (True, True):
+            connection.execute(
+                sql.SQL("GRANT {} TO {} WITH INHERIT TRUE, SET TRUE").format(
+                    sql.Identifier(role), sql.Identifier(setup_role)
+                )
+            )
+            restored.append((role, membership))
+    return setup_role, restored
+
+
+def restore_setup_memberships(connection, setup_role, restored):
+    connection.execute("RESET ROLE")
+    for role, membership in restored:
+        if membership is None:
+            connection.execute(
+                sql.SQL("REVOKE {} FROM {}").format(
+                    sql.Identifier(role), sql.Identifier(setup_role)
+                )
+            )
+        else:
+            connection.execute(
+                sql.SQL("GRANT {} TO {} WITH INHERIT {}, SET {}").format(
+                    sql.Identifier(role),
+                    sql.Identifier(setup_role),
+                    sql.SQL("TRUE" if membership[0] else "FALSE"),
+                    sql.SQL("TRUE" if membership[1] else "FALSE"),
+                )
+            )
+
+
+def create_pair_records(connection, pair: str, role: str) -> None:
+    connection.execute("SET ROLE plane_owner")
+    connection.execute(
+        "INSERT INTO management.pairs(pair_id,isolation,reporting_role) VALUES (%s,%s,%s)",
+        (pair, "shared" if pair == "shared" else "isolated", role),
+    )
+    connection.execute(
+        "INSERT INTO management.login_pairs(login_role,pair_id) VALUES (%s,%s)", (role, pair)
+    )
+    connection.execute(
+        sql.SQL("GRANT USAGE ON SCHEMA management TO {}").format(sql.Identifier(role))
+    )
+    connection.execute(
+        sql.SQL(
+            "GRANT SELECT ON management.tenants, management.pairs, management.login_pairs TO {}"
+        ).format(sql.Identifier(role))
+    )
+    connection.execute("SET ROLE plane_reporter")
+    connection.execute(
+        sql.SQL(
+            "GRANT EXECUTE ON FUNCTION management.report_control(text,uuid,bigint,text,text) TO {}"
+        ).format(sql.Identifier(role))
+    )
+    connection.execute("SET ROLE plane_owner")
 
 
 def observe(
@@ -134,8 +212,9 @@ def observe(
     slots: list[dict[str, str]],
     schema_directory: Path = Path("sql"),
     pair_id: str = "",
+    admission_mode: str = "on_demand",
 ) -> None:
-    roles, _, expected = schema_contract(kind, slots, schema_directory, pair_id)
+    roles, _, expected = schema_contract(kind, slots, schema_directory, pair_id, admission_mode)
     with psycopg.connect(dsn, connect_timeout=10) as connection:
         connection.execute("SET TRANSACTION READ ONLY")
         connection.execute("SELECT pg_advisory_xact_lock(35510,3)")
@@ -152,8 +231,11 @@ def initialize(
     schema_directory: Path = Path("sql"),
     pair_id: str = "",
     initialization_id: str | None = None,
+    admission_mode: str = "on_demand",
 ) -> None:
-    roles, schema, expected = schema_contract(kind, slots, schema_directory, pair_id)
+    roles, schema, expected = schema_contract(
+        kind, slots, schema_directory, pair_id, admission_mode
+    )
     if set(passwords) != roles:
         raise ValueError("ROLE_PASSWORDS_JSON must match precisely the runtime role names")
     if any(len(passwords[role]) < 32 for role in roles):
@@ -193,26 +275,7 @@ def initialize(
                         sql.Identifier(role), sql.Literal(passwords[role])
                     )
                 )
-        # The trusted initialization login needs temporary owner membership on managed PG.
-        setup_role = connection.execute("SELECT session_user").fetchone()[0]
-        restored_memberships = []
-        for role in sorted(OWNERS):
-            membership = connection.execute(
-                "SELECT m.inherit_option,m.set_option FROM pg_auth_members m "
-                "JOIN pg_roles r ON r.oid=m.roleid JOIN pg_roles u ON u.oid=m.member "
-                "WHERE r.rolname=%s AND u.rolname=session_user",
-                (role,),
-            ).fetchone()
-            is_superuser = connection.execute(
-                "SELECT rolsuper FROM pg_roles WHERE rolname=session_user"
-            ).fetchone()[0]
-            if not is_superuser and membership != (True, True):
-                connection.execute(
-                    sql.SQL("GRANT {} TO {} WITH INHERIT TRUE, SET TRUE").format(
-                        sql.Identifier(role), sql.Identifier(setup_role)
-                    )
-                )
-                restored_memberships.append((role, membership))
+        setup_role, restored_memberships = grant_setup_memberships(connection)
         connection.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC")
         connection.execute(schema)
         connection.execute("CREATE SCHEMA demo_metadata AUTHORIZATION plane_owner")
@@ -220,34 +283,7 @@ def initialize(
         connection.execute("SET ROLE plane_owner")
         if kind == "management":
             for slot in slots:
-                pair = slot["pair_id"]
-                role = slot["reporting_role"]
-                connection.execute(
-                    "INSERT INTO management.pairs(pair_id,isolation,reporting_role) "
-                    "VALUES (%s,%s,%s)",
-                    (pair, "shared" if pair == "shared" else "isolated", role),
-                )
-                connection.execute(
-                    "INSERT INTO management.login_pairs(login_role,pair_id) VALUES (%s,%s)",
-                    (role, pair),
-                )
-                connection.execute(
-                    sql.SQL("GRANT USAGE ON SCHEMA management TO {}").format(sql.Identifier(role))
-                )
-                connection.execute(
-                    sql.SQL(
-                        "GRANT SELECT ON management.tenants, management.pairs, "
-                        "management.login_pairs TO {}"
-                    ).format(sql.Identifier(role))
-                )
-                connection.execute("SET ROLE plane_reporter")
-                connection.execute(
-                    sql.SQL(
-                        "GRANT EXECUTE ON FUNCTION "
-                        "management.report_control(text,uuid,bigint,text,text) TO {}"
-                    ).format(sql.Identifier(role))
-                )
-                connection.execute("SET ROLE plane_owner")
+                create_pair_records(connection, slot["pair_id"], slot["reporting_role"])
         else:
             for role in roles:
                 connection.execute(
@@ -285,23 +321,7 @@ def initialize(
                 operation,
             ),
         )
-        connection.execute("RESET ROLE")
-        for role, membership in restored_memberships:
-            if membership is None:
-                connection.execute(
-                    sql.SQL("REVOKE {} FROM {}").format(
-                        sql.Identifier(role), sql.Identifier(setup_role)
-                    )
-                )
-            else:
-                connection.execute(
-                    sql.SQL("GRANT {} TO {} WITH INHERIT {}, SET {}").format(
-                        sql.Identifier(role),
-                        sql.Identifier(setup_role),
-                        sql.SQL("TRUE" if membership[0] else "FALSE"),
-                        sql.SQL("TRUE" if membership[1] else "FALSE"),
-                    )
-                )
+        restore_setup_memberships(connection, setup_role, restored_memberships)
 
 
 def main() -> None:
@@ -314,6 +334,7 @@ def main() -> None:
                 json.loads(os.environ.get("PAIR_SLOTS_JSON", "[]")),
                 Path(os.environ.get("SQL_DIRECTORY", "/app/sql")),
                 os.environ.get("PAIR_ID", ""),
+                os.environ.get("ADMISSION_MODE", "on_demand"),
             )
             return
         if mode != "initialize":
@@ -326,6 +347,7 @@ def main() -> None:
             Path(os.environ.get("SQL_DIRECTORY", "/app/sql")),
             os.environ.get("PAIR_ID", ""),
             os.environ.get("INITIALIZATION_ID"),
+            os.environ.get("ADMISSION_MODE", "on_demand"),
         )
     except (psycopg.Error, ValueError, KeyError, OSError) as error:
         logger.error("bootstrap_failed category=%s", type(error).__name__)

@@ -2,6 +2,7 @@ param application string
 param environment string
 param image string
 param provisionerImage string
+param provisionerEnabled bool = true
 param ownershipLabels object = {
   'plane-demo/project': 'radplanes'
 }
@@ -25,7 +26,7 @@ module api '../modules/workload.bicep' = {
   }
 }
 
-module provisioner '../modules/workload.bicep' = {
+module provisioner '../modules/workload.bicep' = if (provisionerEnabled) {
   name: 'management-provisioner'
   params: {
     application: application

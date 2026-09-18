@@ -1260,12 +1260,43 @@ def live_report(configuration, module):
         management.request("GET", "/healthz")
         tenants = {}
         pairs = set()
+        environments = {}
+        if configuration.environment == "azure":
+            from scripts.operations.azure.catalog import discover
+
+            document = discover(configuration.config)
+            if document["foundation"].get("environmentMode") == "prepared-v1":
+                target = configuration.target("management")
+                kube = configuration.kube(target)
+                inventory = kube.exec_json(
+                    "management-api", INVENTORY_PROBE, json.dumps(list(SHOWCASE.values()))
+                )
+                for row in inventory["pairs"]:
+                    pair = row["pair_id"]
+                    retired = (
+                        document["foundation"]
+                        .get("environmentFoundations", {})
+                        .get(pair, {})
+                        .get("state")
+                        == "retired"
+                    )
+                    require(
+                        retired
+                        or f"{pair}-control" in {item["slot"] for item in document["allocations"]},
+                        "unowned_environment_registration",
+                    )
+                    environments[pair] = {"stage": "retired" if retired else row["stage"]}
+                    if row["stage"] == "available" and not retired:
+                        pairs.add(pair)
         for name in SHOWCASE.values():
             status, value, _ = management.request("GET", "/tenants/" + name, statuses=(200, 404))
             if status == 200:
                 module.require(value.get("tenant_id") == name, "tenant_identity_mismatch")
                 pair = value.get("pair_id")
-                module.require(pair in {"shared", "isolated-1"}, "unexpected_pair_assignment")
+                module.require(
+                    pair in {"shared", "isolated-1"} or pair in environments,
+                    "unexpected_pair_assignment",
+                )
                 if value.get("provisioning_status") == "succeeded":
                     pairs.add(pair)
                 tenants[name] = {
@@ -1285,6 +1316,7 @@ def live_report(configuration, module):
             "observed_at": now(),
             "endpoints": endpoints,
             "tenants": tenants,
+            **({"environments": environments} if environments else {}),
         }
     finally:
         apis.close()

@@ -2,6 +2,9 @@ param foundation object
 param allocations array
 param coordinatorPrincipalId string
 param operatorObjectId string
+param managementRadiusPrincipalId string
+param includePlatformOperatorGrants bool = true
+param includeCoordinatorPull bool = true
 
 var networkContributor = '4d97b98b-1d4f-4787-a291-c67834d212e7'
 var dnsContributor = 'b12aa53e-6015-4669-85d0-8515ebb3ae7f'
@@ -65,9 +68,9 @@ resource networkRead 'Microsoft.Authorization/roleAssignments@2022-04-01' = [for
 // Only management Radius needs to join AKS to all allocated node subnets.
 resource recipeClusterNetwork 'Microsoft.Authorization/roleAssignments@2022-04-01' = [for (allocation, i) in allocations: {
   scope: nodeSubnets[i]
-  name: guid(nodeSubnets[i].id, allocations[0].identities.radius.principalId, networkContributor)
+  name: guid(nodeSubnets[i].id, managementRadiusPrincipalId, networkContributor)
   properties: {
-    principalId: allocations[0].identities.radius.principalId
+    principalId: managementRadiusPrincipalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', networkContributor)
   }
@@ -120,11 +123,11 @@ resource redisDnsAccess 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
 }]
 
 var imageReaders = concat(
-  [coordinatorPrincipalId],
+  includeCoordinatorPull ? [coordinatorPrincipalId] : [],
   map(allocations, allocation => allocation.identities.kubelet.principalId),
   map(allocations, allocation => allocation.identities.radius.principalId)
 )
-resource coordinatorRegistryRead 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource coordinatorRegistryRead 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (includeCoordinatorPull) {
   scope: registry
   name: guid(registry.id, coordinatorPrincipalId, reader)
   properties: {
@@ -143,7 +146,7 @@ resource registryPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = [fo
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', registryPolicy.repositoryReaderRoleId)
   }
 }]
-resource registryPublish 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource registryPublish 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (includePlatformOperatorGrants) {
   scope: registry
   name: guid(registry.id, operatorObjectId, registryPolicy.repositoryWriterRoleId)
   properties: {
@@ -155,7 +158,7 @@ resource registryPublish 'Microsoft.Authorization/roleAssignments@2022-04-01' = 
     description: 'Data-plane writes are limited to image repositories and Recipe staging, never canonical Recipes.'
   }
 }
-resource registryImport 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource registryImport 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (includePlatformOperatorGrants) {
   scope: registry
   name: guid(registry.id, operatorObjectId, registryPolicy.dataImporterRoleId)
   properties: {

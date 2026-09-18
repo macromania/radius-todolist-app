@@ -152,9 +152,9 @@ def quota_rows(rows):
     return quotas
 
 
-def owned_cores(clusters, config: DemoConfig, sizes):
+def owned_cores(clusters, config: DemoConfig, sizes, slots=SLOTS):
     credits = {"cores": 0}
-    expected = {f"aks-{config.slot_name(slot)}": slot for slot in SLOTS}
+    expected = {f"aks-{config.slot_name(slot)}": slot for slot in slots}
     seen = set()
     for cluster in clusters:
         if not isinstance(cluster, dict):
@@ -223,7 +223,7 @@ def quota_problem(size, budget, quotas, credits):
 
 
 class Discovery(ComputeDiscovery):
-    def available(self, budget):
+    def available(self, budget, *, slots=SLOTS):
         with ThreadPoolExecutor(max_workers=3) as pool:
             sku_request = pool.submit(
                 self.az,
@@ -262,7 +262,7 @@ class Discovery(ComputeDiscovery):
             if size is not None:
                 sizes[name.lower()] = size
         quotas = quota_rows(quotas)
-        credits = owned_cores(clusters, self.config, sizes)
+        credits = owned_cores(clusters, self.config, sizes, slots)
         eligible = {}
         for name, size in sizes.items():
             problem = quota_problem(size, budget, quotas, credits)
@@ -449,7 +449,8 @@ def main():
             if not isinstance(existing, str) or foundation.get("nodeCount") != budget.nodes:
                 raise NodeSizeError("Existing foundation has missing or different node capacity")
         discovery = Discovery(config)
-        eligible, problems = discovery.available(budget)
+        slots = ("management", *template["parameters"]["childSlots"]["defaultValue"])
+        eligible, problems = discovery.available(budget, slots=slots)
         size = select_size(eligible, problems, config, budget, discovery, existing=existing)
         initialize_config(replace(config, node_vm_size=size.name), args.config, expected=config)
         status("success", f"AKS node size: saved {size.name} in .env")

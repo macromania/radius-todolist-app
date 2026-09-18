@@ -30,7 +30,7 @@ resource cluster 'Microsoft.ContainerService/managedClusters@2025-05-01' = {
   }
   properties: {
     kubernetesVersion: kubernetesVersion
-    dnsPrefix: clusterName
+    dnsPrefix: take(clusterName, 54)
     nodeResourceGroup: nodeResourceGroup
     enableRBAC: true
     disableLocalAccounts: true

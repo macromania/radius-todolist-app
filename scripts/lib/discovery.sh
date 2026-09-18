@@ -7,6 +7,13 @@ demo_slot() {
     shared-data) DEMO_ROLE=data; DEMO_SLOT_INDEX=2 ;;
     isolated-1-control) DEMO_ROLE=control; DEMO_SLOT_INDEX=3 ;;
     isolated-1-data) DEMO_ROLE=data; DEMO_SLOT_INDEX=4 ;;
+    isolated-*-control|isolated-*-data)
+      [[ "${DEMO_ENV:-}" == azure \
+        && "$1" =~ ^isolated-[a-z0-9]([a-z0-9-]{0,10}[a-z0-9])?-(control|data)$ ]] || {
+        demo_error 'Unknown plane slot'; return 1;
+      }
+      DEMO_ROLE="${1##*-}"
+      DEMO_SLOT_INDEX=-1 ;;
     *) demo_error 'Unknown plane slot'; return 1 ;;
   esac
   DEMO_SLOT="$1"
