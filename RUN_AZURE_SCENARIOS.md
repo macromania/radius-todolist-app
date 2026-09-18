@@ -76,8 +76,8 @@ resource-scoped grants.
 Use a clean checkout of committed source. Keep that source revision unchanged
 through build, deployment, and the scenarios.
 
-Use Bash for the commands below. Have Git, `uv`, `jq`, `curl`, Docker Desktop,
-ShellCheck, and the following tools installed:
+Use Bash for the commands below. Have Git, `uv`, `jq`, `curl`, ShellCheck,
+and the following tools installed:
 
 | Tool | Version |
 |---|---|
@@ -89,8 +89,8 @@ ShellCheck, and the following tools installed:
 
 Azure also needs `az`, `helm`, and `kubelogin`. Sign in with an interactive
 Azure user account, not a service principal. The required roles are listed below.
-The workstation must reach the AKS APIs. Docker Desktop is used to inspect built
-images.
+The workstation must reach the AKS APIs. Azure builds and image verification
+run in ACR Tasks; Docker Desktop is not required for this Azure workflow.
 
 ```bash
 uv sync --locked
@@ -282,8 +282,12 @@ access.
 
 ### Build and inspect artifacts
 
-Build publishes Recipes and the API/provisioner images. Inspection checks image
-contents and build provenance, rather than treating a changed tag as proof.
+Build publishes Recipes and the API/provisioner images. A separate Linux ACR
+task verifies each candidate's contents using pinned Docker/Python tooling and
+trusted inspection code, not code from the candidate image. It creates and exports
+a stopped, network-isolated container; the candidate is never started.
+Your workstation uploads the small verification context and retrieves a small
+verification report, rather than downloading the application images.
 
 ```bash
 make build CONFIRM_AZURE=yes
@@ -294,6 +298,61 @@ Require successful inspection before deployment. The API image excludes
 provider tools and deployment credentials. The separate provisioner image has
 those administrative tools. Recipe publication checks registry permissions;
 do not overwrite a tag or bypass an inspection failure to continue.
+
+Build stores the ACR refresh token in a private, temporary Docker-format
+configuration using its `identitytoken` field. Radius uses this configuration
+to exchange the refresh token for repository-scoped access tokens.
+Build does not write registry credentials to the workstation's credential
+helper or permanent Docker configuration. Temporary credentials are removed
+when the command ends. Remote verification uses the ACR task's caller-scoped
+registry access; workstation credentials are not uploaded in its context.
+
+Verification reports are bound to the candidate digest, selected source, verifier
+code, and authenticated ACR run. ARM-owned verification receipts allow reuse on
+retry. `make inspect-build` revalidates that recorded evidence without submitting
+a task; missing or stale evidence requires a confirmed `make build`. A failed or
+unidentifiable verification is not silently resubmitted or treated as success.
+Only a verified report permits image promotion and final build-provenance recording.
+Existing build proofs remain bound to the same immutable image digest, ACR build
+run, and source fingerprint. Remote reports retain their own filesystem
+measurements; raw Docker-export metadata hashes are not compared across Docker
+Desktop and the ACR build agent.
+
+`image_contains_operator_state` reports an escaped path inside the candidate,
+never its contents. In particular, tool-version checks must not leave Azure CLI
+profiles in the image. The provisioner Dockerfile uses a disposable
+`AZURE_CONFIG_DIR` for its version probe. Existing images keep their original
+contents and must be rebuilt from a new source revision to incorporate that fix.
+
+Image builds run in the foreground with their complete native build/push logs.
+After completion, the command matches its unique staging-image tag against
+authenticated ACR run history and reads that exact run again before inspection.
+It does not trust the latest run or a mutable tag's current digest as build
+evidence.
+
+Run one build command per deployment at a time. Before submission, build writes
+a source-bound pending receipt in the registry's ARM tags. Retrying the same
+revision reuses that receipt and any matching completed run, then resumes image
+inspection, promotion, locking, and the final provenance record. It does not
+queue another build merely because a local command stopped. An ambiguous or
+still-unidentifiable submission stops with its receipt intact rather than
+guessing or resubmitting. Pending receipts are not completed build proofs.
+
+For an older run without a receipt, explicitly select recovery:
+
+```bash
+make build CONFIRM_AZURE=yes ARGS='--recover-build api=RUN_ID'
+```
+
+Set `DEMO_REVISION` in `.env` to that run's source commit first if it differs from
+`HEAD`. Recovery checks the run's revision-tagged output, creation time, platform,
+and recorded Dockerfile instructions against the selected committed source.
+The complete image inspection still runs before promotion or provenance
+recording. Unsupported or mismatching logs, source, or image contents stop
+recovery. Existing verified proofs and different canonical image digests are
+never replaced. This explicit legacy recovery path is limited to API builds;
+new API and provisioner builds both use resumable receipts. Recovery cannot be
+combined with `--inspect` or `--recipes-only`.
 
 ### Deploy management and wait for completion
 

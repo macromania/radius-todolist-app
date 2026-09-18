@@ -79,6 +79,11 @@ Deployment access and cleanup do not depend on workstation `.state` files.
 Source checks may create disposable `.state/check` files and Bicep extensions.
 The services still need their databases, Secrets, and persistent volumes.
 
+Azure image builds and verification run in ACR Tasks. The workstation only
+prepares trusted inputs and checks small, digest-bound reports; it does not pull
+the application images or require Docker Desktop for the Azure workflow.
+The local workflow still uses Docker Desktop.
+
 ## Checks
 
 Install the tools listed in your chosen guide. On macOS, complete any Command

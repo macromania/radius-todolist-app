@@ -12,14 +12,74 @@ azure_json() {
   demo_run "$label" az "$@" --subscription "$AZURE_SUBSCRIPTION_ID" --output json
 }
 
+azure_registry_credentials() (
+  umask 077
+  [[ "$DOCKER_CONFIG" == "$AZURE_WORKSPACE/docker" && -d "$DOCKER_CONFIG" \
+    && ! -L "$DOCKER_CONFIG" && ! -e "$DOCKER_CONFIG/config.json" \
+    && ! -L "$DOCKER_CONFIG/config.json" ]] || {
+    demo_error 'Registry credentials require a fresh private Docker configuration'; exit 1;
+  }
+  demo_private_file "$AZURE_WORKSPACE/registry-token.json" || exit
+  jq -e --arg host "$HOST" '
+    .loginServer == $host and
+    (.accessToken | type == "string" and test("^[A-Za-z0-9._~+/=-]+$"))
+  ' "$AZURE_WORKSPACE/registry-token.json" >/dev/null || {
+    demo_error 'Registry authentication response is invalid'; exit 1;
+  }
+  # ACR exposes a refresh token. identitytoken makes Radius/ORAS use OAuth2 POST, not Basic GET.
+  set -C
+  jq --arg host "$HOST" '{auths: {($host): {identitytoken: .accessToken}}}' \
+    "$AZURE_WORKSPACE/registry-token.json" > "$DOCKER_CONFIG/config.json" || exit
+  chmod 600 "$DOCKER_CONFIG/config.json" || exit
+  demo_status success 'Registry: private OAuth refresh credentials prepared'
+)
+
+azure_pull_blob() {
+  local repository="$1" digest="$2" destination="$3" limit="$4"
+  [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ && "$limit" =~ ^[0-9]+$ ]] || {
+    demo_error 'Invalid registry blob request'; return 1;
+  }
+  jq -r --arg host "$HOST" --arg scope "repository:$repository:pull" '
+    ["grant_type=refresh_token", ("service=" + $host), ("scope=" + $scope),
+     ("refresh_token=" + .accessToken)][] | "data-urlencode = " + @json
+  ' "$AZURE_WORKSPACE/registry-token.json" > "$AZURE_WORKSPACE/token-request.curl" || return
+  curl --fail --silent --show-error --max-time 30 --proto '=https' \
+    --config "$AZURE_WORKSPACE/token-request.curl" "https://$HOST/oauth2/token" \
+    --output "$AZURE_WORKSPACE/pull-token.json" || return
+  jq -er '
+    .access_token | select(type == "string" and test("^[A-Za-z0-9._~+/=-]+$")) |
+    "header = " + (("Authorization: Bearer " + .) | @json)
+  ' "$AZURE_WORKSPACE/pull-token.json" > "$AZURE_WORKSPACE/pull.curl" || return
+  curl --fail --silent --show-error --max-time 60 --max-filesize "$limit" \
+    --proto '=https' --proto-redir '=https' --location \
+    --config "$AZURE_WORKSPACE/pull.curl" "https://$HOST/v2/$repository/blobs/$digest" \
+    --output "$destination"
+}
+
+azure_merge_registry_receipt() {
+  local key="$1" value="$2" expected="$3"
+  azure_registry || return
+  jq -e --arg key "$key" --arg value "$value" --argjson expected "$expected" '
+    (.tags[$key] == $expected or .tags[$key] == $value) and
+    (.tags[$key] != null or (.tags | length) < 50)
+  ' "$AZURE_WORKSPACE/registry.json" >/dev/null || {
+    demo_error 'Registry receipt changed or tag capacity is exhausted'; return 1;
+  }
+  if ! jq -e --arg key "$key" --arg value "$value" '.tags[$key] == $value' \
+    "$AZURE_WORKSPACE/registry.json" >/dev/null; then
+    azure_json tag update --resource-id \
+      "$PLATFORM_SCOPE/providers/Microsoft.ContainerRegistry/registries/$REGISTRY" \
+      --operation Merge --tags "$key=$value" > "$AZURE_WORKSPACE/receipt-update.json" || return
+    azure_registry || return
+  fi
+  jq -e --arg key "$key" --arg value "$value" '.tags[$key] == $value' \
+    "$AZURE_WORKSPACE/registry.json" >/dev/null || {
+    demo_error 'Registry receipt could not be verified'; return 1;
+  }
+}
+
 azure_cleanup() {
   local status=$?
-  if [[ -n "${INSPECTION_CONTAINER:-}" ]]; then
-    if ! azure_remove_inspection_container; then
-      printf 'ERROR: Temporary inspection container was not removed: %s\n' "$INSPECTION_CONTAINER" >&2
-      status=1
-    fi
-  fi
   if [[ -n "${AZURE_WORKSPACE:-}" ]]; then
     [[ "$AZURE_WORKSPACE" == "$ROOT"/.azure-stage.* && -d "$AZURE_WORKSPACE" \
       && ! -L "$AZURE_WORKSPACE" \

@@ -20,7 +20,7 @@ COMPILER = "Bicep CLI version 0.42.1 (test)"
 NODE_SIZE = "Standard_D4as_v7"
 TOOLS = ("az", "rad", "docker", "curl", "git", "bicep", "kubectl", "kubelogin")
 FAKE = r"""
-import hashlib,importlib.util,io,json,marshal,os,re,stat,sys,tarfile
+import base64,gzip,hashlib,importlib.util,io,json,marshal,os,re,stat,sys,tarfile
 from pathlib import Path
 from uuid import NAMESPACE_DNS, uuid5
 root=Path(os.environ["FAKE_ROOT"])
@@ -75,6 +75,13 @@ def save():
     state_path.write_text(json.dumps(state))
 def emit(value):
     print(json.dumps(value))
+def registry_credentials(directory):
+    config=Path(directory)/"config.json"
+    if config.is_symlink() or stat.S_IMODE(config.stat().st_mode)!=0o600:
+        sys.exit("registry credentials must remain private")
+    expected={"auths":{host:{"identitytoken":"synthetic-registry-token"}}}
+    if json.loads(config.read_text())!=expected:
+        sys.exit("registry credentials must use an explicit OAuth refresh token")
 def compile_bytes(name):
     return json.dumps({
         "resources":[],"metadata":{"source":name},"contentVersion":"1.0.0.0",
@@ -148,7 +155,8 @@ def foundation():
              "externalVaultResourceGroup":vault_group if external else ""}.items()},
         "outputs":{key:{"type":"Object","value":value} for key,value in values.items()}}}
 entry={"tool":tool,"args":args,"cwd":os.getcwd(),"docker_config":os.environ.get("DOCKER_CONFIG"),
-       "home":os.environ.get("HOME"),"azure_config_dir":os.environ.get("AZURE_CONFIG_DIR")}
+       "home":os.environ.get("HOME"),"azure_config_dir":os.environ.get("AZURE_CONFIG_DIR"),
+       "remote_verification":os.environ.get("FAKE_REMOTE_VERIFICATION")=="yes"}
 if "--config" in args and tool=="curl":
     file=Path(arg("--config"))
     entry["config_mode"]=stat.S_IMODE(file.stat().st_mode)
@@ -183,6 +191,7 @@ elif tool=="git":
         with tarfile.open(fileobj=sys.stdout.buffer,mode="w|") as archive:
             for path in sorted((root/"committed").iterdir()):
                 archive.add(path,arcname=path.name)
+    elif command=="show": print(spec.get("commit_time",1700000000))
     else: sys.exit("unexpected git command")
 elif tool=="az":
     if args[:2]==["vm","list-skus"]:
@@ -402,6 +411,53 @@ elif tool=="az":
         record=next(value for key,value in state["artifacts"].items()
                     if key.startswith(repository+":") and value["digest"]==digest)
         emit(record["manifest"])
+    elif args[:2]==["acr","run"]:
+        from unittest.mock import patch
+        context=Path.cwd()
+        request=json.loads((context/"request.json").read_text())
+        identifier="vi"+str(len(state.setdefault("runs",{}))+1)
+        state["runs"][identifier]={"runId":identifier,"status":"Running","runType":"QuickRun",
+            "platform":{"os":"linux","architecture":"amd64"},"outputImages":[]}
+        save()
+        sys.path.insert(0,str(context/"verifier"))
+        import remote_inspection
+        remote_home=root/"remote-home"
+        docker_config=remote_home/".docker"
+        docker_config.mkdir(parents=True,exist_ok=True)
+        (docker_config/"config.json").write_text(json.dumps(
+            {"auths":{host:{"identitytoken":"synthetic-registry-token"}}}))
+        (docker_config/"config.json").chmod(0o600)
+        os.environ.update(ACR_RUN_ID=identifier,FAKE_REMOTE_VERIFICATION="yes",
+                          DOCKER_CONFIG=str(docker_config),HOME=str(remote_home))
+        output=context/"result/inspection.json"
+        try:
+            with patch.object(remote_inspection.platform,"system",return_value="Linux"), \
+                 patch.object(remote_inspection.platform,"machine",return_value="x86_64"), \
+                 patch.object(remote_inspection.urllib.request,"urlopen",
+                              side_effect=lambda *a,**kw:(root/"kubelogin.zip").open("rb")):
+                remote_inspection.execute(request,context/"source.tar",root/"bin/docker",output)
+        except (ValueError,OSError,remote_inspection.subprocess.CalledProcessError) as error:
+            state=json.loads(state_path.read_text())
+            state["runs"][identifier]["status"]="Failed";save()
+            print("REMOTE VERIFICATION FAILED: "+str(error),file=sys.stderr)
+            sys.exit(1)
+        state=json.loads(state_path.read_text())
+        report=output.read_bytes()
+        archive=io.BytesIO()
+        with tarfile.open(fileobj=archive,mode="w") as tar:
+            member=tarfile.TarInfo("inspection.json");member.size=len(report)
+            tar.addfile(member,io.BytesIO(report))
+        blob=gzip.compress(archive.getvalue())
+        layer="sha256:"+hashlib.sha256(blob).hexdigest()
+        manifest={"schemaVersion":2,"layers":[{"digest":layer,"size":len(blob),
+            "mediaType":"application/vnd.docker.image.rootfs.diff.tar.gzip"}]}
+        digest="sha256:"+hashlib.sha256(json.dumps(manifest).encode()).hexdigest()
+        repository="plane-"+request["component"];tag="verify-"+request["context_id"]
+        state["artifacts"][repository+":"+tag]={"digest":digest,"manifest":manifest,
+            "blob_base64":base64.b64encode(blob).decode(),"locked":False}
+        state["runs"][identifier].update(status="Succeeded",outputImages=[{
+            "registry":host,"repository":repository,"tag":tag,"digest":digest}])
+        save();print("VISIBLE REMOTE VERIFICATION")
     elif args[:2]==["acr","build"]:
         key=arg("--image")
         if arg("--source-acr-auth-id")!="[caller]": sys.exit("ABAC requires caller authentication")
@@ -412,15 +468,34 @@ elif tool=="az":
         state.setdefault("manifests",{})[digest]=dict(state["artifacts"][key])
         run_id="ca"+str(len(state.setdefault("runs",{}))+1)
         repository,tag=key.split(":")
-        state["runs"][run_id]={"runId":run_id,"status":"Succeeded","runType":"QuickBuild",
+        state["runs"][run_id]={"runId":run_id,"status":"Succeeded","runType":"QuickRun",
+            "createTime":"2026-09-17T11:00:00+00:00",
             "platform":{"os":"linux","architecture":"amd64"},
             "outputImages":[{"registry":host,"repository":repository,"tag":tag,"digest":digest}]}
+        lines=Path(arg("--file")).read_text().replace("\\\n"," ").splitlines()
+        steps=[line.strip() for line in lines if line.strip() and not line.strip().startswith("#")]
+        state.setdefault("run_logs",{})[run_id]="\n".join(
+            f"Step {i}/{len(steps)} : {step}" for i,step in enumerate(steps,1))
+        if mode=="failed-run": state["runs"][run_id]["status"]="Failed"
         if mode=="staging-race": state["artifacts"][key]["digest"]="sha256:"+"f"*64
         save()
-        emit({"runId":run_id,"status":"Queued"})
+        print("WARNING: Queued a build with ID: "+run_id,file=sys.stderr)
+        if "--no-wait" not in args:
+            print("VISIBLE BUILD "+key)
+            print("VISIBLE PUSH "+digest)
+            if mode=="failed-run": sys.exit("synthetic native build failure")
+            if mode=="lost-build-result": sys.exit("synthetic log stream interruption")
+    elif args[:3]==["acr","task","list-runs"]:
+        if "--image" in args: sys.exit("run matching must not depend on mutable image tags")
+        values=list(state.get("runs",{}).values())
+        if mode=="missing-build-run": values=[]
+        if mode=="ambiguous-build-run" and values:
+            values.append({**values[-1],"runId":"duplicate"})
+        emit(values)
     elif args[:3]==["acr","task","logs"]:
         run=state["runs"][arg("--run-id")]
         image=run["outputImages"][0]
+        print(state.get("run_logs",{}).get(arg("--run-id"),""))
         print("VISIBLE BUILD "+image["repository"]+":"+image["tag"])
         print("VISIBLE PUSH "+image["digest"])
     elif args[:3]==["acr","task","show-run"]:
@@ -464,6 +539,7 @@ elif tool=="rad":
         Path(arg("--target")).write_bytes(outer.getvalue())
         print("VISIBLE EXTENSION")
     elif "publish" in args:
+        registry_credentials(os.environ["DOCKER_CONFIG"])
         key=arg("--target").split("/",1)[1]
         if not writer_allows(key.split(":")[0],data_prefix+"content/write"):
             sys.exit("ABAC denied canonical Recipe push")
@@ -495,18 +571,16 @@ elif tool=="kubectl":
     elif "annotate" in args or "patch" in args: print("updated")
     else: sys.exit("unexpected Kubernetes operation")
 elif tool=="docker":
+    if os.environ.get("FAKE_REMOTE_VERIFICATION")!="yes":
+        sys.exit("Azure verification must not invoke workstation Docker")
     native=list(args)
     while native and native[0] in ("--host","--config"): native=native[2:]
     if native[:3]==["context","inspect","desktop-linux"]:
         emit("unix:///synthetic/docker.sock")
     elif native[:1]==["info"]:
         emit({"OSType":"linux","OperatingSystem":"Docker Desktop"})
-    elif native[:1]==["login"]:
-        if sys.stdin.read()!="synthetic-registry-token": sys.exit("wrong registry credential")
-        config=Path(arg("--config")); config.mkdir(exist_ok=True)
-        (config/"config.json").write_text('{"auths":{}}')
-        print("VISIBLE LOGIN")
     elif native[:1]==["pull"]:
+        registry_credentials(arg("--config"))
         reference=native[-1]
         image_id="sha256:"+hashlib.sha256(reference.encode()).hexdigest()
         component="api" if "/plane-api@" in reference else "provisioner"
@@ -610,7 +684,12 @@ elif tool=="curl":
         digest=url.rsplit("/",1)[1]
         record=next(value for value in state["artifacts"].values()
                     if value.get("manifest",{}).get("layers",[{}])[0].get("digest")==digest)
-        Path(arg("--output")).write_text(record["blob"])
+        if "blob_base64" in record:
+            blob=base64.b64decode(record["blob_base64"])
+            if mode=="remote-report-corrupt": blob=b"corrupt report"
+            Path(arg("--output")).write_bytes(blob)
+        else:
+            Path(arg("--output")).write_text(record["blob"])
     else: sys.exit("unexpected HTTP request")
 else: sys.exit("unexpected native tool")
 """
@@ -632,6 +711,7 @@ def checkout(tmp_path):
         "scripts/operations/azure/build.sh",
         "scripts/operations/azure/images.shlib",
         "scripts/operations/azure/image_inspection.py",
+        "scripts/operations/azure/remote_inspection.py",
         "scripts/operations/azure/build_provenance.py",
         "scripts/operations/azure/provenance.shlib",
         "scripts/operations/azure/registry-policy.json",
@@ -784,6 +864,22 @@ def image_imports(root):
         for call in selected(root, "az", ["acr", "import"])
         if call["args"][call["args"].index("--image") + 1].startswith("plane-")
     ]
+
+
+def final_proof_writes(root):
+    return [
+        call
+        for call in selected(root, "az", ["tag", "update"])
+        if "=v2:" in call["args"][call["args"].index("--tags") + 1]
+    ]
+
+
+def candidate_runs(state):
+    return {
+        name: run
+        for name, run in state["runs"].items()
+        if any(image.get("tag", "").startswith("build-") for image in run.get("outputImages", []))
+    }
 
 
 def seed_verified_build(root):
@@ -1330,7 +1426,8 @@ def test_recipe_publication_verifies_real_content_without_local_digest_inventory
     assert len(selected(checkout, "az", ["acr", "manifest", "show"])) == (4 if mode else 8)
     assert not selected(checkout, "az", ["acr", "repository", "update"])
     assert not selected(checkout, "az", ["acr", "build"])
-    assert "VISIBLE LOGIN" in result.stderr
+    assert "private OAuth refresh credentials prepared" in result.stderr
+    assert not any(call["tool"] == "docker" and "login" in call["args"] for call in calls(checkout))
     if not mode:
         assert "VISIBLE PUBLISH" in result.stderr
         assert all(
@@ -1418,6 +1515,8 @@ def test_images_build_selected_commit_and_inspect_before_worker_base_or_promotio
         assert build["args"][build["args"].index("--platform") + 1] == "linux/amd64"
         assert f"SOURCE_REVISION={REVISION}" in build["args"]
         assert build["args"][build["args"].index("--source-acr-auth-id") + 1] == "[caller]"
+        assert "--no-wait" not in build["args"] and "--no-logs" not in build["args"]
+        assert build["args"][build["args"].index("--output") + 1] == "none"
         assert build["source_value"] == "committed-source\n"
         assert build["env_in_context"] is False
         assert build["source_mode"] == 0o644
@@ -1436,6 +1535,10 @@ def test_images_build_selected_commit_and_inspect_before_worker_base_or_promotio
         call for call in calls(checkout) if call["tool"] == "docker" and "rm" in call["args"]
     ]
     assert len(removals) == 2
+    assert len(selected(checkout, "az", ["acr", "task", "list-runs"])) == 4
+    assert not selected(checkout, "az", ["acr", "task", "logs"])
+    assert len(selected(checkout, "az", ["acr", "run"])) == 2
+    assert all(call["remote_verification"] for call in calls(checkout) if call["tool"] == "docker")
     assert calls(checkout).index(removals[0]) < calls(checkout).index(builds[1])
     imports = image_imports(checkout)
     assert len(imports) == 2 and all("--force" not in call["args"] for call in imports)
@@ -1469,6 +1572,8 @@ def test_read_only_inspect_needs_no_confirmation_and_returns_complete_descriptor
         in (descriptor["inspections"]["provisioner"]["source_hashes"])
     )
     assert_inspection_is_read_only(checkout)
+    assert not selected(checkout, "az", ["acr", "run"])
+    assert not any(call["tool"] == "docker" for call in calls(checkout))
     (archive,) = selected(checkout, "git", ["-C", str(checkout), "archive"])
     assert REVISION in archive["args"]
     assert not json.loads((checkout / "fake-state.json").read_text())["containers"]
@@ -1484,6 +1589,26 @@ def test_inspect_returns_the_same_verified_descriptor_as_build(checkout):
     assert_inspection_is_read_only(checkout)
 
 
+@pytest.mark.parametrize("fault", ["missing", "pending", "corrupt"])
+def test_read_only_inspection_refuses_missing_or_corrupt_remote_evidence(checkout, fault):
+    seed_verified_build(checkout)
+    if fault in {"missing", "pending"}:
+        state_path = checkout / "fake-state.json"
+        state = json.loads(state_path.read_text())
+        key = "plane-demo-check-api-" + REVISION
+        previous = state["arm_tags"].pop(key)
+        if fault == "pending":
+            state["arm_tags"][key] = "pending-v1:" + previous.split(":")[1]
+        state_path.write_text(json.dumps(state))
+    else:
+        configure(checkout, mode="remote-report-corrupt")
+    result = run(checkout, "build", "--inspect", confirmed=False)
+    assert result.returncode != 0 and not result.stdout
+    assert not selected(checkout, "az", ["acr", "run"])
+    assert not selected(checkout, "az", ["tag", "update"])
+    assert not any(call["tool"] == "docker" for call in calls(checkout))
+
+
 @pytest.mark.parametrize(
     ("option", "value"),
     [
@@ -1493,7 +1618,7 @@ def test_inspect_returns_the_same_verified_descriptor_as_build(checkout):
         ("missing_image", "provisioner"),
         ("unlocked", "plane-api"),
         ("mode", "wrong-recipe-content"),
-        ("mode", "changed-api"),
+        ("mode", "remote-report-corrupt"),
         ("mode", "old-certificate-names"),
         ("mode", "pending-vault-endpoint"),
     ],
@@ -1588,7 +1713,7 @@ def test_runtime_uid_cannot_accept_inaccessible_image_source(checkout, mode):
     assert "image_runtime_" in result.stderr
     assert len(selected(checkout, "az", ["acr", "build"])) == 1
     assert not image_imports(checkout)
-    assert not selected(checkout, "az", ["tag", "update"])
+    assert not final_proof_writes(checkout)
     assert not json.loads((checkout / "fake-state.json").read_text())["containers"]
 
 
@@ -1608,15 +1733,14 @@ def test_original_umask_extraction_failure_is_rejected_by_actual_image_gate(chec
     assert build["source_directory_mode"] == 0o700
     assert "image_runtime_" in result.stderr
     assert not image_imports(checkout)
-    assert not selected(checkout, "az", ["tag", "update"])
+    assert not final_proof_writes(checkout)
 
 
 def test_foreign_container_is_neither_exported_nor_removed(checkout):
-    seed_verified_build(checkout)
     configure(checkout, mode="foreign-container")
     result = run(checkout, "build")
     assert result.returncode != 0
-    assert "retained" in result.stderr
+    assert "remote_inspection_container_owner_mismatch" in result.stderr
     for command in ("export", "rm"):
         assert not any(
             call["tool"] == "docker" and command in call["args"] for call in calls(checkout)
@@ -1649,20 +1773,35 @@ def test_preexisting_images_without_arm_provenance_are_never_attested(checkout, 
     "mode",
     [
         "poison-pyc",
-        "poison-interpreter",
         "wrong-kubelogin",
         "missing-kubelogin",
         "nonexecutable-kubelogin",
     ],
 )
-def test_poisoned_executable_candidates_fail_the_actual_inspect_gate(checkout, mode):
+def test_remote_reinspection_rejects_poisoned_executable_candidates(checkout, mode):
     seed_verified_build(checkout)
+    verifier = checkout / "scripts/operations/azure/remote_inspection.py"
+    verifier.write_text(verifier.read_text() + "\n")
     configure(checkout, mode=mode)
-    result = run(checkout, "build", "--inspect", confirmed=False)
+    result = run(checkout, "build")
     assert result.returncode != 0 and not result.stdout
-    assert_inspection_is_read_only(checkout)
-    assert not selected(checkout, "az", ["tag", "update"])
+    assert not selected(checkout, "az", ["acr", "build"])
+    assert not final_proof_writes(checkout)
+    assert all(call["remote_verification"] for call in calls(checkout) if call["tool"] == "docker")
     assert not json.loads((checkout / "fake-state.json").read_text())["containers"]
+
+
+def test_remote_evidence_cannot_authorize_a_different_canonical_image(checkout):
+    seed_verified_build(checkout)
+    state_path = checkout / "fake-state.json"
+    state = json.loads(state_path.read_text())
+    state["artifacts"]["plane-api:" + REVISION]["digest"] = "sha256:" + "f" * 64
+    state_path.write_text(json.dumps(state))
+    result = run(checkout, "build", "--inspect", confirmed=False)
+    assert result.returncode != 0
+    assert "arm_build_provenance_missing_or_mismatched" in result.stderr
+    assert not selected(checkout, "az", ["acr", "run"])
+    assert not selected(checkout, "az", ["tag", "update"])
 
 
 def test_fresh_digest_is_taken_from_authenticated_run_not_staging_tag(checkout):
@@ -1671,7 +1810,9 @@ def test_fresh_digest_is_taken_from_authenticated_run_not_staging_tag(checkout):
     assert result.returncode == 0, result.stderr
     descriptor = json.loads(result.stdout)
     state = json.loads((checkout / "fake-state.json").read_text())
-    for component, build_run in zip(("api", "provisioner"), state["runs"].values(), strict=True):
+    for component, build_run in zip(
+        ("api", "provisioner"), candidate_runs(state).values(), strict=True
+    ):
         assert descriptor["images"][component].endswith(build_run["outputImages"][0]["digest"])
     shows = selected(checkout, "az", ["acr", "repository", "show"])
     assert not any(
@@ -1680,16 +1821,100 @@ def test_fresh_digest_is_taken_from_authenticated_run_not_staging_tag(checkout):
         )
         for call in shows
     )
-    assert len(selected(checkout, "az", ["tag", "update"])) == 2
+    assert len(final_proof_writes(checkout)) == 2
 
 
 def test_failed_run_cannot_create_arm_proof_or_worker_base(checkout):
     configure(checkout, mode="failed-run")
     result = run(checkout, "build")
     assert result.returncode != 0
-    assert not selected(checkout, "az", ["tag", "update"])
+    assert not final_proof_writes(checkout)
     assert not image_imports(checkout)
     assert len(selected(checkout, "az", ["acr", "build"])) == 1
+
+
+@pytest.mark.parametrize("failure", ["lost-build-result", "lock-command-failure"])
+def test_build_retry_resumes_the_same_api_run_after_interruption(checkout, failure):
+    configure(
+        checkout,
+        mode=failure,
+        fail=["az", "acr", "repository", "update"] if failure == "lock-command-failure" else None,
+    )
+    first = run(checkout, "build")
+    assert first.returncode != 0
+    initial = json.loads((checkout / "fake-state.json").read_text())
+    assert len(candidate_runs(initial)) == 1
+    (api_run,) = candidate_runs(initial).values()
+    assert any(value.startswith("pending-v1:") for value in initial["arm_tags"].values())
+    configure(checkout)
+    (checkout / "calls.jsonl").write_text("")
+    resumed = run(checkout, "build")
+    assert resumed.returncode == 0, resumed.stderr
+    builds = selected(checkout, "az", ["acr", "build"])
+    assert (
+        len(builds) == 1
+        and "provisioner" in builds[0]["args"][builds[0]["args"].index("--image") + 1]
+    )
+    state = json.loads((checkout / "fake-state.json").read_text())
+    assert len(candidate_runs(state)) == 2
+    assert json.loads(resumed.stdout)["images"]["api"].endswith(
+        api_run["outputImages"][0]["digest"]
+    )
+    assert all(
+        value.startswith("v2:")
+        for key, value in state["arm_tags"].items()
+        if key.startswith("plane-demo-proof-")
+    )
+    (checkout / "calls.jsonl").write_text("")
+    repeated = run(checkout, "build")
+    assert repeated.returncode == 0, repeated.stderr
+    assert not selected(checkout, "az", ["acr", "build"])
+    assert not selected(checkout, "az", ["acr", "run"])
+    assert not image_imports(checkout) and not selected(checkout, "az", ["tag", "update"])
+
+
+def test_ambiguous_submission_is_not_queued_again_on_retry(checkout):
+    configure(checkout, mode="missing-build-run")
+    assert run(checkout, "build").returncode != 0
+    before = json.loads((checkout / "fake-state.json").read_text())
+    (checkout / "calls.jsonl").write_text("")
+    retried = run(checkout, "build")
+    assert retried.returncode != 0 and "No second build was queued" in retried.stderr
+    assert not selected(checkout, "az", ["acr", "build"])
+    assert json.loads((checkout / "fake-state.json").read_text())["runs"] == before["runs"]
+
+
+def test_explicit_recovery_verifies_an_unrecorded_api_run_without_rebuilding(checkout):
+    previous = seed_verified_build(checkout)
+    state_path = checkout / "fake-state.json"
+    state = json.loads(state_path.read_text())
+    key = "plane-demo-proof-api-" + REVISION
+    run_id = state["arm_tags"].pop(key).split(":")[1]
+    state["artifacts"].pop("plane-api:" + REVISION)
+    state_path.write_text(json.dumps(state))
+    recovered = run(checkout, "build", "--recover-build", f"api={run_id}")
+    assert recovered.returncode == 0, recovered.stderr
+    assert json.loads(recovered.stdout)["images"] == previous["images"]
+    assert not selected(checkout, "az", ["acr", "build"])
+    assert len(image_imports(checkout)) == 1
+    assert any(
+        "=recovery-v1:" in call["args"][call["args"].index("--tags") + 1]
+        for call in selected(checkout, "az", ["tag", "update"])
+    )
+
+
+def test_explicit_recovery_rejects_different_build_instructions(checkout):
+    seed_verified_build(checkout)
+    state_path = checkout / "fake-state.json"
+    state = json.loads(state_path.read_text())
+    run_id = state["arm_tags"].pop("plane-demo-proof-api-" + REVISION).split(":")[1]
+    state["artifacts"].pop("plane-api:" + REVISION)
+    state["run_logs"][run_id] += "\nStep 21/21 : RUN replace-python\n"
+    state_path.write_text(json.dumps(state))
+    result = run(checkout, "build", "--recover-build", f"api={run_id}")
+    assert result.returncode != 0 and "recovery_build_instructions_mismatch" in result.stderr
+    assert not selected(checkout, "az", ["acr", "build"])
+    assert not selected(checkout, "az", ["tag", "update"]) and not image_imports(checkout)
 
 
 def test_recipe_canonical_race_is_no_force_and_never_overwrites(checkout):

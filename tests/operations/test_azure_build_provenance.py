@@ -1,3 +1,4 @@
+import copy
 import importlib.util
 from pathlib import Path
 
@@ -23,7 +24,7 @@ def record(tmp_path):
     run = {
         "runId": "ca1",
         "status": "Succeeded",
-        "runType": "QuickBuild",
+        "runType": "QuickRun",
         "platform": {"os": "linux", "architecture": "amd64"},
         "outputImages": [
             {
@@ -60,6 +61,104 @@ def test_run_platform_accepts_service_enum_casing(record):
         )["digest"]
         == DIGEST
     )
+
+
+@pytest.mark.parametrize("run_type", ["QuickBuild", "QuickRun"])
+def test_supported_docker_build_run_types(record, run_type):
+    _, fingerprint, run, registry = record
+    run["runType"] = run_type
+    assert (
+        proof.verify_record(
+            registry, run, "acrdemo.azurecr.io", "api", REVISION, fingerprint, DIGEST
+        )["run_id"]
+        == "ca1"
+    )
+
+
+@pytest.mark.parametrize("run_type", ["AutoBuild", "AutoRun", "TaskRun", None])
+def test_other_run_types_are_not_build_provenance(record, run_type):
+    _, fingerprint, run, registry = record
+    run["runType"] = run_type
+    with pytest.raises(proof.ProvenanceError, match="untrusted_acr_build_run"):
+        proof.verify_record(
+            registry, run, "acrdemo.azurecr.io", "api", REVISION, fingerprint, DIGEST
+        )
+
+
+def test_run_resolution_uses_exact_tag_not_latest_run_or_digest(record):
+    _, _, run, _ = record
+    other = copy.deepcopy(run)
+    other["runId"] = "newer"
+    other["outputImages"][0]["tag"] = "build-" + REVISION + "-" + "2" * 32
+    staging = "plane-api:" + run["outputImages"][0]["tag"]
+    assert proof.resolve_run([other, run], "acrdemo.azurecr.io", "api", REVISION, staging) == run
+    for runs in ([], [other], [run, copy.deepcopy(run)]):
+        with pytest.raises(proof.ProvenanceError, match="missing_or_ambiguous"):
+            proof.resolve_run(runs, "acrdemo.azurecr.io", "api", REVISION, staging)
+
+
+def test_pending_receipt_is_source_bound_and_not_a_completed_proof(record):
+    _, fingerprint, _, registry = record
+    pending = proof.intent_record("api", REVISION, fingerprint, "1" * 32)
+    registry["tags"][pending["key"]] = pending["value"]
+    assert proof.build_state(registry, "api", REVISION, fingerprint) == pending
+    with pytest.raises(proof.ProvenanceError, match="pending_build_context"):
+        proof.build_state(registry, "api", REVISION, "f" * 64)
+    with pytest.raises(proof.ProvenanceError, match="arm_build_provenance"):
+        proof.record_parts(registry, "api", REVISION, fingerprint, DIGEST)
+
+
+def test_recovery_requires_matching_build_instructions_and_source_time(record):
+    source, _, run, _ = record
+    dockerfile = source / "images/api/Dockerfile"
+    dockerfile.parent.mkdir(parents=True)
+    dockerfile.write_text(
+        "FROM synthetic@sha256:" + "a" * 64 + "\nRUN echo \\\n  'synthetic value'\n"
+    )
+    run["createTime"] = "2026-09-17T11:00:00+00:00"
+    fingerprint = proof.source_fingerprint(source, "api", REVISION)
+    logs = f"Step 1/2 : FROM synthetic@sha256:{'a' * 64}\nStep 2/2 : RUN echo 'synthetic value'\n"
+    recovered = proof.recovery_record(
+        source, run, logs, "acrdemo.azurecr.io", "api", REVISION, fingerprint, "", 1700000000
+    )
+    assert recovered["origin"] == "recovery-v1" and recovered["runId"] == "ca1"
+    for invalid in (
+        logs.replace("synthetic value", "different"),
+        logs.replace("'synthetic value'", '"synthetic value"'),
+        logs + "Step 3/3 : RUN evil\n",
+    ):
+        with pytest.raises(proof.ProvenanceError, match="recovery_build_instructions"):
+            proof.recovery_record(
+                source,
+                run,
+                invalid,
+                "acrdemo.azurecr.io",
+                "api",
+                REVISION,
+                fingerprint,
+                "",
+                1700000000,
+            )
+    with pytest.raises(proof.ProvenanceError, match="predates_source"):
+        proof.recovery_record(
+            source, run, logs, "acrdemo.azurecr.io", "api", REVISION, fingerprint, "", 2000000000
+        )
+
+
+def test_legacy_recovery_does_not_infer_a_provisioner_base(record):
+    source, fingerprint, run, _ = record
+    with pytest.raises(proof.ProvenanceError, match="explicit_recovery_requires_api_build"):
+        proof.recovery_record(
+            source,
+            run,
+            "",
+            "acrdemo.azurecr.io",
+            "provisioner",
+            REVISION,
+            fingerprint,
+            "acrdemo.azurecr.io/plane-api@" + DIGEST,
+            1700000000,
+        )
 
 
 @pytest.mark.parametrize("change", ["digest", "run", "context", "missing", "old-policy"])

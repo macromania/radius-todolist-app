@@ -463,7 +463,7 @@ def inspect_export(
                 and not any(
                     part == ".env" or part.startswith(".env.") for part in PurePosixPath(name).parts
                 ),
-                "image_contains_operator_state",
+                f"image_contains_operator_state: {json.dumps(name, ensure_ascii=True)}",
             )
             if name == "usr/local/bin/python3.13":
                 require(

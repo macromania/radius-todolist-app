@@ -248,12 +248,26 @@ def test_public_image_rejects_every_unapproved_source_surface(source, name):
 
 
 @pytest.mark.parametrize(
-    "name", ["app/.env", "app/.state/access.json", "home/plane/.azure/msal_token_cache.json"]
+    "name",
+    [
+        "app/.env",
+        "app/.state/access.json",
+        "home/plane/.azure/msal_token_cache.json",
+        "home/plane/.azure/azureProfile.json",
+    ],
 )
 def test_images_reject_operator_state_and_credentials(source, name):
     archive = exported(source, "provisioner", changes={name: b"synthetic secret"})
-    with pytest.raises(inspection.InspectionError, match="image_contains_operator_state"):
+    with pytest.raises(inspection.InspectionError, match="image_contains_operator_state") as caught:
         inspect(source, archive, "provisioner")
+    assert name in str(caught.value) and "synthetic secret" not in str(caught.value)
+
+
+def test_provisioner_version_probe_uses_disposable_azure_configuration():
+    text = (ROOT / "images/provisioner/Dockerfile").read_text().replace("\\\n", "")
+    assert "AZURE_CONFIG_DIR=/tmp/plane-tool-checks/azure az version" in text
+    assert "rm -rf /tmp/plane-tool-checks" in text
+    assert "ENV AZURE_CONFIG_DIR" not in text
 
 
 @pytest.mark.parametrize("component", ["api", "provisioner"])

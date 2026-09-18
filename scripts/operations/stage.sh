@@ -8,19 +8,22 @@ source "$ROOT/scripts/lib/env.sh"
 if [[ "${1:-}" == --help ]]; then
   printf '%s\n' 'Usage: stage build|inspect-build|bootstrap|deploy-management|preview-management|setup|clean-plan|clean|verify-clean|fault' \
     'The environment comes from .env. Mutations require CONFIRM_AZURE=yes or CONFIRM_LOCAL=yes.' \
-    'Only fault accepts extra arguments, forwarded to the fault helper.'
+    'Azure build accepts artifact/recovery options; fault accepts fault-helper options.'
   exit 0
 fi
 (( $# >= 1 )) || { demo_error 'Choose a stage; see stage --help'; exit 1; }
 stage=$1
 shift
 case "$stage" in
-  build|inspect-build|bootstrap|deploy-management|preview-management|setup|clean-plan|clean|verify-clean)
+  inspect-build|bootstrap|deploy-management|preview-management|setup|clean-plan|clean|verify-clean)
     (( $# == 0 )) || { demo_error 'This stage takes no extra arguments'; exit 1; } ;;
-  fault) ;;
+  build|fault) ;;
   *) demo_error 'Unknown stage'; exit 1 ;;
 esac
 demo_load_env "$ROOT/.env"
+if [[ "$stage" == build && "$DEMO_ENV" == local && $# != 0 ]]; then
+  demo_error 'Local build takes no extra arguments'; exit 1
+fi
 if [[ -n "${PLANE_DEMO_EXPECT_ENV:-}" && "$PLANE_DEMO_EXPECT_ENV" != "$DEMO_ENV" ]]; then
   demo_error 'The selected .env environment does not match this command'
   exit 1
@@ -36,7 +39,7 @@ esac
 cd "$ROOT"
 demo_status section "$DEMO_ENV: $stage"
 case "$DEMO_ENV:$stage" in
-  azure:build) exec bash scripts/operations/azure/build.sh ;;
+  azure:build) exec bash scripts/operations/azure/build.sh "$@" ;;
   azure:inspect-build) exec bash scripts/operations/azure/build.sh --inspect ;;
   azure:bootstrap) exec bash scripts/operations/azure/bootstrap.sh ;;
   azure:deploy-management) exec uv run --no-sync python scripts/operations/run-management-job.py --execute ;;

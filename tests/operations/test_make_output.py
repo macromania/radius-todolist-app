@@ -155,7 +155,7 @@ def test_help_contains_examples_guards_and_real_walkthroughs(tmp_path):
         "disposable dependencies",
         "no saved export is required",
         "no record path is required",
-        "Reinspect selected image contents",
+        "Revalidate selected artifacts",
         "wait for actual completion",
     ):
         assert text in result.stdout
@@ -365,3 +365,21 @@ def test_invalid_color_fails_before_help_or_command_execution(tmp_path):
         assert "Use COLOR=auto, always, or never." in result.stderr
         assert result.stdout == ""
     assert list(tmp_path.iterdir()) == []
+
+
+def test_build_forwards_explicit_recovery_arguments(tmp_path):
+    tool = tmp_path / "stage.py"
+    tool.write_text(
+        "import sys\n"
+        "assert sys.argv[1:] == ['build', '--recover-build', 'api=ch1']\n"
+        "print('recovery arguments forwarded')\n"
+    )
+    result = run_make(
+        tmp_path,
+        "build",
+        "CONFIRM_AZURE=yes",
+        "ARGS=--recover-build api=ch1",
+        f"STAGE={sys.executable} {tool}",
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "recovery arguments forwarded\n"

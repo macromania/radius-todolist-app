@@ -241,9 +241,9 @@ confirm-azure: require-azure
 ##! .env selects Azure or local. Mutations need CONFIRM_AZURE=yes or CONFIRM_LOCAL=yes.
 build: ## Build and inspect selected images, Recipes and local dependencies
 	$(SECTION)
-	@$(OPERATE) $(STAGE) build
+	@$(OPERATE) $(STAGE) build $(ARGS)
 
-inspect-build: ## Reinspect selected image contents and artifact ownership
+inspect-build: ## Revalidate selected artifacts and inspection evidence
 	$(SECTION)
 	@$(OPERATE) $(STAGE) inspect-build
 

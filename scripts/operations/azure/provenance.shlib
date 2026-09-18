@@ -20,44 +20,111 @@ azure_existing_provenance() {
     > "$AZURE_WORKSPACE/provenance-$component.json"
 }
 
-azure_fresh_build() {
-  local component="$1" staging="$2" api_base="$3" run_id key
+azure_build_state() {
+  local component="$1" api_base="$2"
   azure_registry || return
-  key="plane-demo-proof-$component-$REVISION"
-  jq -e --arg key "$key" '.tags[$key] == null and (.tags | length) < 50' \
-    "$AZURE_WORKSPACE/registry.json" >/dev/null || {
-    demo_error 'Fresh build proof already exists or registry tag capacity is exhausted'; return 1;
-  }
-  local args=(acr build --subscription "$AZURE_SUBSCRIPTION_ID" --registry "$REGISTRY" \
-    --platform linux/amd64 --file "images/$component/Dockerfile" --image "$staging" \
-    --build-arg "SOURCE_REVISION=$REVISION" --source-acr-auth-id '[caller]' --no-wait --output json)
-  if [[ "$component" == provisioner ]]; then
-    args+=(--build-arg TARGETARCH=amd64 --build-arg "API_IMAGE=$api_base")
+  azure_provenance "$component" "$api_base" state \
+    --registry-info "$AZURE_WORKSPACE/registry.json" > "$AZURE_WORKSPACE/build-state-$component.json"
+}
+
+azure_store_build_intent() {
+  local component="$1" intent="$2" key value expected
+  key=$(jq -er '.key' "$intent") || return
+  value=$(jq -er '.value' "$intent") || return
+  expected=$(jq -c '.value' "$AZURE_WORKSPACE/build-state-$component.json") || return
+  azure_merge_registry_receipt "$key" "$value" "$expected" || return
+  cp "$intent" "$AZURE_WORKSPACE/build-state-$component.json"
+}
+
+azure_finish_candidate() {
+  local component="$1" staging="$2" api_base="$3" replay_logs="$4" run_id nonce
+  run_id=$(jq -er '.runId // ""' "$AZURE_WORKSPACE/build-state-$component.json") || return
+  if [[ -z "$run_id" ]]; then
+    azure_json acr task list-runs --registry "$REGISTRY" --top 1000 \
+      > "$AZURE_WORKSPACE/build-runs-$component.json" || return
+    azure_provenance "$component" "$api_base" resolve \
+      --runs-info "$AZURE_WORKSPACE/build-runs-$component.json" --staging "$staging" \
+      > "$AZURE_WORKSPACE/queued-$component.json" || {
+      demo_status error "A build receipt exists for $staging, but its completed run is not uniquely identifiable."
+      demo_status warning 'The original submission may still be running. No second build was queued.'
+      printf '  az acr task list-runs --subscription %s --registry %s --output table\n' \
+        "$AZURE_SUBSCRIPTION_ID" "$REGISTRY" >&2
+      return 1
+    }
+    run_id=$(jq -er '(.properties // .).runId | select(test("^[a-zA-Z0-9]{1,32}$"))' \
+      "$AZURE_WORKSPACE/queued-$component.json") || return
+    nonce="${staging##*-}"
+    azure_provenance "$component" "$api_base" intent --nonce "$nonce" --run-id "$run_id" \
+      > "$AZURE_WORKSPACE/next-intent-$component.json" || return
+    azure_store_build_intent "$component" "$AZURE_WORKSPACE/next-intent-$component.json" || return
   fi
-  (cd "$SOURCE" && TMPDIR="$AZURE_WORKSPACE" az "${args[@]}" .) \
-    > "$AZURE_WORKSPACE/queued-$component.json" || return
-  run_id=$(jq -er '(.properties // .).runId | select(test("^[a-zA-Z0-9]{1,32}$"))' \
-    "$AZURE_WORKSPACE/queued-$component.json") || return
-  # Submission JSON is not build output. Stream the entire explicit run next.
-  az acr task logs --subscription "$AZURE_SUBSCRIPTION_ID" --registry "$REGISTRY" \
-    --run-id "$run_id" >&2 || return
+  if [[ "$replay_logs" == true ]]; then
+    demo_status progress "ACR build: resume $run_id for $component"
+    az acr task logs --subscription "$AZURE_SUBSCRIPTION_ID" --registry "$REGISTRY" \
+      --run-id "$run_id" >&2 || return
+  fi
+  jq -n --arg runId "$run_id" '{runId:$runId}' > "$AZURE_WORKSPACE/queued-$component.json" || return
   azure_json acr task show-run --registry "$REGISTRY" --run-id "$run_id" \
     > "$AZURE_WORKSPACE/run-$component.json" || return
   azure_provenance "$component" "$api_base" fresh --queued-info "$AZURE_WORKSPACE/queued-$component.json" \
     --run-info "$AZURE_WORKSPACE/run-$component.json" --staging "$staging" \
-    > "$AZURE_WORKSPACE/fresh-$component.json" || return
+    > "$AZURE_WORKSPACE/fresh-$component.json"
+}
+
+azure_recover_build() {
+  local component="$1" api_base="$2" run_id="$3" commit_time old_state old_staging
+  commit_time=$(git -C "$ROOT" show -s --format=%ct "$REVISION") || return
+  [[ "$commit_time" =~ ^[0-9]+$ ]] || { demo_error 'Invalid source commit timestamp'; return 1; }
+  az acr task logs --subscription "$AZURE_SUBSCRIPTION_ID" --registry "$REGISTRY" \
+    --run-id "$run_id" | tee "$AZURE_WORKSPACE/recovery-$component.log" >&2 || return
+  azure_json acr task show-run --registry "$REGISTRY" --run-id "$run_id" \
+    > "$AZURE_WORKSPACE/run-$component.json" || return
+  jq -e --arg runId "$run_id" '(.properties // .).runId == $runId' \
+    "$AZURE_WORKSPACE/run-$component.json" >/dev/null || {
+    demo_error 'Recovery returned a different ACR run'; return 1;
+  }
+  azure_provenance "$component" "$api_base" recover --run-info "$AZURE_WORKSPACE/run-$component.json" \
+    --run-logs "$AZURE_WORKSPACE/recovery-$component.log" --commit-time "$commit_time" \
+    > "$AZURE_WORKSPACE/next-intent-$component.json" || return
+  old_state=$(jq -er '.state' "$AZURE_WORKSPACE/build-state-$component.json") || return
+  if [[ "$old_state" == pending ]]; then
+    old_staging=$(jq -er '.staging' "$AZURE_WORKSPACE/build-state-$component.json") || return
+    jq -e --arg staging "$old_staging" --arg runId "$run_id" \
+      '.staging == $staging and .runId == $runId' "$AZURE_WORKSPACE/next-intent-$component.json" \
+      >/dev/null || { demo_error 'Recovery does not match the recorded build intent'; return 1; }
+  fi
+  azure_store_build_intent "$component" "$AZURE_WORKSPACE/next-intent-$component.json"
+}
+
+azure_fresh_build() {
+  local component="$1" staging="$2" api_base="$3" result
+  local args=(acr build --subscription "$AZURE_SUBSCRIPTION_ID" --registry "$REGISTRY" \
+    --platform linux/amd64 --file "images/$component/Dockerfile" --image "$staging" \
+    --build-arg "SOURCE_REVISION=$REVISION" --source-acr-auth-id '[caller]' --output none)
+  if [[ "$component" == provisioner ]]; then
+    args+=(--build-arg TARGETARCH=amd64 --build-arg "API_IMAGE=$api_base")
+  fi
+  (cd "$SOURCE" && TMPDIR="$AZURE_WORKSPACE" demo_run "ACR build: $component" az "${args[@]}" .) \
+    >&2 || {
+    result=$?
+    demo_status error 'ACR build or log streaming failed; inspect the reported run before retrying.'
+    return "$result"
+  }
+  # CLI --no-wait suppresses results; correlate the unique output tag with ARM instead.
+  azure_finish_candidate "$component" "$staging" "$api_base" false
 }
 
 azure_record_build_proof() {
-  local component="$1" digest="$2" api_base="$3" key value filesystem
+  local component="$1" digest="$2" api_base="$3" key value filesystem expected
   key=$(jq -er '.key' "$AZURE_WORKSPACE/fresh-$component.json") || return
   value=$(jq -er '.value' "$AZURE_WORKSPACE/fresh-$component.json") || return
   filesystem=$(jq -er '.filesystem_sha256 | select(test("^[a-f0-9]{64}$"))' \
     "$AZURE_WORKSPACE/inspection-$component.json") || return
   value="$value:$filesystem"
+  expected=$(jq -er '.value' "$AZURE_WORKSPACE/build-state-$component.json") || return
   azure_registry || return
-  jq -e --arg key "$key" --arg value "$value" \
-    '.tags[$key] == null or .tags[$key] == $value' "$AZURE_WORKSPACE/registry.json" >/dev/null || {
+  jq -e --arg key "$key" --arg value "$value" --arg expected "$expected" \
+    '.tags[$key] == $expected or .tags[$key] == $value' "$AZURE_WORKSPACE/registry.json" >/dev/null || {
     demo_error 'Existing ARM build proof differs; it will not be replaced'; return 1;
   }
   azure_json tag update --resource-id \

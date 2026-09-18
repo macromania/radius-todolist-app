@@ -58,10 +58,13 @@ RUN case "$TARGETARCH" in \
     chown -R 10001:10001 /home/plane
 ENV HOME=/home/plane PATH="/app/.venv/bin:/opt/azure-cli/bin:$PATH"
 USER 10001:10001
-RUN /home/plane/.rad/bin/bicep --version && rad version --cli && \
-    kubectl version --client && kubelogin --version && az version && certbot --version && \
+RUN mkdir -m 700 /tmp/plane-tool-checks && \
+    /home/plane/.rad/bin/bicep --version && rad version --cli && \
+    kubectl version --client && kubelogin --version && \
+    AZURE_CONFIG_DIR=/tmp/plane-tool-checks/azure az version && certbot --version && \
     uv pip check --python /app/.venv/bin/python && \
-    uv pip check --python /opt/azure-cli/bin/python
+    uv pip check --python /opt/azure-cli/bin/python && \
+    rm -rf /tmp/plane-tool-checks
 ARG SOURCE_REVISION=unknown
 LABEL org.opencontainers.image.revision=$SOURCE_REVISION
 CMD ["python", "-m", "plane_demo.management.provisioner"]

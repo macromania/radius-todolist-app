@@ -13,23 +13,43 @@ source "$ROOT/scripts/operations/azure/provenance.shlib"
 if [[ "${1:-}" == --help ]]; then
   printf '%s\n' 'Usage: CONFIRM_AZURE=yes bash scripts/operations/azure/build.sh [--recipes-only]' \
     '       bash scripts/operations/azure/build.sh --inspect' \
+    '       CONFIRM_AZURE=yes bash scripts/operations/azure/build.sh --recover-build api=RUN_ID' \
     'Uses DEMO_REVISION or HEAD, with a temporary committed-source context and registry login.' \
     'Recipe reuse requires exact compiled OCI content. Build/push logs remain visible on stderr.' \
-    'Default mode builds or reuses digest-pinned images only after non-executing Docker Desktop filesystem inspection.' \
+    'Default mode builds or reuses digest-pinned images only after trusted, non-executing ACR-hosted inspection.' \
     '--inspect requires no mutation confirmation and makes no Azure/ACR writes. Missing, mutable, or mismatching artifacts fail.' \
-    'Inspection uses temporary local Bicep compilation/type generation, registry authentication, and never-started Docker exports.' \
-    'Images require v2 ARM-owned ACR build-run provenance; unrecorded existing images are never attested retroactively.' \
+    'Inspection revalidates recorded remote evidence; missing evidence requires a confirmed build run, never workstation Docker.' \
+    'Pending ARM build receipts make retries resumable. Run only one build command per deployment at a time.' \
+    'Unrecorded API images require explicit --recover-build api=RUN_ID, matching build logs and full image inspection.' \
     'Canonical Recipes are ARM-import-only repositories in an ABAC registry; publisher credentials cannot change their tags or content.' \
     'Canonical tags are never overwritten. No images.json or recipes.json is retained.'
   exit 0
 fi
-[[ $# == 0 || ( $# == 1 && ( "$1" == --recipes-only || "$1" == --inspect ) ) ]] || {
-  demo_error 'build accepts --recipes-only or --inspect'; exit 1;
-}
 RECIPES_ONLY=false
 INSPECT_ONLY=false
-[[ "${1:-}" != --recipes-only ]] || RECIPES_ONLY=true
-[[ "${1:-}" != --inspect ]] || INSPECT_ONLY=true
+RECOVER_API=''
+while (( $# )); do
+  case "$1" in
+    --recipes-only) RECIPES_ONLY=true; shift ;;
+    --inspect) INSPECT_ONLY=true; shift ;;
+    --recover-build)
+      (( $# >= 2 )) && [[ "$2" =~ ^api=[a-zA-Z0-9]{1,32}$ ]] || {
+        demo_error 'Use --recover-build api=RUN_ID'; exit 1;
+      }
+      if [[ -z "$RECOVER_API" ]]; then
+        RECOVER_API="${2#*=}"
+      else
+        demo_error 'Only one API recovery run may be selected'; exit 1
+      fi
+      shift 2 ;;
+    *) demo_error 'build accepts --recipes-only, --inspect or --recover-build'; exit 1 ;;
+  esac
+done
+if [[ "$RECIPES_ONLY" == true && "$INSPECT_ONLY" == true ]] \
+  || { [[ -n "$RECOVER_API" ]] \
+    && [[ "$RECIPES_ONLY" == true || "$INSPECT_ONLY" == true ]]; }; then
+  demo_error 'Recovery, recipe-only and inspection modes cannot be combined'; exit 1
+fi
 if [[ "$INSPECT_ONLY" == true ]]; then
   azure_init read
 else
@@ -62,18 +82,7 @@ mkdir -p "$RADIUS_HOME/.rad/bin" "$AZURE_WORKSPACE/docker"
 ln -s "$BICEP" "$RADIUS_HOME/.rad/bin/bicep"
 export DOCKER_CONFIG="$AZURE_WORKSPACE/docker"
 azure_json acr login --name "$REGISTRY" --expose-token > "$AZURE_WORKSPACE/registry-token.json"
-jq -e --arg host "$HOST" '
-  .loginServer == $host and (.accessToken | type == "string" and test("^[A-Za-z0-9._~+/=-]+$"))
-' "$AZURE_WORKSPACE/registry-token.json" >/dev/null || {
-  demo_error 'Registry authentication response is invalid'; exit 1;
-}
-jq -jr '.accessToken' "$AZURE_WORKSPACE/registry-token.json" \
-  | docker --config "$DOCKER_CONFIG" login "$HOST" \
-    --username 00000000-0000-0000-0000-000000000000 --password-stdin >&2
-[[ -f "$DOCKER_CONFIG/config.json" && ! -L "$DOCKER_CONFIG/config.json" ]] || {
-  demo_error 'Registry login did not create a private configuration'; exit 1;
-}
-chmod 600 "$DOCKER_CONFIG/config.json"
+azure_registry_credentials
 
 verify_recipe() {
   local repository="$1" digest="$2" compiled="$3" layer actual
@@ -87,21 +96,7 @@ verify_recipe() {
   }
   layer=$(jq -er '.layers[0].digest | select(test("^sha256:[a-f0-9]{64}$"))' \
     "$AZURE_WORKSPACE/manifest.json") || return
-  jq -r --arg host "$HOST" --arg scope "repository:$repository:pull" '
-    ["grant_type=refresh_token", ("service=" + $host), ("scope=" + $scope),
-     ("refresh_token=" + .accessToken)][] | "data-urlencode = " + @json
-  ' "$AZURE_WORKSPACE/registry-token.json" > "$AZURE_WORKSPACE/token-request.curl" || return
-  curl --fail --silent --show-error --max-time 30 --proto '=https' \
-    --config "$AZURE_WORKSPACE/token-request.curl" "https://$HOST/oauth2/token" \
-    --output "$AZURE_WORKSPACE/pull-token.json" || return
-  jq -er '
-    .access_token | select(type == "string" and test("^[A-Za-z0-9._~+/=-]+$")) |
-    "header = " + (("Authorization: Bearer " + .) | @json)
-  ' "$AZURE_WORKSPACE/pull-token.json" > "$AZURE_WORKSPACE/pull.curl" || return
-  curl --fail --silent --show-error --max-time 60 --max-filesize 20971520 \
-    --proto '=https' --proto-redir '=https' --location \
-    --config "$AZURE_WORKSPACE/pull.curl" "https://$HOST/v2/$repository/blobs/$layer" \
-    --output "$AZURE_WORKSPACE/recipe-blob.json" || return
+  azure_pull_blob "$repository" "$layer" "$AZURE_WORKSPACE/recipe-blob.json" 20971520 || return
   actual="sha256:$(shasum -a 256 "$AZURE_WORKSPACE/recipe-blob.json" | cut -d ' ' -f 1)"
   [[ "$actual" == "$layer" ]] || { demo_error 'Recipe OCI blob digest differs'; return 1; }
   jq -Sc . "$compiled" > "$AZURE_WORKSPACE/expected.json" || return
@@ -182,31 +177,73 @@ for component in api provisioner; do
   image="plane-$component:$REVISION"
   api_base=''
   [[ "$component" != provisioner ]] || api_base=$(printf '%s' "$IMAGES" | jq -er '.api')
+  recover_run="$RECOVER_API"
+  [[ "$component" != provisioner ]] || recover_run=''
   created=false
+  canonical_exists=false
+  canonical_digest=''
   if azure_has_tag "plane-$component" "$REVISION"; then
-    digest=$(azure_digest "$image")
-    azure_existing_provenance "$component" "$digest" "$api_base"
+    canonical_exists=true
+    canonical_digest=$(azure_digest "$image")
   else
     status=$?
     [[ "$status" == 1 ]] || { demo_error 'Cannot determine whether the image tag exists'; exit 1; }
-    [[ "$INSPECT_ONLY" == false ]] || {
-      demo_error 'Selected committed image is missing; inspection will not build it'; exit 1;
+  fi
+  azure_build_state "$component" "$api_base"
+  build_state=$(jq -er '.state' "$AZURE_WORKSPACE/build-state-$component.json")
+  if [[ "$build_state" == verified ]]; then
+    [[ "$canonical_exists" == true ]] || {
+      demo_error 'A verified ARM build proof exists but its canonical image is missing'; exit 1;
     }
-    staging_tag="build-$REVISION-$BUILD_RUN"
-    staging="plane-$component:$staging_tag"
-    if azure_has_tag "plane-$component" "$staging_tag"; then
-      demo_error 'Unique staging tag already exists; no image will be overwritten'; exit 1
-    else
-      status=$?
-      [[ "$status" == 1 ]] || { demo_error 'Cannot verify the staging tag is absent'; exit 1; }
+    if [[ -n "$recover_run" ]]; then
+      jq -e --arg runId "$recover_run" '.runId == $runId' \
+        "$AZURE_WORKSPACE/build-state-$component.json" >/dev/null || {
+        demo_error 'Recovery cannot replace a different verified build'; exit 1;
+      }
     fi
-    azure_fresh_build "$component" "$staging" "$api_base"
+    digest="$canonical_digest"
+    azure_existing_provenance "$component" "$digest" "$api_base"
+  else
+    [[ "$INSPECT_ONLY" == false ]] || {
+      demo_error 'arm_build_provenance_missing_or_mismatched; inspection will not repair it'; exit 1;
+    }
+    submit=false
+    if [[ -n "$recover_run" ]]; then
+      azure_recover_build "$component" "$api_base" "$recover_run"
+    elif [[ "$build_state" == missing ]]; then
+      [[ "$canonical_exists" == false ]] || {
+        demo_error 'arm_build_provenance_missing_or_mismatched; existing images require explicit recovery'
+        exit 1
+      }
+      staging_tag="build-$REVISION-$BUILD_RUN"
+      if azure_has_tag "plane-$component" "$staging_tag"; then
+        demo_error 'Unique staging tag already exists; no image will be overwritten'; exit 1
+      else
+        status=$?
+        [[ "$status" == 1 ]] || { demo_error 'Cannot verify the staging tag is absent'; exit 1; }
+      fi
+      azure_provenance "$component" "$api_base" intent --nonce "$BUILD_RUN" \
+        > "$AZURE_WORKSPACE/next-intent-$component.json"
+      azure_store_build_intent "$component" "$AZURE_WORKSPACE/next-intent-$component.json"
+      submit=true
+    fi
+    staging=$(jq -er '.staging' "$AZURE_WORKSPACE/build-state-$component.json")
+    if [[ "$submit" == true ]]; then
+      azure_fresh_build "$component" "$staging" "$api_base"
+    else
+      replay_logs=true
+      [[ -z "$recover_run" ]] || replay_logs=false
+      azure_finish_candidate "$component" "$staging" "$api_base" "$replay_logs"
+    fi
     digest=$(jq -er '.provenance.digest' "$AZURE_WORKSPACE/fresh-$component.json")
+    [[ "$canonical_exists" == false || "$canonical_digest" == "$digest" ]] || {
+      demo_error 'Canonical image differs from the recorded build; it will not be overwritten'; exit 1;
+    }
     created=true
   fi
   reference="$HOST/plane-$component@$digest"
   azure_inspect_image "$component" "$reference" "$api_base" "$created" "${staging:-}"
-  if [[ "$created" == true ]]; then
+  if [[ "$created" == true && "$canonical_exists" == false ]]; then
     # ACR import without --force refuses a concurrently created canonical tag.
     az acr import --subscription "$AZURE_SUBSCRIPTION_ID" --name "$REGISTRY" \
       --registry "$PLATFORM_SCOPE/providers/Microsoft.ContainerRegistry/registries/$REGISTRY" \
