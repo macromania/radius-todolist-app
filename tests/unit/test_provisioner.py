@@ -28,6 +28,7 @@ from plane_demo.management.providers.credentials import (
 )
 from plane_demo.management.providers.identity import (
     PUBLIC_KEYS,
+    RESOURCE_SIZING,
     SLOTS,
     DemoConfig,
     provisioning_namespace,
@@ -103,6 +104,14 @@ def raw_config():
             "nodeCount": 2,
             "postgresSkuName": "Standard_D2ads_v5",
             "postgresSkuTier": "GeneralPurpose",
+            "resourceSizingVersion": 1,
+            "aksTier": "Free",
+            "nodeOsDiskSizeGb": 64,
+            "postgresStorageSizeGb": 32,
+            "redisSkuName": "Balanced_B0",
+            "gatewayCapacity": 1,
+            "registrySkuName": "Standard",
+            "vaultSkuName": "standard",
             "kubernetesVersion": "1.35.7",
             "egressIp": "5.6.7.8",
             "authorizedIpRanges": ["1.2.3.4/32", "5.6.7.8/32"],
@@ -371,6 +380,69 @@ def test_selected_postgres_compute_reaches_each_database_recipe(
         assert parameters["skuTier"] == "GeneralPurpose"
 
 
+def test_nondefault_resource_sizes_reach_registered_plane_and_cluster_recipes(
+    selected_config, tmp_path, monkeypatch
+):
+    values = selected_config.to_dict()
+    values["foundation"].update(
+        {field: choices[-1] for _, field, choices in RESOURCE_SIZING.values()}
+    )
+    selected = OperatorConfig.from_dict(values, identity=selected_config.identity)
+    provider = AzureProvider(
+        selected, tmp_path, credentials(tmp_path / "credentials.json", selected)
+    )
+    provider._verified = True
+    monkeypatch.setattr(provider, "rad", MagicMock())
+    monkeypatch.setattr(provider, "verify_recipes", MagicMock())
+    for slot in selected.allocations:
+        provider.register(slot)
+        document = json.loads((provider.state / f"{slot}-environment.parameters.json").read_text())
+        recipes = document["parameters"]["recipes"]["value"]
+        assert recipes[TYPES["gateway"][0]]["default"]["parameters"]["capacity"] == 3
+        if slot.endswith("-data"):
+            assert recipes[TYPES["redis"][0]]["default"]["parameters"]["skuName"] == "Balanced_B20"
+        else:
+            assert recipes[TYPES["postgresql"][0]]["default"]["parameters"]["storageSizeGb"] == 256
+        if slot != "management":
+            provider.register_cluster_environment(slot)
+            document = json.loads(
+                (provider.state / f"{slot}-cluster-environment.parameters.json").read_text()
+            )
+            recipes = document["parameters"]["recipes"]["value"]
+        cluster = recipes[TYPES["cluster"][0]]["default"]["parameters"]
+        assert (cluster["aksTier"], cluster["nodeCount"], cluster["nodeOsDiskSizeGb"]) == (
+            "Standard",
+            4,
+            256,
+        )
+
+
+@pytest.mark.parametrize("name", RESOURCE_SIZING)
+def test_sizing_profile_rejects_missing_or_invalid_choices(raw_config, name):
+    _, field, _ = RESOURCE_SIZING[name]
+    raw_config["foundation"][field] = True
+    with pytest.raises(ValueError, match="invalid foundation sizing"):
+        OperatorConfig.from_dict(raw_config)
+    del raw_config["foundation"][field]
+    with pytest.raises(ValueError, match="invalid foundation sizing"):
+        OperatorConfig.from_dict(raw_config)
+
+
+def test_legacy_sizing_can_be_observed_but_not_used_to_deploy(raw_config, tmp_path):
+    raw_config["foundation"].pop("resourceSizingVersion")
+    for _, field, _ in RESOURCE_SIZING.values():
+        if field != "nodeCount":
+            raw_config["foundation"].pop(field)
+    selected = OperatorConfig.from_dict(raw_config)
+    provider = AzureProvider(
+        selected, tmp_path, credentials(tmp_path / "credentials.json", selected)
+    )
+    with pytest.raises(ProvisioningError, match="resource_sizing_selection_missing"):
+        provider.recipe_map("management")
+    with pytest.raises(ProvisioningError, match="resource_sizing_selection_missing"):
+        provider.register_cluster_environment("shared-control")
+
+
 @pytest.mark.parametrize(
     "selection",
     [
@@ -399,7 +471,7 @@ def test_old_foundation_cannot_silently_use_a_hardcoded_postgres_size(selected_c
 
 
 def test_canonical_management_configuration_and_suspended_job_use_live_inputs(
-    selected_config, tmp_path, monkeypatch
+    selected_config, tmp_path, monkeypatch, capsys
 ):
     root = Path(__file__).resolve().parents[2]
     monkeypatch.syspath_prepend(str(root / "scripts/operations"))
@@ -422,6 +494,7 @@ def test_canonical_management_configuration_and_suspended_job_use_live_inputs(
     }
     observed, objects = [], {}
     resumed = []
+    poll_statuses = []
 
     def execute(arguments, *, value=None, **kwargs):
         observed.append(arguments)
@@ -446,6 +519,8 @@ def test_canonical_management_configuration_and_suspended_job_use_live_inputs(
         if "get" in arguments:
             position = arguments.index("get")
             record = objects.get((arguments[position + 1].lower(), arguments[position + 2]))
+            if arguments[position + 1] == "job" and record and poll_statuses:
+                record["status"] = poll_statuses.pop(0)
             return json.dumps(record) if record else ""
         if "create" in arguments:
             record = copy.deepcopy(value)
@@ -466,7 +541,14 @@ def test_canonical_management_configuration_and_suspended_job_use_live_inputs(
             assert ("configmap", "deploy-management-config") in objects
             assert ("secret", "deploy-management-keys") in objects
             job["spec"]["suspend"] = False
-            job["status"] = {"conditions": [{"type": "Complete", "status": "True"}]}
+            poll_statuses.extend(
+                [
+                    {},
+                    {"active": 1},
+                    {"active": 1},
+                    {"conditions": [{"type": "Complete", "status": "True"}]},
+                ]
+            )
             resumed.append(job["metadata"]["uid"])
             return ""
         assert "wait" in arguments or "rollout" in arguments
@@ -474,6 +556,16 @@ def test_canonical_management_configuration_and_suspended_job_use_live_inputs(
         return ""
 
     monkeypatch.setattr(operator, "execute", execute)
+    monkeypatch.setattr(operator.time, "sleep", lambda _: None)
+
+    log_calls = []
+
+    @contextmanager
+    def log_stream(*args, **kwargs):
+        log_calls.append((args, kwargs))
+        yield
+
+    monkeypatch.setattr(operator, "job_logs", log_stream)
     config = operator.live_configuration(selected_config.identity)
     assert config.identity.revision == "a" * 40
     assert config.identity.demo_keys == selected_config.identity.demo_keys
@@ -481,6 +573,14 @@ def test_canonical_management_configuration_and_suspended_job_use_live_inputs(
         config, config.workspace("management"), str(tmp_path / "kubeconfig")
     )
     assert result["stage"] == "management-deployed"
+    ((log_args, log_kwargs),) = log_calls
+    assert log_args[0][log_args[0].index("--kubeconfig") + 1] == str(tmp_path / "kubeconfig")
+    assert log_args[1:] == (config.namespace("management"), "deploy-management")
+    assert log_kwargs == {"enabled": True}
+    progress = capsys.readouterr().err
+    for phase in ("waiting", "active", "complete"):
+        assert progress.count(f"{'Job deploy-management':<26}  {phase}") == 1
+    assert "elapsed" not in progress
     job = objects["job", "deploy-management"]
     secret = objects["secret", "deploy-management-keys"]
     assert secret["metadata"]["ownerReferences"][0]["uid"] == job["metadata"]["uid"]
@@ -501,6 +601,20 @@ def test_canonical_management_configuration_and_suspended_job_use_live_inputs(
         operator.deploy_selected(
             changed, config.workspace("management"), str(tmp_path / "kubeconfig")
         )
+    job["status"] = {
+        "conditions": [
+            {
+                "type": "Failed",
+                "status": "True",
+                "reason": "BackoffLimitExceeded",
+            }
+        ]
+    }
+    with pytest.raises(ValueError, match="deploy-management \\(BackoffLimitExceeded\\)") as failed:
+        operator.deploy_selected(
+            config, config.workspace("management"), str(tmp_path / "kubeconfig")
+        )
+    assert "make kube ARGS='management logs job/deploy-management" in str(failed.value)
     job["spec"]["suspend"] = True
     job["status"] = {}
     job["spec"]["template"]["spec"]["containers"][0].pop("envFrom")
@@ -608,6 +722,18 @@ def test_deploy_run_path_selects_the_moved_template_group(
         str(provider.root / "infra/radius" / directory / f"{template}.bicep"),
     )
     assert (provider.state / f"management-{template}.parameters.json").is_file()
+
+
+def test_provider_streams_native_deployments_and_waits_but_not_structured_reads(provider):
+    provider._verified = True
+    provider.deploy("management", "database", "stream-test", {})
+    assert provider.commands.run.call_args.kwargs["stream_output"] is True
+    provider.rad("management", "resource", "show", "database", "-o", "json")
+    assert "stream_output" not in provider.commands.run.call_args.kwargs
+    provider.kubectl("management", "-n", "namespace", "rollout", "status", "deployment/api")
+    assert provider.commands.run.call_args.kwargs["stream_output"] is True
+    provider.kubectl("management", "get", "secret", "private-input", "-o", "json")
+    assert "stream_output" not in provider.commands.run.call_args.kwargs
 
 
 def operation(pair_id="shared"):

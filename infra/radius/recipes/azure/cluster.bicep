@@ -7,6 +7,10 @@ param location string = resourceGroup().location
 param tenantId string = subscription().tenantId
 param kubernetesVersion string = '1.35.7'
 param nodeVmSize string
+@allowed(['Free', 'Standard'])
+param aksTier string
+@allowed([64, 128, 256])
+param nodeOsDiskSizeGb int
 @minValue(2)
 param nodeCount int = 2
 @minLength(1)
@@ -37,7 +41,7 @@ resource cluster 'Microsoft.ContainerService/managedClusters@2025-05-01' = {
   tags: requiredTags
   sku: {
     name: 'Base'
-    tier: 'Free'
+    tier: aksTier
   }
   identity: {
     type: 'UserAssigned'
@@ -96,7 +100,7 @@ resource cluster 'Microsoft.ContainerService/managedClusters@2025-05-01' = {
         vmSize: nodeVmSize
         count: nodeCount
         maxPods: 110
-        osDiskSizeGB: 64
+        osDiskSizeGB: nodeOsDiskSizeGb
         osDiskType: 'Managed'
         upgradeSettings: {
           maxSurge: '1'

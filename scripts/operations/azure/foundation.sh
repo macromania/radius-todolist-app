@@ -149,9 +149,30 @@ demo_run 'Azure subscription prerequisites' "$ROOT/.venv/bin/python" \
   "$ROOT/scripts/operations/azure/prerequisites.py" --subscription "$AZURE_SUBSCRIPTION_ID" \
   > "$AZURE_WORKSPACE/prerequisites.json"
 
-demo_status section 'Bootstrap: node capacity and size'
+demo_status section 'Bootstrap: resource sizing'
 demo_run 'Bicep: compile foundation' "$BICEP" build "$ROOT/infra/bootstrap/azure.bicep" \
   --outfile "$AZURE_WORKSPACE/bootstrap.json"
+size_arguments=(--config "$ROOT/.env")
+if [[ -f "$AZURE_WORKSPACE/existing-foundation.json" ]]; then
+  size_arguments+=(--existing-foundation "$AZURE_WORKSPACE/existing-foundation.json")
+fi
+demo_run 'Azure resource sizing' "$ROOT/.venv/bin/python" \
+  "$ROOT/scripts/operations/azure/resource_sizes.py" "${size_arguments[@]}" \
+  > "$AZURE_WORKSPACE/resource-sizes.json"
+jq -e '(.parameters | type == "object") and (.environment | type == "object")' \
+  "$AZURE_WORKSPACE/resource-sizes.json" >/dev/null || {
+  demo_error 'Resource sizing returned invalid output'; exit 1;
+}
+while IFS=$'\t' read -r key value; do
+  case "$key" in
+    AZURE_AKS_TIER|AZURE_NODE_COUNT|AZURE_NODE_OS_DISK_GB|AZURE_POSTGRES_STORAGE_GB|\
+    AZURE_REDIS_SKU|AZURE_GATEWAY_CAPACITY|AZURE_REGISTRY_SKU|AZURE_KEY_VAULT_SKU)
+      export "$key=$value" ;;
+    *) demo_error 'Resource sizing returned an unknown setting'; exit 1 ;;
+  esac
+done < <(jq -r '.environment | to_entries[] | [.key,.value] | @tsv' "$AZURE_WORKSPACE/resource-sizes.json")
+demo_validate_env
+demo_status section 'Bootstrap: node capacity and size'
 node_arguments=(--config "$ROOT/.env" --template "$AZURE_WORKSPACE/bootstrap.json")
 if [[ -f "$AZURE_WORKSPACE/existing-foundation.json" ]]; then
   node_arguments+=(--existing-foundation "$AZURE_WORKSPACE/existing-foundation.json")
@@ -271,6 +292,7 @@ jq -n --arg project "$DEMO_PROJECT" --arg deployment "$DEMO_DEPLOYMENT" \
   --arg externalVaultGroup "$EXTERNAL_VAULT_GROUP" --argjson credentialNames "$CREDENTIAL_NAMES" \
   --arg nodeVmSize "$AZURE_NODE_VM_SIZE" --argjson nodeCount "$NODE_COUNT" \
   --arg postgresSkuName "$AZURE_POSTGRES_SKU" --arg postgresSkuTier "$AZURE_POSTGRES_TIER" \
+  --slurpfile sizes "$AZURE_WORKSPACE/resource-sizes.json" \
   --argjson registryExists "$REGISTRY_EXISTS" '{
     "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
     contentVersion: "1.0.0.0",
@@ -281,7 +303,7 @@ jq -n --arg project "$DEMO_PROJECT" --arg deployment "$DEMO_DEPLOYMENT" \
       nodeVmSize:$nodeVmSize, nodeCount:$nodeCount,
       postgresSkuName:$postgresSkuName, postgresSkuTier:$postgresSkuTier,
       applicationCredentialNames:$credentialNames, registryExists:$registryExists
-    } | map_values({value:.}))
+    } + $sizes[0].parameters | map_values({value:.}))
   }' > "$AZURE_WORKSPACE/parameters.json"
 azure_json deployment sub validate --location "$AZURE_LOCATION" --name "$STEM-bootstrap" \
   --template-file "$AZURE_WORKSPACE/bootstrap.json" --parameters "@$AZURE_WORKSPACE/parameters.json" \

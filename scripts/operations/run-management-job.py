@@ -7,12 +7,15 @@ import argparse
 import base64
 import hashlib
 import json
+import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from pathlib import Path
 
 from config import load_config
@@ -303,13 +306,97 @@ def unfinished_operator(job: dict) -> bool:
     )
 
 
-def execute(arguments: list[str], *, value: dict | None = None, timeout: int = 120) -> str:
+def job_progress(job: dict) -> tuple[str, str]:
+    conditions = job.get("status", {}).get("conditions", [])
+    for condition in conditions:
+        if (
+            condition.get("type") in {"Failed", "FailureTarget"}
+            and condition.get("status") == "True"
+        ):
+            return "failed", condition.get("reason") or "unspecified reason"
+    if any(
+        condition.get("type") == "Complete" and condition.get("status") == "True"
+        for condition in conditions
+    ):
+        return "complete", ""
+    return ("active" if job.get("status", {}).get("active", 0) else "waiting"), ""
+
+
+def job_failure(name: str, reason: str) -> str:
+    return (
+        f"The canonical operator Job failed: {name} ({reason}). "
+        f"Read logs with: make kube ARGS='management logs job/{name} "
+        "--all-containers=true --tail=80'"
+    )
+
+
+@contextmanager
+def job_logs(base, namespace, name, *, enabled):
+    if not enabled:
+        yield
+        return
+    try:
+        process = subprocess.Popen(
+            [
+                *base,
+                "--request-timeout=0",
+                "-n",
+                namespace,
+                "logs",
+                f"job/{name}",
+                "--all-containers=true",
+                "--follow",
+                "--pod-running-timeout=300s",
+            ],
+            cwd=ROOT,
+            stdin=subprocess.DEVNULL,
+            stdout=sys.stderr,
+            stderr=sys.stderr,
+            start_new_session=True,
+        )
+    except OSError as error:
+        status(
+            "warning",
+            f"Job {name}: cannot stream logs ({type(error).__name__}); use make kube logs",
+        )
+        yield
+        return
+    try:
+        yield
+    finally:
+        try:
+            result = process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+        else:
+            if result != 0:
+                status("warning", f"Job {name}: log stream exited {result}; inspect scoped logs")
+
+
+def execute(
+    arguments: list[str],
+    *,
+    value: dict | None = None,
+    timeout: int = 120,
+    capture: bool = True,
+) -> str:
     result = subprocess.run(
         arguments,
         cwd=ROOT,
         text=True,
         input=json.dumps(value) if value is not None else None,
-        stdout=subprocess.PIPE,
+        stdout=subprocess.PIPE if capture else sys.stderr,
         timeout=timeout,
         check=False,
     )
@@ -317,7 +404,7 @@ def execute(arguments: list[str], *, value: dict | None = None, timeout: int = 1
         raise CommandError(
             f"Management operation failed: {arguments[0]} (exit {result.returncode})"
         )
-    return result.stdout.strip()
+    return result.stdout.strip() if capture else ""
 
 
 def live_configuration(identity: DemoConfig) -> OperatorConfig:
@@ -543,11 +630,9 @@ def deploy_selected(
                     raise ValueError("The existing operator Job lost its immutable inputs")
             else:
                 verify_input(resource, current)
-    if any(
-        item.get("type") == "Failed" and item.get("status") == "True"
-        for item in job.get("status", {}).get("conditions", [])
-    ):
-        raise ValueError("The canonical operator Job failed; inspect its logs and owned resources")
+    phase, reason = job_progress(job)
+    if phase == "failed":
+        raise ValueError(job_failure(name, reason))
     if on_job is not None:
         on_job(job)
     if job["spec"].get("suspend"):
@@ -595,24 +680,24 @@ def deploy_selected(
                 ),
             ]
         )
-    deadline = time.monotonic() + 3600
-    while True:
-        current = read("job", name)
-        if current is None or current["metadata"].get("uid") != metadata["uid"]:
-            raise ValueError("Operator Job ownership changed while waiting")
-        conditions = current.get("status", {}).get("conditions", [])
-        if any(
-            item.get("type") in {"Failed", "FailureTarget"} and item.get("status") == "True"
-            for item in conditions
-        ):
-            raise ValueError("The canonical operator Job failed; inspect its scoped logs")
-        if any(
-            item.get("type") == "Complete" and item.get("status") == "True" for item in conditions
-        ):
-            break
-        if time.monotonic() >= deadline:
-            raise ValueError("The canonical operator Job exceeded its completion deadline")
-        time.sleep(3)
+    with job_logs(base, namespace, name, enabled=phase != "complete"):
+        deadline = time.monotonic() + 3600
+        previous_phase = None
+        while True:
+            current = read("job", name)
+            if current is None or current["metadata"].get("uid") != metadata["uid"]:
+                raise ValueError("Operator Job ownership changed while waiting")
+            phase, reason = job_progress(current)
+            if phase != previous_phase:
+                status("progress", f"Job {name}: {phase}")
+                previous_phase = phase
+            if phase == "failed":
+                raise ValueError(job_failure(name, reason))
+            if phase == "complete":
+                break
+            if time.monotonic() >= deadline:
+                raise ValueError("The canonical operator Job exceeded its completion deadline")
+            time.sleep(3)
     deployments = (
         (("management-api",) if config.prepared_environments else ("management-api", "provisioner"))
         if name == "deploy-management"
@@ -630,6 +715,7 @@ def deploy_selected(
                 "--timeout=300s",
             ],
             timeout=360,
+            capture=False,
         )
     return {
         "stage": "management-deployed",

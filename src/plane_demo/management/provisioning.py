@@ -18,6 +18,7 @@ from plane_demo.management.providers.identity import (
     AZURE_GROUP_LAYOUT,
     IDENTITY_PURPOSES,
     PUBLIC_KEYS,
+    RESOURCE_SIZING,
     DemoConfig,
 )
 from plane_demo.shared.db import PendingOperation
@@ -151,6 +152,21 @@ class OperatorConfig:
         foundation = data["foundation"]
         if foundation.get("environmentMode") not in (None, AZURE_ENVIRONMENT_MODE):
             raise ValueError("unsupported environment preparation mode")
+        profile = foundation.get("resourceSizingVersion")
+        if profile is not None and (type(profile) is not int or profile != 1):
+            raise ValueError("unsupported resource sizing profile")
+        if profile == 1:
+            for _, field, choices in RESOURCE_SIZING.values():
+                value = foundation.get(field)
+                if type(value) is not type(choices[0]) or value not in choices:
+                    raise ValueError(f"invalid foundation sizing field: {field}")
+        if identity is not None and identity.resource_sizes:
+            if profile != 1 or any(
+                foundation.get(field) != value for field, value in identity.resource_sizes.items()
+            ):
+                raise ValueError(
+                    "foundation resource sizing differs from the selected configuration"
+                )
         postgres_name = foundation.get("postgresSkuName")
         postgres_tier = foundation.get("postgresSkuTier")
         if postgres_name is not None or postgres_tier is not None:

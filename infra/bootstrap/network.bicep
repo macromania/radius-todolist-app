@@ -4,9 +4,13 @@ param location string
 param slots array
 param tags object
 param registryName string
+@allowed(['Basic', 'Standard', 'Premium'])
+param registrySkuName string
 @description('Existing owned registries are read-only here so bootstrap cannot erase ARM-owned build proofs or unrelated tags.')
 param registryExists bool = false
 param vaultName string
+@allowed(['standard', 'premium'])
+param vaultSkuName string
 param externalVaultResourceGroup string = ''
 
 resource egressIp 'Microsoft.Network/publicIPAddresses@2024-07-01' = {
@@ -175,7 +179,7 @@ resource registry 'Microsoft.ContainerRegistry/registries@2025-11-01' = if (!reg
   location: location
   tags: tags
   sku: {
-    name: 'Standard'
+    name: registrySkuName
   }
   properties: {
     adminUserEnabled: false
@@ -197,7 +201,7 @@ resource vault 'Microsoft.KeyVault/vaults@2024-11-01' = if (empty(externalVaultR
     tenantId: subscription().tenantId
     sku: {
       family: 'A'
-      name: 'standard'
+      name: vaultSkuName
     }
     enableRbacAuthorization: true
     enableSoftDelete: true

@@ -20,8 +20,12 @@ from plane_demo.management.providers.azure_environments import (  # noqa: E402
     deployment_outputs,
     require,
 )
-from plane_demo.management.providers.identity import isolated_pair  # noqa: E402
-from scripts.operations.azure import node_sizes, postgres_sizes  # noqa: E402
+from plane_demo.management.providers.identity import (  # noqa: E402
+    COMPUTE_SELECTION_FIELDS,
+    RESOURCE_SIZING,
+    isolated_pair,
+)
+from scripts.operations.azure import node_sizes, postgres_sizes, resource_sizes  # noqa: E402
 from scripts.operations.azure.environment_operator import (  # noqa: E402
     EnvironmentOperator,
     base_deployment,
@@ -100,10 +104,7 @@ def main():
         require(
             observed
             == replace(
-                identity,
-                node_vm_size=identity.node_vm_size or observed.node_vm_size,
-                postgres_sku_name=identity.postgres_sku_name or observed.postgres_sku_name,
-                postgres_sku_tier=identity.postgres_sku_tier or observed.postgres_sku_tier,
+                identity, **{name: getattr(observed, name) for name in COMPUTE_SELECTION_FIELDS}
             ),
             "Operator configuration changed during foundation selection",
         )
@@ -113,6 +114,24 @@ def main():
     else:
         status("success", "Default foundation: retained without redeployment")
     base = deployment_outputs(base)
+    require(
+        type(base["foundation"].get("resourceSizingVersion")) is int
+        and base["foundation"]["resourceSizingVersion"] == 1
+        and all(
+            type(base["foundation"].get(field)) is type(choices[0])
+            and base["foundation"][field] in choices
+            for _, field, choices in RESOURCE_SIZING.values()
+        ),
+        "Existing foundation has no complete resource sizing profile; "
+        "use its matching checkout or a fresh deployment name",
+    )
+    require(
+        all(
+            base["foundation"].get(field) == value
+            for field, value in identity.resource_sizes.items()
+        ),
+        "Selected resource sizes differ from the existing foundation; no automatic resize",
+    )
     proof = artifacts(identity=identity)
     require(proof.get("source_revision") == revision, "Artifact revision changed during bootstrap")
     with tempfile.TemporaryDirectory(prefix="plane-environments-") as directory:
@@ -132,6 +151,8 @@ def main():
                 )
                 if fresh or record.get("state") == "reserved":
                     status("section", "Bootstrap: recheck capacity for the added environment")
+                    sizes, offers = resource_sizes.Discovery(identity).available()
+                    resource_sizes.select(identity, sizes, offers, existing=base["foundation"])
                     desired_slots = {
                         *(item["slot"] for item in document["allocations"]),
                         f"{pair}-control",

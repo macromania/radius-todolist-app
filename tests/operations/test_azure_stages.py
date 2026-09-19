@@ -10,16 +10,28 @@ from pathlib import Path
 
 import pytest
 
+from plane_demo.management.providers.identity import RESOURCE_SIZING
 from plane_demo.management.providers.secret_store import CredentialScope
-from scripts.operations.config import load_config
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "scripts/operations/azure"))
+sys.path[:0] = [str(ROOT), str(ROOT / "scripts/operations/azure")]
+from scripts.operations.config import load_config  # noqa: E402
+
 SUBSCRIPTION = "11111111-1111-1111-1111-111111111111"
 REVISION = "c" * 40
 COMPILER = "Bicep CLI version 0.42.1 (test)"
 NODE_SIZE = "Standard_D4as_v7"
 POSTGRES_SIZE = "Standard_D2ads_v5"
+SIZES = {
+    "aksTier": "Free",
+    "nodeCount": 2,
+    "nodeOsDiskSizeGb": 64,
+    "postgresStorageSizeGb": 32,
+    "redisSkuName": "Balanced_B1",
+    "gatewayCapacity": 1,
+    "registrySkuName": "Standard",
+    "vaultSkuName": "standard",
+}
 TOOLS = ("az", "rad", "docker", "curl", "git", "bicep", "kubectl", "kubelogin")
 FAKE = r"""
 import base64,gzip,hashlib,importlib.util,io,json,marshal,os,re,stat,sys,tarfile
@@ -28,7 +40,7 @@ from uuid import NAMESPACE_DNS, uuid5
 root=Path(os.environ["FAKE_ROOT"])
 sys.path.insert(0,str(root))
 from scripts.operations.azure import plane_policy
-from plane_demo.management.providers.identity import DemoConfig, IDENTITY_PURPOSES
+from plane_demo.management.providers.identity import DemoConfig, IDENTITY_PURPOSES, RESOURCE_SIZING
 spec=json.loads((root/"spec.json").read_text())
 state_path=root/"fake-state.json"
 state=json.loads(state_path.read_text()) if state_path.exists() else {"artifacts":{}}
@@ -141,6 +153,8 @@ def foundation():
         "location":spec["location"],"platformResourceGroup":f"rg-{stem}-platform",
         "nodeVmSize":state.get("node_vm_size",spec.get("node_vm_size","Standard_D4as_v7")),
         "nodeCount":2,
+        "resourceSizingVersion":1,
+        **state.get("resource_sizes",spec["resource_sizes"]),
         "postgresSkuName":state.get("postgres_sku",spec.get("postgres_sku","Standard_D2ads_v5")),
         "postgresSkuTier":"GeneralPurpose",
         "registryName":registry,"registryLoginServer":host,"registryRoleAssignmentMode":registry_mode,
@@ -226,7 +240,10 @@ elif tool=="az":
     elif args[:3]==["postgres","flexible-server","list-skus"]:
         emit(spec.get("postgres_capabilities",[{
             "supportedServerVersions":[{"name":"16","status":None,"reason":None}],
-            "supportedServerEditions":[{"name":"GeneralPurpose","supportedServerSkus":[
+            "supportedServerEditions":[{"name":"GeneralPurpose",
+                "supportedStorageEditions":[{"name":"ManagedDisk","supportedStorageMb":[
+                    {"storageSizeMb":n*1024} for n in (32,64,128,256)]}],
+                "supportedServerSkus":[
                 {"name":name,"vCores":2,"supportedMemoryPerVcoreMb":4096,
                  "supportedZones":["1","2","3"],"status":None,"reason":None}
                 for name in ("Standard_D2ads_v5","Standard_D2ds_v4","Standard_D2ds_v5")]}]}]))
@@ -241,7 +258,17 @@ elif tool=="az":
         if spec.get("malformed_provider_query")==phase:
             print("not json")
         else:
-            emit({"registrationState":value})
+            kinds={
+                "Microsoft.ContainerService":["managedClusters"],
+                "Microsoft.DBforPostgreSQL":["flexibleServers"],
+                "Microsoft.Cache":["redisEnterprise"],
+                "Microsoft.Network":["applicationGateways","natGateways","publicIPAddresses"],
+                "Microsoft.ContainerRegistry":["registries"],
+                "Microsoft.KeyVault":["vaults"],
+            }
+            emit({"namespace":arg("--namespace"),"registrationState":value,
+                  "resourceTypes":[{"resourceType":kind,"locations":[spec["location"]]}
+                                   for kind in kinds.get(arg("--namespace"),[])]})
     elif args[:2]==["provider","register"]:
         state.setdefault("providers",[]).append(arg("--namespace"))
         save()
@@ -263,7 +290,7 @@ elif tool=="az":
         properties={"tenantId":tenant,"provisioningState":"Succeeded","enableRbacAuthorization":True,
             "publicNetworkAccess":"Disabled","networkAcls":{"defaultAction":"Deny","bypass":"AzureServices"},
             "enableSoftDelete":True,"enablePurgeProtection":True,
-            "vaultUri":f"https://{vault}.vault.azure.net/"}
+            "vaultUri":f"https://{vault}.vault.azure.net/","sku":{"name":"standard"}}
         if mode=="external-public": properties["publicNetworkAccess"]="Enabled"
         if mode=="external-tenant": properties["tenantId"]="44444444-4444-4444-4444-444444444444"
         if mode=="external-access-policy": properties["enableRbacAuthorization"]=False
@@ -354,6 +381,8 @@ elif tool=="az":
     elif args[:3]==["deployment","sub","create"]:
         state["node_vm_size"]=entry["parameters"]["nodeVmSize"]["value"]
         state["postgres_sku"]=entry["parameters"]["postgresSkuName"]["value"]
+        state["resource_sizes"]={
+            field:entry["parameters"][field]["value"] for _,field,_ in RESOURCE_SIZING.values()}
         save()
         if not entry["parameters"]["registryExists"]["value"]:
             state["arm_tags"]={}
@@ -684,6 +713,15 @@ elif tool=="docker":
 elif tool=="curl":
     url=next(value for value in args if value.startswith("https://"))
     if url.startswith("https://prices.azure.com/"):
+        if "Redis" in url:
+            emit({"NextPageLink":None,"Items":[
+                {"armSkuName":"Azure_Managed_Redis_Balanced_"+name,"skuName":name,
+                 "productName":"Azure Managed Redis - Balanced","armRegionName":spec["location"],
+                 "type":"Consumption","currencyCode":"USD","unitOfMeasure":"1 Hour",
+                 "retailPrice":price}
+                for name,price in (("B0",0.016),("B1",0.032),("B3",0.065),
+                                   ("B5",0.156),("B10",0.315),("B20",0.629))]})
+            sys.exit()
         emit({"NextPageLink":None,"Items":[
             {"armSkuName":name,"armRegionName":spec["location"],"type":"Consumption",
              "currencyCode":"USD","unitOfMeasure":"1 Hour","productName":"Virtual Machines Linux",
@@ -724,6 +762,7 @@ def checkout(tmp_path):
         "scripts/operations/azure/node_sizes.py",
         "scripts/operations/azure/compute_selection.py",
         "scripts/operations/azure/postgres_sizes.py",
+        "scripts/operations/azure/resource_sizes.py",
         "scripts/operations/azure/catalog.py",
         "scripts/operations/config.py",
         "scripts/lib/env.sh",
@@ -828,6 +867,7 @@ def configure(root, **changes):
         "subscription": SUBSCRIPTION,
         "location": "westeurope",
         "revision": REVISION,
+        "resource_sizes": SIZES,
         **changes,
     }
     values = {
@@ -842,6 +882,13 @@ def configure(root, **changes):
         if spec.get("postgres_sku", POSTGRES_SIZE) is not None:
             values["AZURE_POSTGRES_SKU"] = spec.get("postgres_sku", POSTGRES_SIZE)
             values["AZURE_POSTGRES_TIER"] = "GeneralPurpose"
+        if spec.get("saved_resource_sizes", True):
+            values.update(
+                {
+                    key: str(spec["resource_sizes"][field])
+                    for key, field, _ in RESOURCE_SIZING.values()
+                }
+            )
     values.update(spec.get("extra_env", {}))
     (root / ".env").write_text(
         "".join(f"{key}={json.dumps(value)}\n" for key, value in values.items())
@@ -1083,6 +1130,7 @@ def test_bootstrap_uses_selected_identity_and_fresh_successful_outputs(checkout,
         "nodeCount": 2,
         "postgresSkuName": POSTGRES_SIZE,
         "postgresSkuTier": "GeneralPurpose",
+        **SIZES,
     }
     assert create["args"][create["args"].index("--name") + 1] == "sample-learn-azure-bootstrap"
     (show,) = selected(checkout, "az", ["deployment", "sub", "show"])
@@ -1096,6 +1144,21 @@ def test_bootstrap_uses_selected_identity_and_fresh_successful_outputs(checkout,
         if call["tool"] == "curl" and "--config" in call["args"]:
             assert call["config_mode"] == 0o600
             assert call["private_parent"] == 0o700
+
+
+def test_first_bootstrap_prompts_for_all_sizes_and_passes_nondefault_choices_to_arm(checkout):
+    configure(checkout, saved_resource_sizes=False, node_vm_size=None, postgres_sku=None)
+    # Prompt order: nodes, AKS tier, disk, storage, Redis, gateway, registry, vault, VM, PostgreSQL.
+    result = run(checkout, "bootstrap", input="3\n2\n3\n4\n6\n3\n3\n2\n2\n2\n")
+    assert result.returncode == 0, result.stderr
+    expected = {field: choices[-1] for _, field, choices in RESOURCE_SIZING.values()}
+    (create,) = selected(checkout, "az", ["deployment", "sub", "create"])
+    assert {field: create["parameters"][field]["value"] for field in expected} == expected
+    assert load_config(checkout / ".env").resource_sizes == expected
+    assert json.loads(result.stdout)["foundation"]["redisSkuName"] == "Balanced_B20"
+    assert "3 clusters x 4 nodes" in result.stderr
+    assert "not live capacity" in result.stderr
+    assert "elapsed" not in result.stderr
 
 
 @pytest.mark.parametrize("stage", ["bootstrap", "build"])
@@ -1276,9 +1339,11 @@ def test_bootstrap_selects_postgres_compute_before_arm_create(checkout):
     assert create["parameters"]["postgresSkuName"]["value"] == "Standard_D2ds_v4"
     assert create["parameters"]["postgresSkuTier"]["value"] == "GeneralPurpose"
     assert json.loads(result.stdout)["foundation"]["postgresSkuName"] == "Standard_D2ds_v4"
-    (discovery,) = selected(checkout, "az", ["postgres", "flexible-server", "list-skus"])
-    assert discovery["args"][-4:] == ["--subscription", SUBSCRIPTION, "--output", "json"]
-    assert calls(checkout).index(discovery) < calls(checkout).index(create)
+    discoveries = selected(checkout, "az", ["postgres", "flexible-server", "list-skus"])
+    assert len(discoveries) == 2
+    for discovery in discoveries:
+        assert discovery["args"][-4:] == ["--subscription", SUBSCRIPTION, "--output", "json"]
+        assert calls(checkout).index(discovery) < calls(checkout).index(create)
 
 
 def test_bootstrap_prompts_for_both_compute_choices_on_first_run(checkout):
@@ -2191,6 +2256,37 @@ def test_compiled_network_preserves_private_vault_and_explicit_global_names(comp
     assert "namespace" in compiled_bootstrap["outputs"]["allocations"]["copy"]["input"]
 
 
+def test_compiled_foundation_forwards_explicit_sizing_into_resources(compiled_bootstrap):
+    for _, field, _ in RESOURCE_SIZING.values():
+        if field != "nodeCount":
+            assert "defaultValue" not in compiled_bootstrap["parameters"][field]
+        assert f"parameters('{field}')" in compiled_bootstrap["outputs"]["foundation"]["value"]
+    modules = {item["name"]: item for item in compiled_bootstrap["resources"]}
+    network = modules["network"]["properties"]
+    resources = {item["type"]: item for item in network["template"]["resources"]}
+    for field, resource, property_name in (
+        ("registrySkuName", "Microsoft.ContainerRegistry/registries", "sku"),
+        ("vaultSkuName", "Microsoft.KeyVault/vaults", "properties"),
+    ):
+        assert network["parameters"][field]["value"] == f"[parameters('{field}')]"
+        value = resources[resource][property_name]
+        if property_name == "properties":
+            value = value["sku"]
+        assert value["name"] == f"[parameters('{field}')]"
+    management = modules["management-cluster"]["properties"]
+    cluster = next(
+        item
+        for item in management["template"]["resources"]
+        if item["type"] == "Microsoft.ContainerService/managedClusters"
+    )
+    for field in ("aksTier", "nodeCount", "nodeOsDiskSizeGb"):
+        assert management["parameters"][field]["value"] == f"[parameters('{field}')]"
+    assert cluster["sku"]["tier"] == "[parameters('aksTier')]"
+    pool = cluster["properties"]["agentPoolProfiles"][0]
+    assert pool["count"] == "[parameters('nodeCount')]"
+    assert pool["osDiskSizeGB"] == "[parameters('nodeOsDiskSizeGb')]"
+
+
 def test_credential_grants_reuse_only_exact_secret_get_set_capability(compiled_bootstrap):
     role = next(
         resource
@@ -2243,7 +2339,30 @@ def test_azure_recipes_preserve_selected_project_tags(recipe):
         timeout=120,
     )
     assert result.returncode == 0, result.stderr
-    tags = json.loads(result.stdout)["variables"]["requiredTags"]
+    template = json.loads(result.stdout)
+    tags = template["variables"]["requiredTags"]
     assert "parameters('tags')" in tags and "'project'" not in tags
     assert "'SecurityControl', 'Ignore'" in tags
     assert "'managedBy', 'radius-todolist-app'" in tags
+    resources = template["resources"]
+    resources = resources.values() if isinstance(resources, dict) else resources
+    resources = {item["type"]: item for item in resources}
+    if recipe == "cluster":
+        cluster = resources["Microsoft.ContainerService/managedClusters"]
+        assert cluster["sku"]["tier"] == "[parameters('aksTier')]"
+        pool = cluster["properties"]["agentPoolProfiles"][0]
+        assert pool["count"] == "[parameters('nodeCount')]"
+        assert pool["osDiskSizeGB"] == "[parameters('nodeOsDiskSizeGb')]"
+    elif recipe == "postgresql":
+        storage = resources["Microsoft.DBforPostgreSQL/flexibleServers"]["properties"]["storage"]
+        assert storage["storageSizeGB"] == "[parameters('storageSizeGb')]"
+    elif recipe == "redis":
+        assert "defaultValue" not in template["parameters"]["skuName"]
+        assert resources["Microsoft.Cache/redisEnterprise"]["sku"]["name"] == (
+            "[parameters('skuName')]"
+        )
+    else:
+        assert (
+            resources["Microsoft.Network/applicationGateways"]["properties"]["sku"]["capacity"]
+            == "[parameters('capacity')]"
+        )

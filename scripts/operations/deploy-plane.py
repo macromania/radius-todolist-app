@@ -29,6 +29,7 @@ def main() -> int:
     )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
+    logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(logging.WARNING)
     try:
         config = OperatorConfig.load(args.config)
         config.allocation(args.slot)

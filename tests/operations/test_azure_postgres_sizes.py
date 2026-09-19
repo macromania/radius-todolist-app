@@ -191,21 +191,18 @@ def test_cancel_and_eof_preserve_configuration(invocation, monkeypatch, answer):
     assert path.read_bytes() == before
 
 
-def test_prompt_pauses_progress_and_releases_it_on_interrupt(invocation, monkeypatch):
+def test_prompt_interrupt_preserves_configuration_without_progress_files(invocation, monkeypatch):
     path, _, _ = invocation
-    directory = path.parent / "plane-progress.postgres"
-    directory.mkdir(mode=0o700)
-    monkeypatch.setenv("PLANE_DEMO_PROGRESS_DIR", str(directory))
 
     class Input:
         def readline(self):
-            assert (directory / "heartbeat").is_dir()
+            assert not list(path.parent.glob("plane-progress.*"))
             raise KeyboardInterrupt
 
     before = path.read_bytes()
     monkeypatch.setattr(sys, "stdin", Input())
     assert subject.main() == 130
-    assert not (directory / "heartbeat").exists()
+    assert not list(path.parent.glob("plane-progress.*"))
     assert path.read_bytes() == before
 
 

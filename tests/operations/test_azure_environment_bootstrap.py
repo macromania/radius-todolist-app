@@ -6,7 +6,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from plane_demo.management.providers.azure_environments import EnvironmentError
-from plane_demo.management.providers.identity import AZURE_DEFAULT_SLOTS, DemoConfig
+from plane_demo.management.providers.identity import (
+    AZURE_DEFAULT_SLOTS,
+    RESOURCE_SIZING,
+    DemoConfig,
+)
 from scripts.operations.azure import bootstrap as subject
 from scripts.operations.azure.environment_operator import EnvironmentOperator
 
@@ -23,6 +27,8 @@ def bootstrap(monkeypatch):
             "environmentMode": "prepared-v1",
             "postgresSkuName": "Standard_D2ads_v5",
             "postgresSkuTier": "GeneralPurpose",
+            "resourceSizingVersion": 1,
+            **{field: choices[0] for _, field, choices in RESOURCE_SIZING.values()},
         },
         "allocations": [{"slot": slot} for slot in AZURE_DEFAULT_SLOTS],
     }
@@ -107,6 +113,8 @@ def bootstrap(monkeypatch):
     monkeypatch.setattr(subject.node_sizes, "select_size", MagicMock())
     monkeypatch.setattr(subject.postgres_sizes, "Discovery", lambda _: discovery)
     monkeypatch.setattr(subject.postgres_sizes, "select_size", MagicMock())
+    monkeypatch.setattr(subject.resource_sizes, "Discovery", lambda _: discovery)
+    monkeypatch.setattr(subject.resource_sizes, "select", MagicMock())
     return state
 
 
@@ -130,6 +138,22 @@ def test_existing_default_foundation_is_observed_without_redeployment(bootstrap,
     monkeypatch.setattr(sys, "argv", ["bootstrap.py"])
     assert subject.main() == 0
     assert not any(call[0] == "bash" for call in bootstrap["calls"])
+
+
+@pytest.mark.parametrize("profile", [None, True, 2, 1])
+def test_old_or_malformed_sizing_profiles_stop_before_build_or_operator_job(
+    bootstrap, monkeypatch, profile
+):
+    bootstrap["document"]["foundation"]["resourceSizingVersion"] = profile
+    if profile == 1 and type(profile) is int:
+        del bootstrap["document"]["foundation"]["redisSkuName"]
+    artifacts = MagicMock()
+    monkeypatch.setattr(subject, "artifacts", artifacts)
+    monkeypatch.setattr(sys, "argv", ["bootstrap.py"])
+    with pytest.raises(EnvironmentError, match="sizing profile"):
+        subject.main()
+    artifacts.assert_not_called()
+    assert bootstrap["calls"] == []
 
 
 def test_readiness_failure_after_completed_jobs_releases_the_workstation_lease(
@@ -206,6 +230,11 @@ def test_isolated_entrypoint_never_redeploys_default_foundation_or_applications(
     ]
     subject.node_sizes.select_size.assert_called_once()
     assert subject.node_sizes.select_size.call_args.args[3].clusters == 5
+    subject.resource_sizes.select.assert_called_once()
+    assert (
+        subject.resource_sizes.select.call_args.kwargs["existing"]
+        == bootstrap["document"]["foundation"]
+    )
 
 
 def test_isolated_bootstrap_refuses_a_missing_default_instead_of_creating_one(

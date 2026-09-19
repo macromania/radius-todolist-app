@@ -12,10 +12,12 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
-from urllib.parse import urlencode, urlsplit
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path[:0] = [str(ROOT), str(ROOT / "src")]
+from scripts.operations.azure.compute_selection import (  # noqa: E402
+    PRICES as PRICES,
+)
 from scripts.operations.azure.compute_selection import (  # noqa: E402
     Discovery as ComputeDiscovery,
 )
@@ -34,9 +36,7 @@ from scripts.operations.config import (  # noqa: E402
     initialize_config,
     load_config,
 )
-from scripts.operations.output import pause_progress, status  # noqa: E402
-
-PRICES = "https://prices.azure.com/api/retail/prices"
+from scripts.operations.output import status  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -283,73 +283,28 @@ class Discovery(ComputeDiscovery):
                 + " or ".join(f"armSkuName eq '{name}'" for name in selected)
                 + ")"
             )
-            url = (
-                PRICES
-                + "?"
-                + urlencode(
-                    {
-                        "api-version": "2023-01-01-preview",
-                        "$filter": filter_text,
-                    }
-                )
-            )
-            seen = set()
-            while url:
-                try:
-                    parsed = urlsplit(url)
-                    port = parsed.port
-                except ValueError as error:
-                    raise NodeSizeError("Invalid retail-price pagination URL") from error
+            for item in self.retail_items(filter_text, "Prices: Linux pay-as-you-go compute"):
+                name = item.get("armSkuName")
                 if (
-                    parsed.scheme != "https"
-                    or parsed.hostname != "prices.azure.com"
-                    or port not in (None, 443)
-                    or parsed.username
-                    or parsed.password
-                    or parsed.fragment
-                    or url in seen
-                    or len(seen) >= 20
+                    name not in selected
+                    or item.get("armRegionName") != self.config.location
+                    or item.get("type") != "Consumption"
+                    or item.get("currencyCode") != "USD"
+                    or item.get("unitOfMeasure") != "1 Hour"
+                    or item.get("isPrimaryMeterRegion") is False
+                    or re.search(
+                        r"Windows|Spot|Low Priority|RHEL|SUSE|Red Hat",
+                        f"{item.get('productName', '')} {item.get('meterName', '')}",
+                        re.IGNORECASE,
+                    )
                 ):
-                    raise NodeSizeError("Invalid retail-price pagination URL")
-                seen.add(url)
-                value = self.command(
-                    ["curl", "--fail", "--silent", "--show-error", "--max-time", "30", url],
-                    "Prices: Linux pay-as-you-go compute",
-                )
-                if not isinstance(value, dict) or not isinstance(value.get("Items"), list):
-                    raise NodeSizeError("Retail pricing returned an invalid page")
-                for item in value["Items"]:
-                    if not isinstance(item, dict):
-                        raise NodeSizeError("Retail pricing returned an invalid item")
-                    name = item.get("armSkuName")
-                    if (
-                        name not in selected
-                        or item.get("armRegionName") != self.config.location
-                        or item.get("type") != "Consumption"
-                        or item.get("currencyCode") != "USD"
-                        or item.get("unitOfMeasure") != "1 Hour"
-                        or item.get("isPrimaryMeterRegion") is False
-                        or re.search(
-                            r"Windows|Spot|Low Priority|RHEL|SUSE|Red Hat",
-                            f"{item.get('productName', '')} {item.get('meterName', '')}",
-                            re.IGNORECASE,
-                        )
-                    ):
-                        continue
-                    price = item.get("retailPrice")
-                    if (
-                        isinstance(price, bool)
-                        or not isinstance(price, (int, float))
-                        or not math.isfinite(price)
-                        or price <= 0
-                    ):
-                        raise NodeSizeError(f"{name}: invalid retail price")
-                    if name in prices and prices[name] != price:
-                        raise NodeSizeError(f"{name}: ambiguous retail price")
-                    prices[name] = price
-                url = value.get("NextPageLink")
-                if url is not None and not isinstance(url, str):
-                    raise NodeSizeError("Invalid retail-price continuation")
+                    continue
+                price = item.get("retailPrice")
+                if type(price) not in (int, float) or not math.isfinite(price) or price <= 0:
+                    raise NodeSizeError(f"{name}: invalid retail price")
+                if name in prices and prices[name] != price:
+                    raise NodeSizeError(f"{name}: ambiguous retail price")
+                prices[name] = price
         return prices
 
 
@@ -386,31 +341,30 @@ def select_size(eligible, problems, config, budget, discovery, *, existing=None)
         eligible.values(),
         key=lambda size: (prices.get(size.name, math.inf), size.cpus, size.memory, size.name),
     )[:3]
-    with pause_progress():
-        status("section", "AKS node size: choose an available option")
+    status("section", "AKS node size: choose an available option")
+    print(
+        f"  Region: {config.location}\n"
+        f"  Full demo: {budget.clusters} clusters x {budget.nodes} nodes; "
+        "one surge node per cluster reserved.\n\n"
+        "  #  Size                         vCPUs  RAM GiB   USD/VM-hour  USD/demo-hour",
+        file=sys.stderr,
+    )
+    for number, size in enumerate(choices, 1):
+        price = prices.get(size.name)
+        hourly = f"{price:.3f}" if price is not None else "unavailable"
+        fleet = f"{price * budget.fleet_nodes:.3f}" if price is not None else "unavailable"
         print(
-            f"  Region: {config.location}\n"
-            f"  Full demo: {budget.clusters} clusters x {budget.nodes} nodes; "
-            "one surge node per cluster reserved.\n\n"
-            "  #  Size                         vCPUs  RAM GiB   USD/VM-hour  USD/demo-hour",
+            f"  {number}  {size.name:<28} {size.cpus:>5} {size.memory:>8g} "
+            f"{hourly:>13} {fleet:>14}",
             file=sys.stderr,
         )
-        for number, size in enumerate(choices, 1):
-            price = prices.get(size.name)
-            hourly = f"{price:.3f}" if price is not None else "unavailable"
-            fleet = f"{price * budget.fleet_nodes:.3f}" if price is not None else "unavailable"
-            print(
-                f"  {number}  {size.name:<28} {size.cpus:>5} {size.memory:>8g} "
-                f"{hourly:>13} {fleet:>14}",
-                file=sys.stderr,
-            )
-        print(
-            "\n  Prices are Linux retail compute estimates; disks and other services are extra.\n"
-            "  Choices use regional node pools and managed OS disks.\n"
-            "  Availability is not a capacity reservation.\n",
-            file=sys.stderr,
-        )
-        return choices[read_selection(len(choices))]
+    print(
+        "\n  Prices are Linux retail compute estimates; disks and other services are extra.\n"
+        "  Choices use regional node pools and managed OS disks.\n"
+        "  Availability is not a capacity reservation.\n",
+        file=sys.stderr,
+    )
+    return choices[read_selection(len(choices))]
 
 
 def main():
@@ -429,6 +383,8 @@ def main():
         if not isinstance(template, dict):
             raise NodeSizeError("The compiled foundation is not an object")
         budget = Budget.from_template(template)
+        if config.node_count is not None:
+            budget = Budget(budget.clusters, config.node_count)
         existing = None
         if args.existing_foundation:
             document = json.loads(args.existing_foundation.read_text())

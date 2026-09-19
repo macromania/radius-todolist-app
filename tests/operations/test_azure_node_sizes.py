@@ -293,26 +293,14 @@ def test_cancel_or_eof_does_not_change_configuration(invocation, monkeypatch, an
 
 
 @pytest.mark.parametrize("answer,expected", [("2\n", 0), ("q\n", 130), ("", 130), (None, 130)])
-def test_selector_pauses_only_the_prompt_and_always_releases_it(
+def test_selector_preserves_input_and_cancellation_without_progress_files(
     invocation, monkeypatch, answer, expected
 ):
-    path, _, runner = invocation
-    directory = path.parent / "plane-progress.selection"
-    directory.mkdir(mode=0o700)
-    gate = directory / "heartbeat"
-    monkeypatch.setenv("PLANE_DEMO_PROGRESS_DIR", str(directory))
-    original_runner = runner.__call__
-
-    def working(argv, **kwargs):
-        assert not gate.exists(), "Progress was paused while discovering sizes or prices"
-        return original_runner(argv, **kwargs)
-
-    discovery = subject.Discovery(configuration.load_config(path))
-    discovery.runner = working
+    path, _, _ = invocation
 
     class Input:
         def readline(self):
-            assert gate.is_dir(), "The selector did not pause its ancestor timers"
+            assert not list(path.parent.glob("plane-progress.*"))
             if answer is None:
                 raise KeyboardInterrupt
             return answer
@@ -320,7 +308,7 @@ def test_selector_pauses_only_the_prompt_and_always_releases_it(
     monkeypatch.setattr(sys, "stdin", Input())
     before = path.read_bytes()
     assert subject.main() == expected
-    assert not gate.exists()
+    assert not list(path.parent.glob("plane-progress.*"))
     if expected != 0:
         assert path.read_bytes() == before
 
@@ -381,6 +369,21 @@ def test_confirmation_precedes_discovery_and_config_writes(invocation, monkeypat
     assert subject.main() == 1
     assert "CONFIRM_AZURE" in capsys.readouterr().err
     assert not runner.calls and path.read_bytes() == before
+
+
+def test_selected_node_count_changes_real_main_quota_budget(invocation, monkeypatch, capsys):
+    path, original, runner = invocation
+    configuration.initialize_config(replace(original, node_count=4), path)
+    runner.usage = quotas(limit=99)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("1\n"))
+    assert subject.main() == 1
+    assert "No eligible x64 node sizes" in capsys.readouterr().err
+    assert configuration.load_config(path).node_vm_size is None
+    runner.usage = quotas(limit=200)
+    assert subject.main() == 0
+    output = capsys.readouterr()
+    assert json.loads(output.out)["nodeCount"] == 4
+    assert "5 clusters x 4 nodes" in output.err
 
 
 def test_existing_foundation_cannot_be_resized_by_the_selector(invocation, monkeypatch, capsys):

@@ -156,7 +156,7 @@ def test_help_contains_examples_guards_and_real_walkthroughs(tmp_path):
         "no saved export is required",
         "no record path is required",
         "Revalidate selected artifacts",
-        "wait for actual completion",
+        "prepared Azure uses bootstrap",
     ):
         assert text in result.stdout
     for guide in ("RUN_AZURE_SCENARIOS.md", "RUN_LOCAL_SCENARIOS.md"):
@@ -354,7 +354,8 @@ def test_styled_stage_headings_preserve_json_stdout(tmp_path, color, terminal, e
     assert result.stdout == '{"result":"unchanged"}\n'
     plain = ANSI.sub("", result.stderr)
     assert plain.startswith(f"\n\n== show-config ==\n{RULE}\n\n      show-config\n")
-    assert f"{chr(0x2705) if styled else 'OK'}  show-config completed (" in plain
+    assert f"{chr(0x2705) if styled else 'OK'}  show-config completed\n" in plain
+    assert "completed (" not in plain
     assert ("\x1b" in result.stderr) == styled
 
 

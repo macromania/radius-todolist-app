@@ -80,6 +80,7 @@ def main():
     parser.add_argument("--retire", action="store_true")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
+    logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(logging.WARNING)
     configuration = OperatorConfig.load(args.config)
     if args.pair not in {item["pair_id"] for item in configuration.pair_slots}:
         raise ProvisioningError("invalid_pair_assignment")

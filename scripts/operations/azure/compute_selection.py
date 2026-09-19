@@ -6,8 +6,11 @@ import json
 import re
 import subprocess
 import sys
+from urllib.parse import urlencode, urlsplit
 
 from scripts.operations.output import progress, status
+
+PRICES = "https://prices.azure.com/api/retail/prices"
 
 
 class SelectionError(RuntimeError):
@@ -72,3 +75,48 @@ class Discovery:
         if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
             raise SelectionError("Azure compute discovery returned an invalid list")
         return value
+
+    def retail_items(self, filter_text, label):
+        url = (
+            PRICES
+            + "?"
+            + urlencode(
+                {
+                    "api-version": "2023-01-01-preview",
+                    "$filter": filter_text,
+                }
+            )
+        )
+        seen, items = set(), []
+        while url:
+            try:
+                parsed = urlsplit(url)
+                port = parsed.port
+            except ValueError as error:
+                raise SelectionError("Invalid retail-price pagination URL") from error
+            if (
+                parsed.scheme != "https"
+                or parsed.hostname != "prices.azure.com"
+                or port not in (None, 443)
+                or parsed.username
+                or parsed.password
+                or parsed.fragment
+                or url in seen
+                or len(seen) >= 20
+            ):
+                raise SelectionError("Invalid retail-price pagination URL")
+            seen.add(url)
+            page = self.command(
+                ["curl", "--fail", "--silent", "--show-error", "--max-time", "30", url], label
+            )
+            if (
+                not isinstance(page, dict)
+                or not isinstance(page.get("Items"), list)
+                or any(not isinstance(item, dict) for item in page["Items"])
+            ):
+                raise SelectionError("Retail pricing returned an invalid page")
+            items.extend(page["Items"])
+            url = page.get("NextPageLink")
+            if url is not None and not isinstance(url, str):
+                raise SelectionError("Invalid retail-price continuation")
+        return items

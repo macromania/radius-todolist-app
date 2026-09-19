@@ -3,6 +3,10 @@ param clusterName string
 param location string
 param kubernetesVersion string
 param nodeVmSize string
+@allowed(['Free', 'Standard'])
+param aksTier string
+@allowed([64, 128, 256])
+param nodeOsDiskSizeGb int
 @minValue(2)
 param nodeCount int = 2
 param nodeSubnetId string
@@ -20,7 +24,7 @@ resource cluster 'Microsoft.ContainerService/managedClusters@2025-05-01' = {
   tags: tags
   sku: {
     name: 'Base'
-    tier: 'Free'
+    tier: aksTier
   }
   identity: {
     type: 'UserAssigned'
@@ -79,7 +83,7 @@ resource cluster 'Microsoft.ContainerService/managedClusters@2025-05-01' = {
         vmSize: nodeVmSize
         count: nodeCount
         maxPods: 110
-        osDiskSizeGB: 64
+        osDiskSizeGB: nodeOsDiskSizeGb
         osDiskType: 'Managed'
         upgradeSettings: {
           maxSurge: '1'

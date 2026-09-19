@@ -6,6 +6,8 @@ param privateDnsZoneId string
 param skuName string
 @allowed(['Burstable', 'GeneralPurpose', 'MemoryOptimized'])
 param skuTier string
+@allowed([32, 64, 128, 256])
+param storageSizeGb int
 param administratorLogin string = 'plane_setup'
 @description('Generated setup-only credential. Reapply may rotate it; never put it in readable environment Recipe parameters.')
 @secure()
@@ -50,7 +52,7 @@ resource server 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = {
       publicNetworkAccess: 'Disabled'
     }
     storage: {
-      storageSizeGB: 32
+      storageSizeGB: storageSizeGb
       autoGrow: 'Enabled'
     }
     backup: {

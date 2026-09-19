@@ -174,6 +174,7 @@ class AzureProvider:
         return self.commands.run(
             command,
             env=self.commands.radius_environment(kubeconfig, context),
+            **({"stream_output": True} if args[:1] == ("deploy",) else {}),
             **({"timeout": timeout} if timeout is not None else {}),
         )
 
@@ -185,6 +186,11 @@ class AzureProvider:
         timeout: int | None = None,
     ):
         context, kubeconfig = self.paths(slot)
+        verb = (
+            args[2]
+            if len(args) >= 3 and args[0] in {"-n", "--namespace"}
+            else (args[0] if args else "")
+        )
         return self.commands.run(
             [
                 "kubectl",
@@ -196,6 +202,7 @@ class AzureProvider:
                 *args,
             ],
             stdin=stdin,
+            **({"stream_output": True} if verb in {"wait", "rollout"} else {}),
             **({"timeout": timeout} if timeout is not None else {}),
         )
 
@@ -484,6 +491,8 @@ class AzureProvider:
     def recipe_map(self, slot: str) -> dict:
         allocation = self.config.allocation(slot)
         foundation = self.config.foundation
+        if foundation.get("resourceSizingVersion") != 1:
+            raise ProvisioningError("resource_sizing_selection_missing")
         if not slot.endswith("-data") and (
             not foundation.get("postgresSkuName") or not foundation.get("postgresSkuTier")
         ):
@@ -494,16 +503,19 @@ class AzureProvider:
                 **common,
                 "skuName": foundation.get("postgresSkuName"),
                 "skuTier": foundation.get("postgresSkuTier"),
+                "storageSizeGb": foundation["postgresStorageSizeGb"],
                 "delegatedSubnetId": allocation["postgresqlSubnetId"],
                 "privateDnsZoneId": foundation["postgresqlDnsZoneId"],
             },
             "redis": {
                 **common,
+                "skuName": foundation["redisSkuName"],
                 "privateEndpointSubnetId": allocation["privateEndpointSubnetId"],
                 "privateDnsZoneId": foundation["redisDnsZoneId"],
             },
             "gateway": {
                 **common,
+                "capacity": foundation["gatewayCapacity"],
                 **{
                     key: allocation[key]
                     for key in (
@@ -535,6 +547,8 @@ class AzureProvider:
                         "kubernetesVersion",
                         "nodeVmSize",
                         "nodeCount",
+                        "aksTier",
+                        "nodeOsDiskSizeGb",
                         "authorizedIpRanges",
                     )
                 },
@@ -554,6 +568,8 @@ class AzureProvider:
         allocation = self.config.allocation(slot)
         if slot == "management":
             raise ProvisioningError("management_is_bootstrap_owned")
+        if self.config.foundation.get("resourceSizingVersion") != 1:
+            raise ProvisioningError("resource_sizing_selection_missing")
         if not self._verified:
             self.verify_recipes()
         foundation = self.config.foundation
@@ -590,6 +606,8 @@ class AzureProvider:
                                     "kubernetesVersion",
                                     "nodeVmSize",
                                     "nodeCount",
+                                    "aksTier",
+                                    "nodeOsDiskSizeGb",
                                     "authorizedIpRanges",
                                 )
                             },
@@ -801,7 +819,8 @@ class AzureProvider:
                 self.config.foundation["tenantId"],
                 "--workspace-root",
                 str(self.state),
-            ]
+            ],
+            stream_output=True,
         )
         self.register(cluster.slot)
 

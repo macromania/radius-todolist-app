@@ -5,7 +5,8 @@ param context object
 param location string = resourceGroup().location
 param privateEndpointSubnetId string
 param privateDnsZoneId string
-param skuName string = 'Balanced_B0'
+@allowed(['Balanced_B0', 'Balanced_B1', 'Balanced_B3', 'Balanced_B5', 'Balanced_B10', 'Balanced_B20'])
+param skuName string
 @allowed(['Enabled', 'Disabled'])
 param highAvailability string = 'Disabled'
 param tags object = {}

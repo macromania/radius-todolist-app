@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import os
 import selectors
@@ -5,24 +6,119 @@ import shutil
 import signal
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
+from unittest.mock import MagicMock, call
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-from scripts.operations import output as operator_output  # noqa: E402
-from scripts.operations.output import pause_progress, progress, run_main, status  # noqa: E402
+from scripts.operations.output import progress, run_main, status  # noqa: E402
 
 WRAPPER = ROOT / "scripts/lib/progress.sh"
 SHELLS = sorted({"/bin/bash", shutil.which("bash")})
 
 
-@pytest.fixture(autouse=True)
-def isolated_progress_context(monkeypatch):
-    monkeypatch.delenv("PLANE_DEMO_PROGRESS_DIR", raising=False)
+@pytest.fixture
+def job_operator(monkeypatch):
+    monkeypatch.syspath_prepend(str(ROOT / "scripts/operations"))
+    spec = importlib.util.spec_from_file_location(
+        "job_output_operator", ROOT / "scripts/operations/run-management-job.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("outcome", ["complete", "failed-stream", "stuck", "wait-failure"])
+def test_job_log_follower_uses_scoped_access_and_is_reaped(
+    job_operator, monkeypatch, tmp_path, capsys, outcome
+):
+    process = MagicMock()
+    if outcome == "stuck":
+        process.wait.side_effect = [
+            subprocess.TimeoutExpired("kubectl", 5),
+            subprocess.TimeoutExpired("kubectl", 5),
+            -9,
+        ]
+    else:
+        process.wait.return_value = 7 if outcome == "failed-stream" else 0
+    spawn = MagicMock(return_value=process)
+    monkeypatch.setattr(job_operator.subprocess, "Popen", spawn)
+    signal_group = MagicMock()
+    monkeypatch.setattr(job_operator.os, "killpg", signal_group)
+    base = ["kubectl", "--kubeconfig", str(tmp_path / "kubeconfig"), "--context", "owned-context"]
+
+    def wait():
+        with job_operator.job_logs(base, "owned-namespace", "prepare-shared", enabled=True):
+            assert spawn.call_count == 1
+            if outcome == "wait-failure":
+                raise ValueError("owned job failed")
+
+    if outcome == "wait-failure":
+        with pytest.raises(ValueError, match="owned job failed"):
+            wait()
+    else:
+        wait()
+    arguments = spawn.call_args.args[0]
+    assert arguments[: len(base)] == base
+    assert arguments[len(base) :] == [
+        "--request-timeout=0",
+        "-n",
+        "owned-namespace",
+        "logs",
+        "job/prepare-shared",
+        "--all-containers=true",
+        "--follow",
+        "--pod-running-timeout=300s",
+    ]
+    assert spawn.call_args.kwargs["stdout"] is sys.stderr
+    assert spawn.call_args.kwargs["stderr"] is sys.stderr
+    assert spawn.call_args.kwargs["start_new_session"] is True
+    process.wait.assert_called()
+    if outcome == "stuck":
+        assert signal_group.call_args_list == [
+            call(process.pid, signal.SIGTERM),
+            call(process.pid, signal.SIGKILL),
+        ]
+    else:
+        signal_group.assert_not_called()
+    process.terminate.assert_not_called()
+    process.kill.assert_not_called()
+    if outcome == "failed-stream":
+        assert "log stream exited 7" in capsys.readouterr().err
+
+
+def test_completed_jobs_do_not_start_a_log_follower(job_operator, monkeypatch):
+    spawn = MagicMock()
+    monkeypatch.setattr(job_operator.subprocess, "Popen", spawn)
+    with job_operator.job_logs([], "namespace", "deploy-management", enabled=False):
+        pass
+    spawn.assert_not_called()
+
+
+def test_log_start_failure_is_explicit_and_does_not_hide_job_status(
+    job_operator, monkeypatch, capsys
+):
+    monkeypatch.setattr(
+        job_operator.subprocess, "Popen", MagicMock(side_effect=OSError("synthetic"))
+    )
+    with job_operator.job_logs([], "namespace", "prepare-shared", enabled=True):
+        pass
+    assert "cannot stream logs" in capsys.readouterr().err
+
+
+def test_job_rollout_native_output_does_not_pollute_json_stdout(job_operator, capfd):
+    assert (
+        job_operator.execute(
+            [sys.executable, "-c", 'print("deployment successfully rolled out")'], capture=False
+        )
+        == ""
+    )
+    output = capfd.readouterr()
+    assert output.out == ""
+    assert output.err == "deployment successfully rolled out\n"
 
 
 @pytest.mark.parametrize(
@@ -135,8 +231,7 @@ def test_progress_cleanup_runs_inside_an_existing_exit_handler(tmp_path, shell):
 
 
 @pytest.mark.parametrize("shell", SHELLS)
-def test_progress_is_visible_before_completion_and_every_fifteen_seconds(shell):
-    started = time.monotonic()
+def test_progress_is_visible_before_completion_without_polling_lines(shell):
     with subprocess.Popen(
         [
             shell,
@@ -157,19 +252,18 @@ def test_progress_is_visible_before_completion_and_every_fifteen_seconds(shell):
                 assert selector.select(timeout=3), "No early status before the command blocks"
                 assert b"      Waiting for input\n" == process.stderr.readline()
                 assert process.poll() is None
-                assert selector.select(timeout=20), "No heartbeat during a quiet command"
-                assert b"elapsed" in process.stderr.readline()
-                assert 14 <= time.monotonic() - started < 25
+                assert not selector.select(timeout=0.1), "Unexpected repeated progress"
             stdout, stderr = process.communicate(input=b"done", timeout=5)
             assert process.returncode == 0 and json.loads(stdout) == {}
             assert b"OK  Waiting for input completed" in stderr
+            assert b"elapsed" not in stderr
         finally:
             if process.poll() is None:
                 process.terminate()
                 process.communicate(timeout=5)
 
 
-def test_interruption_reaps_the_owned_monitor_and_keeps_failure():
+def test_interruption_keeps_failure_without_reporting_completion():
     with subprocess.Popen(
         [
             "bash",
@@ -194,7 +288,7 @@ def test_interruption_reaps_the_owned_monitor_and_keeps_failure():
 
 def test_python_progress_stops_on_failure_and_sanitizes_controls(capsys):
     with pytest.raises(RuntimeError):
-        with progress("Synthetic failure", interval=0.01):
+        with progress("Synthetic failure"):
             time.sleep(0.02)
             raise RuntimeError("failure")
     before = capsys.readouterr()
@@ -214,7 +308,7 @@ def test_entities_sections_and_outcomes_are_visually_separate(monkeypatch, capsy
     for kind, message in (
         ("section", "Bootstrap: validate the foundation"),
         ("progress", "Azure: deployment sub validate"),
-        ("success", "Azure: deployment sub validate completed (2s)"),
+        ("success", "Azure: deployment sub validate completed"),
     ):
         result = subprocess.run(
             [
@@ -243,39 +337,27 @@ def test_entities_sections_and_outcomes_are_visually_separate(monkeypatch, capsy
             assert ("\u2705" in result.stderr) == (color == "always")
 
 
-def test_python_heartbeats_pause_across_nested_prompt_scopes(monkeypatch, capsys):
-    heartbeat = threading.Event()
+def test_python_progress_emits_only_phase_boundaries(capsys):
+    def operation():
+        with progress("Environment Job: prepare-shared"):
+            print('{"status":"complete"}')
+        return 0
 
-    def observed_status(kind, message):
-        status(kind, message)
-        if message.endswith("elapsed"):
-            heartbeat.set()
-
-    monkeypatch.setattr(operator_output, "status", observed_status)
-    with progress("Python operation", interval=0.01):
-        with pause_progress():
-            capsys.readouterr()
-            heartbeat.clear()
-            assert not heartbeat.wait(0.05)
-            with pause_progress():
-                assert not heartbeat.wait(0.05)
-            assert not heartbeat.wait(0.05)
-            assert capsys.readouterr().err == ""
-        assert heartbeat.wait(1), "Heartbeat did not resume after the prompt"
-        assert "elapsed" in capsys.readouterr().err
-        with pytest.raises(RuntimeError, match="cancelled"):
-            with pause_progress():
-                heartbeat.clear()
-                raise RuntimeError("cancelled")
-        assert heartbeat.wait(1), "Prompt failure left heartbeats paused"
+    assert run_main(operation, "Bootstrap") == 0
+    output = capsys.readouterr()
+    assert json.loads(output.out) == {"status": "complete"}
+    assert len(output.err.strip().splitlines()) == 3
+    assert "Bootstrap completed\n" in output.err
+    assert "completed (" not in output.err
+    assert "elapsed" not in output.err
 
 
 @pytest.mark.parametrize("shell", SHELLS)
-def test_selection_pauses_all_ancestor_timers_then_resumes_them(tmp_path, shell):
+def test_nested_shell_and_python_progress_stays_quiet_past_the_old_timer_interval(tmp_path, shell):
     program = (
         "import sys\n"
-        "from scripts.operations.output import pause_progress\n"
-        "with pause_progress():\n"
+        "from scripts.operations.output import progress\n"
+        "with progress('Python phase'):\n"
         "    print('prompt-ready', file=sys.stderr, flush=True)\n"
         "    sys.stdin.readline()\n"
         "print('prompt-finished', file=sys.stderr, flush=True)\n"
@@ -316,20 +398,13 @@ def test_selection_pauses_all_ancestor_timers_then_resumes_them(tmp_path, shell)
                 assert not selector.select(timeout=16), "A timer printed while waiting for input"
                 process.stdin.write(b"selected\n")
                 process.stdin.flush()
-                resumed = set()
-                deadline = time.monotonic() + 20
-                while resumed != {"outer", "inner"}:
-                    assert selector.select(timeout=max(0, deadline - time.monotonic())), (
-                        f"Ancestor timers did not resume: {resumed}"
-                    )
-                    line = process.stderr.readline()
-                    assert line, "The command stopped before its timers resumed"
-                    for label in ("outer", "inner"):
-                        if label.encode() in line and b"elapsed" in line:
-                            resumed.add(label)
+                assert selector.select(timeout=3)
+                assert process.stderr.readline() == b"prompt-finished\n"
             stdout, stderr = process.communicate(input=b"finish\n", timeout=5)
             assert process.returncode == 0, stderr
             assert json.loads(stdout) == {}
+            assert b"elapsed" not in stderr
+            assert b"outer completed" in stderr and b"inner completed" in stderr
         finally:
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGTERM)
@@ -337,7 +412,7 @@ def test_selection_pauses_all_ancestor_timers_then_resumes_them(tmp_path, shell)
     assert list(tmp_path.iterdir()) == []
 
 
-def test_outer_wrapper_cleans_a_gate_left_by_a_killed_prompt(tmp_path):
+def test_killed_command_leaves_no_progress_files_or_false_success(tmp_path):
     result = subprocess.run(
         [
             "bash",
@@ -346,8 +421,8 @@ def test_outer_wrapper_cleans_a_gate_left_by_a_killed_prompt(tmp_path):
             sys.executable,
             "-c",
             "import os,signal\n"
-            "from scripts.operations.output import pause_progress\n"
-            "with pause_progress():\n"
+            "from scripts.operations.output import progress\n"
+            "with progress('Python phase'):\n"
             "    os.kill(os.getpid(), signal.SIGKILL)\n",
         ],
         cwd=ROOT,
@@ -359,35 +434,4 @@ def test_outer_wrapper_cleans_a_gate_left_by_a_killed_prompt(tmp_path):
     )
     assert result.returncode != 0 and not result.stdout
     assert list(tmp_path.iterdir()) == []
-
-
-def test_contended_gate_may_disappear_before_it_is_inspected(tmp_path, monkeypatch):
-    gate = tmp_path / "heartbeat"
-
-    def contended(*args, **kwargs):
-        raise FileExistsError
-
-    monkeypatch.setattr(Path, "mkdir", contended)
-    with operator_output._heartbeat_slot(gate) as available:
-        assert available is False
-    assert not gate.exists()
-
-
-@pytest.mark.parametrize("kind", ["public", "symlink", "wrong-name"])
-def test_prompt_rejects_an_invalid_coordination_directory(tmp_path, monkeypatch, kind):
-    directory = tmp_path / "plane-progress.test"
-    directory.mkdir(mode=0o700)
-    if kind == "public":
-        directory.chmod(0o755)
-    elif kind == "symlink":
-        link = tmp_path / "plane-progress.link"
-        link.symlink_to(directory, target_is_directory=True)
-        directory = link
-    else:
-        directory = tmp_path / "unrelated"
-        directory.mkdir(mode=0o700)
-    monkeypatch.setenv("PLANE_DEMO_PROGRESS_DIR", str(directory))
-    with pytest.raises(ValueError, match="Invalid progress coordination directory"):
-        with pause_progress():
-            pytest.fail("The invalid prompt context was entered")
-    assert not (directory / "heartbeat").exists()
+    assert "OK  Killed prompt" not in result.stderr

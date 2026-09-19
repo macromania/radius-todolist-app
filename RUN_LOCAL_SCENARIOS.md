@@ -80,8 +80,9 @@ checkpoint before deploying.
 Make workflows separate sections with headings and rules, and align entities
 with their messages. Progress has no bracketed label or icon. Styled terminals
 show green check marks for completed operations; plain output uses `OK`.
-Warnings and errors remain explicit. Quiet waits print elapsed time every
-15 seconds. Use `COLOR=always` to force styling, or `COLOR=never` or nonempty
+Warnings and errors remain explicit. Progress reports phase starts and completion
+without elapsed-time counters or durations.
+Use `COLOR=always` to force styling, or `COLOR=never` or nonempty
 `NO_COLOR` to disable it. Redirected output is plain by default. Status goes to
 stderr; JSON/API stdout and native diagnostics are preserved. Build and push logs
 are not filtered.

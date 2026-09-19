@@ -6,6 +6,8 @@ param nodeSubnetName string
 param apiPrivateIp string
 param challengePrivateIp string
 param gatewayIdentityId string
+@allowed([1, 2, 3])
+param capacity int
 param apiHealthPath string = '/healthz'
 @allowed(['challenge', 'https'])
 param phase string = context.resource.properties.phase
@@ -200,7 +202,7 @@ resource gateway 'Microsoft.Network/applicationGateways@2024-07-01' = {
     sku: {
       name: 'Standard_v2'
       tier: 'Standard_v2'
-      capacity: 1
+      capacity: capacity
     }
     enableHttp2: true
     sslPolicy: {

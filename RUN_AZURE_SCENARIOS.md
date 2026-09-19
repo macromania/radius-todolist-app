@@ -108,8 +108,9 @@ full source checks if you want that checkpoint before deploying.
 Make workflows separate sections with headings and rules, and align entities
 with their messages. Progress has no bracketed label or icon. Styled terminals
 show green check marks for completed operations; plain output uses `OK`.
-Warnings and errors remain explicit. Quiet waits print elapsed time every
-15 seconds. `COLOR=always` forces styling; `COLOR=never` or nonempty `NO_COLOR`
+Warnings and errors remain explicit. Progress reports phase starts, Job state
+changes, and completion without elapsed-time counters or durations.
+`COLOR=always` forces styling; `COLOR=never` or nonempty `NO_COLOR`
 disables it. Redirected output is plain by default. Status goes to stderr;
 JSON/API stdout, native diagnostics, and complete build/push logs are preserved.
 
@@ -242,12 +243,52 @@ requirement, inspect the failed public IP's Activity Log for policy append event
 and ask the policy owner to review the required allocation. Bootstrap prints the
 selected deployment name and a scoped inspection command when creation fails.
 
+#### Choose resource sizes and tiers
+
+Before creating resources, bootstrap checks regional service support and asks
+for explicit sizing choices. It saves the completed resource-sizing selection
+in the private `.env`, preserving credentials. Cancelling this menu leaves the
+previous file unchanged. AKS VM and PostgreSQL compute selection follow.
+
+| Resource | Supported demo choices | Saved setting |
+|---|---|---|
+| AKS nodes per cluster | 2, 3, 4 | `AZURE_NODE_COUNT` |
+| AKS control-plane tier | Free, Standard | `AZURE_AKS_TIER` |
+| AKS managed OS disk | 64, 128, 256 GiB | `AZURE_NODE_OS_DISK_GB` |
+| PostgreSQL storage | Advertised managed-disk sizes from 32, 64, 128, 256 GiB | `AZURE_POSTGRES_STORAGE_GB` |
+| Managed Redis | Published Balanced B0, B1, B3, B5, B10, B20 offers | `AZURE_REDIS_SKU` |
+| Application Gateway instances per plane | 1, 2, 3 | `AZURE_GATEWAY_CAPACITY` |
+| Container Registry tier | Basic, Standard, Premium | `AZURE_REGISTRY_SKU` |
+| Key Vault tier | standard, premium; an external vault retains its actual tier | `AZURE_KEY_VAULT_SKU` |
+
+The menus cover demo-compatible choices, not every Azure service configuration.
+AKS, gateways, registry and vault use provider metadata for regional service
+support. PostgreSQL storage uses the subscription's service capabilities. Redis
+uses Azure's public regional retail offers and shows indicative unit-hour prices.
+These are **not live Redis capacity or subscription quota checks**. Azure's Redis
+scaling-SKU API requires an existing cache, so it is not used for pre-creation
+discovery. A published offer can still fail with `InsufficientCapacity`.
+
+Redis remains non-clustered, with TLS enabled and HA disabled. Its offered
+Balanced sizes range from 0.5 GB to 24 GB, within the demo's non-clustered limit.
+Application Gateway remains Standard_v2 without WAF. Public IPs, NAT and load
+balancers remain Standard. DNS, identities, role assignments and private
+endpoints have no compute size to select.
+
+Management and child Recipes receive the chosen sizes explicitly. Named
+isolated additions inherit the base choices and recheck advertised support.
+`make show-config` displays the saved choices. Repeating `make init` resets them.
+Bootstrap never substitutes a size or region, resizes existing resources, or
+replays a failed administrative Job automatically. Foundations without the
+complete sizing profile require their matching checkout or a fresh deployment
+name; changing `.env` is not a recovery procedure for a failed deployment.
+
 #### Choose node capacity
 
 Before creating the foundation, bootstrap reads current VM availability,
 capabilities, and vCPU quotas for the selected subscription and region. On the
 first run, choose one of up to three eligible sizes by entering its number.
-Elapsed-time updates pause while the menu waits for your answer, then resume.
+No background timer prints into the selection prompt.
 Enter `q` to cancel without deploying the foundation. The menu shows vCPUs,
 memory, and estimated Linux retail compute costs per VM and for the full demo.
 Disks and other Azure services are extra. Choices are ranked by available prices;
@@ -279,11 +320,11 @@ validation and foundation creation, not during tenant onboarding.
 The menu preserves the demo's General Purpose tier and PostgreSQL 16. It offers
 2-8 vCores and 8-64 GiB RAM, shows advertised zones, and ranks choices by vCores,
 RAM and name, not price. Management and prepared control databases use the same
-selection. Each database starts with 32 GiB storage; database compute and storage
+selection. Each database uses the selected initial storage size; database compute and storage
 costs are separate from the AKS estimates.
 
-Choose a number, or enter `q` to cancel before creating the foundation. Elapsed-time
-updates pause during the prompt. Bootstrap saves `AZURE_POSTGRES_SKU` and
+Choose a number, or enter `q` to cancel before creating the foundation.
+Bootstrap saves `AZURE_POSTGRES_SKU` and
 `AZURE_POSTGRES_TIER` together in the private `.env`, preserving credentials and
 the AKS choice. Later runs recheck and reuse an eligible saved choice. Invalid,
 restricted or missing capability data stops bootstrap rather than selecting a
@@ -1034,6 +1075,7 @@ resources; it does not require an empty plane group.
 | Management deployment | Read `job/deploy-management` status and logs with `make kube`. A failed or interrupted Job is not automatically replayed. |
 | Tenant stays pending | Read its operation and control-reconciler logs. Management readiness still requires a control record. |
 | Environment preparation fails | Read `job/prepare-<pair>` in management for the failed command's stderr. Preserve its Lease, attempt record, credentials and resources. No tenant operation is created by setup. |
+| Redis reports `InsufficientCapacity` | Azure could not allocate the selected `AZURE_REDIS_SKU` in this region. Published offers do not prove live capacity. Inspect the retained cache and failed Job. A new deployment can use a different explicit size or region; changing `.env` does not resize or recover the failed environment. Do not reset or replay the Job blindly. |
 | No isolated capacity | Add a named isolated environment with `make bootstrap ... ARGS='--isolated NAME'`. Do not submit tenant requests to create clusters. |
 | Control is ready but data is stale | Read the control data report, data-reconciler logs and tenant ConfigMap. Check for a paused reconciler or active fault. |
 | SQL observation fails | Preserve credentials and the database. Missing/drifted schema metadata does not authorize reinitialization. |

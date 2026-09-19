@@ -52,7 +52,8 @@ redirected output is plain.
 Operator commands use separated section headings and align entities with their
 messages. Progress has no bracketed label or icon. Styled terminals show green
 check marks for completed operations; plain output uses `OK`. Warnings and errors
-remain explicit. Quiet waits print elapsed time every 15 seconds.
+remain explicit. Progress reports phase starts, state changes, and completion
+without elapsed-time counters or durations.
 Use `COLOR=always` to force styling or `COLOR=never` to disable it; `NO_COLOR`
 overrides both. Progress goes to stderr, leaving API responses, reports and other
 machine-readable stdout unchanged. Native diagnostics and complete build/push
@@ -75,7 +76,7 @@ file unchanged.
 
 | Information | Owner |
 |---|---|
-| Operator choices | `.env`: environment, project/deployment name, Azure selection, and chosen AKS and PostgreSQL compute when applicable |
+| Operator choices | `.env`: environment, project/deployment name, Azure selection, and chosen resource sizes and tiers |
 | Stable application credentials | Key Vault on Azure; Kubernetes Secrets locally |
 | Endpoints and cluster access | Current Azure, Radius, Kubernetes, or Docker APIs |
 | Tenant configuration and provisioning progress | PostgreSQL |

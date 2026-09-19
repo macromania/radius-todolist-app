@@ -30,7 +30,7 @@ from scripts.operations.config import (  # noqa: E402
     initialize_config,
     load_config,
 )
-from scripts.operations.output import pause_progress, status  # noqa: E402
+from scripts.operations.output import status  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -172,28 +172,28 @@ def select_size(eligible, problems, config, *, existing=None):
             f"No eligible PostgreSQL 16 GeneralPurpose SKUs are advertised in {config.location}"
         )
     choices = sorted(eligible.values(), key=lambda size: (size.cpus, size.memory, size.name))[:3]
-    with pause_progress():
-        status("section", "PostgreSQL compute: choose an available option")
+    status("section", "PostgreSQL compute: choose an available option")
+    print(
+        f"  Region: {config.location}\n"
+        "  Used by management and prepared control databases; PostgreSQL 16.\n"
+        "  Storage follows the separate bootstrap resource sizing choice.\n\n"
+        "  #  SKU                          Tier             vCores  RAM GiB  Zones",
+        file=sys.stderr,
+    )
+    for number, size in enumerate(choices, 1):
         print(
-            f"  Region: {config.location}\n"
-            "  Used by management and both control databases; PostgreSQL 16, 32 GiB storage.\n\n"
-            "  #  SKU                          Tier             vCores  RAM GiB  Zones",
+            f"  {number}  {size.name:<28} {size.tier:<16} {size.cpus:>6} "
+            f"{size.memory:>8g}  {','.join(size.zones) or 'regional'}",
             file=sys.stderr,
         )
-        for number, size in enumerate(choices, 1):
-            print(
-                f"  {number}  {size.name:<28} {size.tier:<16} {size.cpus:>6} "
-                f"{size.memory:>8g}  {','.join(size.zones) or 'regional'}",
-                file=sys.stderr,
-            )
-        print(
-            "\n  Ranked by vCores, RAM and name, not price.\n"
-            "  Compute and storage are billed separately; Azure chooses placement.\n"
-            "  Advertised availability does not reserve capacity or quota.\n"
-            "  SkuNotAvailable can still occur; no automatic SKU substitution is performed.\n",
-            file=sys.stderr,
-        )
-        return choices[read_selection(len(choices))]
+    print(
+        "\n  Ranked by vCores, RAM and name, not price.\n"
+        "  Compute and storage are billed separately; Azure chooses placement.\n"
+        "  Advertised availability does not reserve capacity or quota.\n"
+        "  SkuNotAvailable can still occur; no automatic SKU substitution is performed.\n",
+        file=sys.stderr,
+    )
+    return choices[read_selection(len(choices))]
 
 
 def main():

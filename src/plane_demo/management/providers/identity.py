@@ -36,6 +36,38 @@ PUBLIC_KEYS = {
     "DEMO_KEY_VAULT",
     "DEMO_REVISION",
 }
+RESOURCE_SIZING = {
+    "aks_tier": ("AZURE_AKS_TIER", "aksTier", ("Free", "Standard")),
+    "node_count": ("AZURE_NODE_COUNT", "nodeCount", (2, 3, 4)),
+    "node_os_disk_gb": ("AZURE_NODE_OS_DISK_GB", "nodeOsDiskSizeGb", (64, 128, 256)),
+    "postgres_storage_gb": (
+        "AZURE_POSTGRES_STORAGE_GB",
+        "postgresStorageSizeGb",
+        (32, 64, 128, 256),
+    ),
+    "redis_sku_name": (
+        "AZURE_REDIS_SKU",
+        "redisSkuName",
+        (
+            "Balanced_B0",
+            "Balanced_B1",
+            "Balanced_B3",
+            "Balanced_B5",
+            "Balanced_B10",
+            "Balanced_B20",
+        ),
+    ),
+    "gateway_capacity": ("AZURE_GATEWAY_CAPACITY", "gatewayCapacity", (1, 2, 3)),
+    "registry_sku": ("AZURE_REGISTRY_SKU", "registrySkuName", ("Basic", "Standard", "Premium")),
+    "key_vault_sku": ("AZURE_KEY_VAULT_SKU", "vaultSkuName", ("standard", "premium")),
+}
+PUBLIC_KEYS.update(value[0] for value in RESOURCE_SIZING.values())
+COMPUTE_SELECTION_FIELDS = (
+    "node_vm_size",
+    "postgres_sku_name",
+    "postgres_sku_tier",
+    *RESOURCE_SIZING,
+)
 
 
 class ConfigError(ValueError):
@@ -92,6 +124,14 @@ class DemoConfig:
     node_vm_size: str | None = None
     postgres_sku_name: str | None = None
     postgres_sku_tier: str | None = None
+    aks_tier: str | None = None
+    node_count: int | None = None
+    node_os_disk_gb: int | None = None
+    postgres_storage_gb: int | None = None
+    redis_sku_name: str | None = None
+    gateway_capacity: int | None = None
+    registry_sku: str | None = None
+    key_vault_sku: str | None = None
 
     def __post_init__(self) -> None:
         if self.environment not in {"azure", "local"}:
@@ -126,6 +166,7 @@ class DemoConfig:
                 self.node_vm_size,
                 self.postgres_sku_name,
                 self.postgres_sku_tier,
+                *(getattr(self, name) for name in RESOURCE_SIZING),
             )
         ):
             raise ConfigError("Local configuration must not contain Azure settings")
@@ -143,6 +184,10 @@ class DemoConfig:
             or self.postgres_sku_tier not in {"Burstable", "GeneralPurpose", "MemoryOptimized"}
         ):
             raise ConfigError("Invalid PostgreSQL SKU or tier")
+        for name, (key, _, choices) in RESOURCE_SIZING.items():
+            value = getattr(self, name)
+            if value is not None and (type(value) is not type(choices[0]) or value not in choices):
+                raise ConfigError(f"Invalid {key} sizing choice")
         if self.key_vault is not None and (
             not isinstance(self.key_vault, str)
             or not re.fullmatch(r"[a-z][a-z0-9-]{1,22}[a-z0-9]", self.key_vault)
@@ -228,7 +273,19 @@ class DemoConfig:
         for key, slot in SECRET_KEYS.items():
             if slot in self.demo_keys:
                 values[key] = self.demo_keys[slot] if include_secrets else "[redacted]"
+        for name, (key, _, _) in RESOURCE_SIZING.items():
+            value = getattr(self, name)
+            if value is not None:
+                values[key] = str(value)
         return values
+
+    @property
+    def resource_sizes(self) -> dict[str, str | int]:
+        return {
+            field: getattr(self, name)
+            for name, (_, field, _) in RESOURCE_SIZING.items()
+            if getattr(self, name) is not None
+        }
 
     def public_values(self) -> dict[str, str]:
         return {key: value for key, value in self.values().items() if key in PUBLIC_KEYS}
@@ -240,6 +297,17 @@ class DemoConfig:
         environment = values.get("DEMO_ENV")
         if environment not in {"azure", "local"}:
             raise ConfigError("DEMO_ENV must be azure or local")
+        sizing = {}
+        for name, (key, _, choices) in RESOURCE_SIZING.items():
+            if key in values:
+                value = values[key]
+                if not isinstance(value, str):
+                    raise ConfigError(f"Invalid {key} sizing choice")
+                if isinstance(choices[0], int):
+                    if not value.isascii() or not value.isdecimal():
+                        raise ConfigError(f"Invalid {key} sizing choice")
+                    value = int(value)
+                sizing[name] = value
         return cls(
             environment="azure" if environment == "azure" else "local",
             project=values.get("DEMO_PROJECT", ""),
@@ -252,4 +320,5 @@ class DemoConfig:
             key_vault=values.get("DEMO_KEY_VAULT"),
             revision=values.get("DEMO_REVISION"),
             demo_keys={slot: values[key] for key, slot in SECRET_KEYS.items() if key in values},
+            **sizing,
         )

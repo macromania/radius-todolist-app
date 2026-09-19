@@ -9,6 +9,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -116,6 +117,7 @@ class Commands:
         env: dict | None = None,
         stdin: str | None = None,
         timeout: int = 3600,
+        stream_output: bool = False,
     ) -> str:
         self.guard()
         if not args or any(not isinstance(arg, str) or "\x00" in arg for arg in args):
@@ -136,27 +138,63 @@ class Commands:
             logger.error("command_unavailable executable=%s errno=%s", args[0], exc.errno)
             raise ProvisioningError("command_unavailable") from None
         start = time.monotonic()
+        positions = {"stdout": 0, "stderr": 0}
+        pem = {"stdout": False, "stderr": False}
+
+        def emit(value: str | bytes | None, channel: str, *, final: bool = False) -> None:
+            if not stream_output or not value:
+                return
+            text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
+            text = text.replace("\r\n", "\n").replace("\r", "\n")
+            end = len(text) if final else text.rfind("\n") + 1
+            fresh = text[positions[channel] : end]
+            positions[channel] = end
+            for line in fresh.splitlines():
+                if "-----BEGIN " in line:
+                    pem[channel] = True
+                    print("[redacted key material]", file=sys.stderr, flush=True)
+                if pem[channel]:
+                    if "-----END " in line:
+                        pem[channel] = False
+                    continue
+                redacted = self.redact(line)
+                for secret in sorted(self._secrets, key=len, reverse=True):
+                    if "\n" in secret or "\r" in secret:
+                        for fragment in secret.splitlines():
+                            if fragment:
+                                redacted = redacted.replace(fragment, "[redacted]")
+                print(redacted, file=sys.stderr, flush=True)
+
         try:
             while True:
                 try:
                     stdout, stderr = process.communicate(input=stdin, timeout=1)
                     break
-                except subprocess.TimeoutExpired:
+                except subprocess.TimeoutExpired as partial:
+                    emit(partial.stdout, "stdout")
+                    emit(partial.stderr, "stderr")
                     stdin = None
                     self.guard()
                     if time.monotonic() - start >= timeout:
                         raise ProvisioningError("command_timeout") from None
             self.guard()
+            emit(stdout, "stdout", final=True)
+            emit(stderr, "stderr", final=True)
             if process.returncode:
-                logger.error(
-                    "command_failed executable=%s exit=%d stderr=%s stdout=%s",
-                    args[0],
-                    process.returncode,
-                    self.redact(stderr)[-16384:],
-                    self.redact(stdout)[-16384:],
-                )
+                if stream_output:
+                    logger.error(
+                        "command_failed executable=%s exit=%d", args[0], process.returncode
+                    )
+                else:
+                    logger.error(
+                        "command_failed executable=%s exit=%d stderr=%s stdout=%s",
+                        args[0],
+                        process.returncode,
+                        self.redact(stderr)[-16384:],
+                        self.redact(stdout)[-16384:],
+                    )
                 raise ProvisioningError("command_failed")
-            if stderr.strip():
+            if stderr.strip() and not stream_output:
                 logger.info(
                     "command_stderr executable=%s %s", args[0], self.redact(stderr)[-16384:]
                 )
@@ -168,10 +206,15 @@ class Commands:
             except ProcessLookupError:
                 pass
             try:
-                process.communicate(timeout=5)
+                stdout, stderr = process.communicate(timeout=5)
             except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.communicate()
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                stdout, stderr = process.communicate()
+            emit(stdout, "stdout", final=True)
+            emit(stderr, "stderr", final=True)
             raise
 
     def json(self, args: list[str], **kwargs):

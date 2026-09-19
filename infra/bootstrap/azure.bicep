@@ -42,6 +42,20 @@ param nodeVmSize string
 param postgresSkuName string
 @allowed(['Burstable', 'GeneralPurpose', 'MemoryOptimized'])
 param postgresSkuTier string
+@allowed(['Free', 'Standard'])
+param aksTier string
+@allowed([64, 128, 256])
+param nodeOsDiskSizeGb int
+@allowed([32, 64, 128, 256])
+param postgresStorageSizeGb int
+@allowed(['Balanced_B0', 'Balanced_B1', 'Balanced_B3', 'Balanced_B5', 'Balanced_B10', 'Balanced_B20'])
+param redisSkuName string
+@allowed([1, 2, 3])
+param gatewayCapacity int
+@allowed(['Basic', 'Standard', 'Premium'])
+param registrySkuName string
+@allowed(['standard', 'premium'])
+param vaultSkuName string
 @description('Current AKS system-pool guidance requires at least two nodes and four vCPUs per node.')
 @minValue(2)
 param nodeCount int = 2
@@ -273,8 +287,10 @@ module network './network.bicep' = {
     prefix: prefix
     location: location
     registryName: registryName
+    registrySkuName: registrySkuName
     registryExists: registryExists
     vaultName: vaultName
+    vaultSkuName: vaultSkuName
     externalVaultResourceGroup: externalVaultResourceGroup
     slots: slots
     tags: requiredTags
@@ -391,6 +407,8 @@ module management './aks.bicep' = {
     kubernetesVersion: kubernetesVersion
     nodeVmSize: nodeVmSize
     nodeCount: nodeCount
+    aksTier: aksTier
+    nodeOsDiskSizeGb: nodeOsDiskSizeGb
     nodeSubnetId: network.outputs.allocations[0].nodeSubnetId
     nodeResourceGroup: 'rg-${prefix}-management-nodes'
     controlPlaneIdentityId: identity[0].outputs.identity.controlPlane.id
@@ -555,6 +573,14 @@ output foundation object = union(network.outputs.foundation, {
   harnessIdentity: harness.outputs.identity
   postgresSkuName: postgresSkuName
   postgresSkuTier: postgresSkuTier
+  resourceSizingVersion: 1
+  aksTier: aksTier
+  nodeOsDiskSizeGb: nodeOsDiskSizeGb
+  postgresStorageSizeGb: postgresStorageSizeGb
+  redisSkuName: redisSkuName
+  gatewayCapacity: gatewayCapacity
+  registrySkuName: registrySkuName
+  vaultSkuName: vaultSkuName
   roleDefinitionIds: {
     certificateImporter: issuerRole.id
     acmeStateWriter: acmeStateRole.id
