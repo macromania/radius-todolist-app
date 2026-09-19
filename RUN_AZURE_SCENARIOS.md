@@ -113,8 +113,12 @@ artifacts, prepare the isolated foundation, and deploy that environment.
 Each phase names the next step. These numbers describe workflow order, not a
 time estimate or percentage complete. Nested wrappers do not repeat the title.
 Small colored check marks indicate completion; plain output uses `OK`.
-Warnings and errors remain explicit. The demo adds no elapsed-time counters,
-durations, spinners, or screen-clearing updates.
+Warnings and errors remain explicit. Quiet Make command waits show one transient
+spinner when stdout and stderr are terminals. It clears before native output,
+stops at selection prompts, and disappears on completion or interruption.
+The demo does not clear the screen or print elapsed times. Redirecting either
+stream, `NO_COLOR=1`, `COLOR=never`, dumb terminals, and parallel Make jobs
+disable animation.
 `COLOR=always` forces styling; `COLOR=never` or nonempty `NO_COLOR`
 disables it. Redirected output is plain by default. Status goes to stderr;
 JSON/API stdout, native diagnostics, and complete build/push logs are preserved.
@@ -251,7 +255,9 @@ selected deployment name and a scoped inspection command when creation fails.
 #### Choose resource sizes and tiers
 
 Before creating resources, bootstrap checks regional service support and asks
-for explicit sizing choices. It saves the completed resource-sizing selection
+for sizing choices with units and a marked recommendation. Press Enter to accept
+that recommendation, enter a number to override it, or enter `q` to cancel.
+EOF always cancels. It saves the completed resource-sizing selection
 in the private `.env`, preserving credentials. Cancelling this menu leaves the
 previous file unchanged. AKS VM and PostgreSQL compute selection follow.
 
@@ -265,6 +271,14 @@ previous file unchanged. AKS VM and PostgreSQL compute selection follow.
 | Application Gateway instances per plane | 1, 2, 3 | `AZURE_GATEWAY_CAPACITY` |
 | Container Registry tier | Basic, Standard, Premium | `AZURE_REGISTRY_SKU` |
 | Key Vault tier | standard, premium; an external vault retains its actual tier | `AZURE_KEY_VAULT_SKU` |
+
+The demo recommendations are two AKS nodes per cluster, the Free control-plane
+tier, 64 GiB OS disks, 32 GiB initial PostgreSQL storage, Balanced_B1 Redis
+(1 GB), one gateway instance per plane, Standard registry, and standard Key
+Vault. These are demo-oriented choices, not production or HA sizing. If a
+recommendation is not offered in the region, the menu marks the first supported
+choice and explains the difference. It still requires your input.
+Recommendations do not change valid saved choices or resize existing resources.
 
 The menus cover demo-compatible choices, not every Azure service configuration.
 AKS, gateways, registry and vault use provider metadata for regional service
@@ -293,8 +307,9 @@ name; changing `.env` is not a recovery procedure for a failed deployment.
 Before creating the foundation, bootstrap reads current VM availability,
 capabilities, and vCPU quotas for the selected subscription and region. On the
 first run, choose one of up to three eligible sizes by entering its number.
-No background timer prints into the selection prompt.
-Enter `q` to cancel without deploying the foundation. The menu shows vCPUs,
+The first choice is recommended and Enter accepts it. No spinner runs over
+the selection prompt. Enter `q` to cancel without deploying the foundation.
+The menu shows vCPUs,
 memory, and estimated Linux retail compute costs per VM and for the full demo.
 Disks and other Azure services are extra. Choices are ranked by available prices;
 if pricing cannot be read, the menu reports that and ranks by CPU and memory.
@@ -328,7 +343,9 @@ RAM and name, not price. Management and prepared control databases use the same
 selection. Each database uses the selected initial storage size; database compute and storage
 costs are separate from the AKS estimates.
 
-Choose a number, or enter `q` to cancel before creating the foundation.
+The smallest eligible choice by vCores and RAM is marked as recommended.
+Press Enter to accept it, choose another number, or enter `q` to cancel before
+creating the foundation.
 Bootstrap saves `AZURE_POSTGRES_SKU` and
 `AZURE_POSTGRES_TIER` together in the private `.env`, preserving credentials and
 the AKS choice. Later runs recheck and reuse an eligible saved choice. Invalid,

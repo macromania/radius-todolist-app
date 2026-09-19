@@ -169,6 +169,65 @@ def test_main_saves_all_choices_atomically_and_labels_capacity_uncertainty(
     assert len(runner.calls) >= 2
 
 
+def test_enter_accepts_a_labeled_recommendation_with_units_for_every_resource(
+    invocation, monkeypatch, capsys
+):
+    path, original, _ = invocation
+    monkeypatch.setattr(sys, "stdin", io.StringIO("\n" * len(RESOURCE_SIZING)))
+    assert subject.main() == 0
+    saved = configuration.load_config(path)
+    for name, (value, _) in subject.RECOMMENDATIONS.items():
+        assert getattr(saved, name) == value
+    assert saved.demo_keys == original.demo_keys
+    output = capsys.readouterr()
+    assert output.err.count("(recommended)") == len(RESOURCE_SIZING)
+    for row in (
+        "1) 2 nodes (recommended)",
+        "2) 3 nodes",
+        "3) 4 nodes",
+        "1) 64 GiB (recommended)",
+        "2) 128 GiB",
+        "1) 32 GiB (recommended)",
+        "1) 1 instance (recommended)",
+        "2) 2 instances",
+        "3) 3 instances",
+        "2) Balanced_B1  1 GB",
+        "2) Standard tier (recommended)",
+    ):
+        assert row in output.err
+    assert "Select 1-6 [Enter = 2, recommended; q = cancel]" in output.err
+    assert json.loads(output.out)["parameters"] == saved.resource_sizes
+
+
+def test_recommendation_is_always_an_available_choice(invocation, monkeypatch, capsys):
+    path, _, runner = invocation
+    runner.storage[0]["supportedServerEditions"][0]["supportedStorageEditions"][0][
+        "supportedStorageMb"
+    ] = [{"storageSizeMb": 65536}]
+    runner.items = [item for item in runner.items if item["skuName"] == "B3"]
+    monkeypatch.setattr(sys, "stdin", io.StringIO("\n" * len(RESOURCE_SIZING)))
+    assert subject.main() == 0
+    assert configuration.load_config(path).postgres_storage_gb == 64
+    assert configuration.load_config(path).redis_sku_name == "Balanced_B3"
+    assert capsys.readouterr().err.count("usual demo recommendation is unavailable") == 2
+
+
+def test_recommendations_never_replace_saved_valid_operator_choices(invocation, capsys):
+    path, original, _ = invocation
+    selected = replace(
+        original, **{name: choices[-1] for name, (_, _, choices) in RESOURCE_SIZING.items()}
+    )
+    configuration.initialize_config(selected, path)
+    before = path.read_bytes()
+    assert subject.main() == 0
+    assert path.read_bytes() == before
+    output = capsys.readouterr()
+    assert "Select 1-" not in output.err
+    assert "retain 4 nodes" in output.err
+    assert "retain 256 GiB" in output.err
+    assert "retain 3 instances" in output.err
+
+
 @pytest.mark.parametrize("answer", ["q\n", "", "1\nq\n"])
 def test_cancel_never_partially_replaces_configuration(invocation, monkeypatch, answer):
     path, _, _ = invocation

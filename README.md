@@ -55,12 +55,21 @@ next step. Azure has four phases; local management bootstrap has three.
 Nested scripts use compact subheadings instead of repeating workflow banners.
 Headings use the terminal's foreground; only numbered phases and status markers
 use color. Completed operations use a small check mark, or `OK` in plain output.
-Warnings and errors remain explicit. The demo adds no elapsed-time counters,
-durations, spinners, or screen-clearing updates.
+Warnings and errors remain explicit. During quiet Make command waits, one
+transient spinner appears on interactive terminals. It clears before native
+output and stops at selection prompts and command completion. It never clears
+the screen or prints elapsed times. Redirecting either output stream, setting
+`NO_COLOR=1` or `COLOR=never`, using a dumb terminal, or running parallel Make
+jobs disables animation.
 Use `COLOR=always` to force styling or `COLOR=never` to disable it; `NO_COLOR`
 overrides both. Progress goes to stderr, leaving API responses, reports and other
 machine-readable stdout unchanged. Native diagnostics and complete build/push
 logs remain visible.
+
+Bootstrap sizing choices include units and a recommendation for this demo.
+Press Enter to accept the marked option, choose a number to override it, or
+enter `q` to cancel. EOF cancels rather than silently selecting defaults.
+Saved choices and existing resource sizes are never replaced by recommendations.
 
 Use `make report` for current endpoints and tenant status.
 `make fault-status ARGS='SLOT COMPONENT'` reads a fault journal without changing

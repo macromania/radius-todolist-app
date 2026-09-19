@@ -27,21 +27,34 @@ def integer(value, label):
     return int(value)
 
 
-def read_selection(count):
+def read_selection(count, *, recommended=0):
+    if not 0 <= recommended < count:
+        raise SelectionError("Recommended choice is outside the available options")
     # Separate selector processes must not read ahead into the next piped answer.
     stream = getattr(sys.stdin, "buffer", sys.stdin)
     stream = getattr(stream, "raw", stream)
     while True:
-        print(f"  Select 1-{count}, or q to cancel: ", end="", file=sys.stderr, flush=True)
+        print(
+            f"  Select 1-{count} [Enter = {recommended + 1}, recommended; q = cancel]: ",
+            end="",
+            file=sys.stderr,
+            flush=True,
+        )
         answer = stream.readline()
+        if not getattr(sys.stdin, "isatty", lambda: False)():
+            print(file=sys.stderr)
         if isinstance(answer, bytes):
             answer = answer.decode("utf-8", errors="replace")
         if not answer or answer.strip().lower() == "q":
             raise SelectionCancelled
         answer = answer.strip()
+        if not answer:
+            return recommended
         if answer in {str(number) for number in range(1, count + 1)}:
             return int(answer) - 1
-        status("warning", f"Enter a number from 1 to {count}, or q")
+        status(
+            "warning", f"Enter a number from 1 to {count}, press Enter for the recommendation, or q"
+        )
 
 
 class Discovery:

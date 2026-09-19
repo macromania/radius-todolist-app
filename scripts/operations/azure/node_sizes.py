@@ -355,11 +355,14 @@ def select_size(eligible, problems, config, budget, discovery, *, existing=None)
         fleet = f"{price * budget.fleet_nodes:.3f}" if price is not None else "unavailable"
         print(
             f"  {number}  {size.name:<28} {size.cpus:>5} {size.memory:>8g} "
-            f"{hourly:>13} {fleet:>14}",
+            f"{hourly:>13} {fleet:>14}"
+            f"{'  (recommended)' if number == 1 else ''}",
             file=sys.stderr,
         )
     print(
-        "\n  Prices are Linux retail compute estimates; disks and other services are extra.\n"
+        "\n  Recommended: the first eligible choice, ranked by available retail cost,\n"
+        "  then vCPUs and RAM. Missing prices are not treated as zero cost.\n"
+        "  Prices are Linux retail compute estimates; disks and other services are extra.\n"
         "  Choices use regional node pools and managed OS disks.\n"
         "  Availability is not a capacity reservation.\n",
         file=sys.stderr,

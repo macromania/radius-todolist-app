@@ -1161,6 +1161,18 @@ def test_first_bootstrap_prompts_for_all_sizes_and_passes_nondefault_choices_to_
     assert "elapsed" not in result.stderr
 
 
+def test_first_foundation_accepts_enter_for_all_ten_recommended_choices(checkout):
+    configure(checkout, saved_resource_sizes=False, node_vm_size=None, postgres_sku=None)
+    result = run(checkout, "bootstrap", input="\n" * 10)
+    assert result.returncode == 0, result.stderr
+    assert result.stderr.count("(recommended)") == 10
+    (create,) = selected(checkout, "az", ["deployment", "sub", "create"])
+    assert {field: create["parameters"][field]["value"] for field in SIZES} == SIZES
+    assert create["parameters"]["nodeVmSize"]["value"] == NODE_SIZE
+    assert create["parameters"]["postgresSkuName"]["value"] == POSTGRES_SIZE
+    assert load_config(checkout / ".env").resource_sizes == SIZES
+
+
 @pytest.mark.parametrize("stage", ["bootstrap", "build"])
 def test_old_layout_stops_public_stages_before_deployment(checkout, stage):
     configure(checkout, mode="old-group-layout")

@@ -283,6 +283,17 @@ def test_real_main_prompts_then_persists_only_the_selected_setting(invocation, m
     assert "Select 1-" not in capsys.readouterr().err
 
 
+def test_enter_selects_the_recommended_eligible_node_size(invocation, monkeypatch, capsys):
+    path, _, _ = invocation
+    monkeypatch.setattr(sys, "stdin", io.StringIO("\n"))
+    assert subject.main() == 0
+    assert configuration.load_config(path).node_vm_size == NAMES[0]
+    output = capsys.readouterr()
+    assert output.err.count("(recommended)") == 1
+    assert "Enter = 1, recommended" in output.err
+    assert "ranked by available retail cost" in output.err
+
+
 @pytest.mark.parametrize("answer", ["q\n", ""])
 def test_cancel_or_eof_does_not_change_configuration(invocation, monkeypatch, answer):
     path, _, _ = invocation

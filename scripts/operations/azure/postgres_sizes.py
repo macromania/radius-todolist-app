@@ -183,11 +183,13 @@ def select_size(eligible, problems, config, *, existing=None):
     for number, size in enumerate(choices, 1):
         print(
             f"  {number}  {size.name:<28} {size.tier:<16} {size.cpus:>6} "
-            f"{size.memory:>8g}  {','.join(size.zones) or 'regional'}",
+            f"{size.memory:>8g}  {','.join(size.zones) or 'regional'}"
+            f"{'  (recommended)' if number == 1 else ''}",
             file=sys.stderr,
         )
     print(
-        "\n  Ranked by vCores, RAM and name, not price.\n"
+        "\n  Recommended: the smallest eligible compute choice by vCores and RAM.\n"
+        "  Ties are sorted by name, not price.\n"
         "  Compute and storage are billed separately; Azure chooses placement.\n"
         "  Advertised availability does not reserve capacity or quota.\n"
         "  SkuNotAvailable can still occur; no automatic SKU substitution is performed.\n",

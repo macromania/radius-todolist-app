@@ -37,12 +37,28 @@ REDIS_MEMORY = {
 LABELS = {
     "node_count": "AKS nodes per cluster",
     "aks_tier": "AKS control-plane tier",
-    "node_os_disk_gb": "AKS managed OS disk GiB",
-    "postgres_storage_gb": "PostgreSQL storage GiB",
+    "node_os_disk_gb": "AKS managed OS disk per node",
+    "postgres_storage_gb": "PostgreSQL storage per database",
     "redis_sku_name": "Managed Redis size",
     "gateway_capacity": "Application Gateway instances per plane",
     "registry_sku": "Container Registry tier",
     "key_vault_sku": "Key Vault tier",
+}
+RECOMMENDATIONS = {
+    "node_count": (2, "Two nodes meet the demo's system-pool minimum."),
+    "aks_tier": ("Free", "Free is suitable for this demo; Standard adds an uptime SLA."),
+    "node_os_disk_gb": (64, "64 GiB per node is the demo baseline."),
+    "postgres_storage_gb": (
+        32,
+        "Start with 32 GiB per database; storage autogrowth stays enabled.",
+    ),
+    "redis_sku_name": (
+        "Balanced_B1",
+        "B1 provides 1 GB for the demo; allocation is not guaranteed.",
+    ),
+    "gateway_capacity": (1, "One instance per plane keeps demo cost down; it is not HA sizing."),
+    "registry_sku": ("Standard", "Standard retains the demo's registry capacity baseline."),
+    "key_vault_sku": ("standard", "Standard supports the demo's secrets and certificates."),
 }
 REGIONAL_TYPES = {
     "Microsoft.ContainerService": ("managedClusters",),
@@ -216,6 +232,18 @@ class Discovery(AzureDiscovery):
         return choices, offers
 
 
+def describe(name, value, offers):
+    if name == "node_count":
+        return f"{value} nodes"
+    if name in {"node_os_disk_gb", "postgres_storage_gb"}:
+        return f"{value} GiB"
+    if name == "gateway_capacity":
+        return f"{value} {'instance' if value == 1 else 'instances'}"
+    if name == "redis_sku_name":
+        return f"{value}  {REDIS_MEMORY[value]:g} GB  catalog USD {offers[value]:.3f}/unit-hour"
+    return f"{value} tier"
+
+
 def select(config, choices, offers, *, existing=None):
     selected = {}
     for name in LABELS:
@@ -228,10 +256,11 @@ def select(config, choices, offers, *, existing=None):
                 f"{LABELS[name]} differs from the foundation; no automatic resize",
             )
         options = choices[name]
+        require(options, f"{LABELS[name]} has no supported choices")
         if requested is not None:
             if requested in options:
                 selected[name] = requested
-                status("success", f"{LABELS[name]}: retain {requested}")
+                status("success", f"{LABELS[name]}: retain {describe(name, requested, offers)}")
                 continue
             require(
                 existing is None, f"{LABELS[name]} is no longer advertised; no automatic resize"
@@ -239,38 +268,39 @@ def select(config, choices, offers, *, existing=None):
             status("warning", f"{LABELS[name]}: saved choice is not currently advertised")
         if name == "key_vault_sku" and config.key_vault:
             selected[name] = options[0]
-            status("success", f"External Key Vault: retain {options[0]}")
+            status("success", f"External Key Vault: retain {options[0]} tier")
             continue
         status("section", f"Resource sizing: {LABELS[name]}")
+        preferred, reason = RECOMMENDATIONS[name]
+        recommended = options.index(preferred) if preferred in options else 0
+        if preferred not in options:
+            reason = (
+                "The usual demo recommendation is unavailable; "
+                "the first supported choice is marked."
+            )
+        print(f"  {reason}\n", file=sys.stderr)
         if name == "redis_sku_name":
             print(
                 "  Regional retail offers, not live capacity or subscription quota.\n"
                 "  NoCluster-compatible Balanced sizes only; HA remains disabled.\n",
                 file=sys.stderr,
             )
-        else:
-            print(
-                "  Supported demo choices; regional service support was checked.\n", file=sys.stderr
-            )
         for index, value in enumerate(options, 1):
-            description = (
-                f"{value}  {REDIS_MEMORY[value]:g} GB  catalog USD {offers[value]:.3f}/unit-hour"
-                if name == "redis_sku_name"
-                else str(value)
-            )
-            print(f"  {index}  {description}", file=sys.stderr)
+            marker = " (recommended)" if index == recommended + 1 else ""
+            print(f"  {index}) {describe(name, value, offers)}{marker}", file=sys.stderr)
         print(
-            "\n  Select a size explicitly; q cancels without saving these choices.\n",
+            "\n  Press Enter to accept the recommendation, or choose another option.\n"
+            "  q cancels without saving these resource choices.\n",
             file=sys.stderr,
         )
-        selected[name] = options[read_selection(len(options))]
+        selected[name] = options[read_selection(len(options), recommended=recommended)]
     status("section", "Resource sizing: fixed compatibility requirements")
     print(
-        "  Application Gateway tier       Standard_v2 (no WAF policy configured)\n"
-        "  Public IP, NAT and load balancer Standard\n"
-        "  AKS OS disks                    Managed\n"
-        "  Redis                           NoCluster, TLS, HA disabled\n"
-        "  DNS, identities, RBAC, endpoints No selectable compute size\n",
+        "  Gateway:     Standard_v2 (no WAF policy configured)\n"
+        "  Networking:  Standard public IPs, NAT and load balancers\n"
+        "  OS disks:    Managed\n"
+        "  Redis:       NoCluster, TLS, HA disabled\n"
+        "  Other:       DNS, identities, RBAC and endpoints have no compute size\n",
         file=sys.stderr,
     )
     return selected

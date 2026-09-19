@@ -83,8 +83,11 @@ tools, prepare the management cluster, and install and verify Radius. Inspect
 mode labels the last two phases as verification instead. Each phase names the
 next step; the numbers are workflow steps, not time estimates. Nested wrappers
 do not repeat the title. Small colored check marks indicate completion; plain
-output uses `OK`. Warnings and errors remain explicit. The demo adds no elapsed-time
-counters, durations, spinners, or screen-clearing updates.
+output uses `OK`. Warnings and errors remain explicit. Quiet Make command waits
+show one transient spinner when stdout and stderr are terminals. It clears
+before native output and stops at prompts and command completion. The demo does
+not clear the screen or print elapsed times. Redirecting either stream,
+`NO_COLOR=1`, `COLOR=never`, dumb terminals, and parallel Make jobs disable animation.
 Use `COLOR=always` to force styling, or `COLOR=never` or nonempty
 `NO_COLOR` to disable it. Redirected output is plain by default. Status goes to
 stderr; JSON/API stdout and native diagnostics are preserved. Build and push logs

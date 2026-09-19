@@ -182,6 +182,17 @@ def test_main_prompts_and_atomically_persists_both_selection_fields(
     assert "Select 1-" not in capsys.readouterr().err
 
 
+def test_enter_selects_the_recommended_eligible_postgres_size(invocation, monkeypatch, capsys):
+    path, _, _ = invocation
+    monkeypatch.setattr(sys, "stdin", io.StringIO("\n"))
+    assert subject.main() == 0
+    assert configuration.load_config(path).postgres_sku_name == NAMES[0]
+    output = capsys.readouterr()
+    assert output.err.count("(recommended)") == 1
+    assert "Enter = 1, recommended" in output.err
+    assert "smallest eligible compute choice" in output.err
+
+
 @pytest.mark.parametrize("answer", ["q\n", ""])
 def test_cancel_and_eof_preserve_configuration(invocation, monkeypatch, answer):
     path, _, _ = invocation
