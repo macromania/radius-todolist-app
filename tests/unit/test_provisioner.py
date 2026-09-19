@@ -579,7 +579,7 @@ def test_canonical_management_configuration_and_suspended_job_use_live_inputs(
     assert log_kwargs == {"enabled": True}
     progress = capsys.readouterr().err
     for phase in ("waiting", "active", "complete"):
-        assert progress.count(f"{'Job deploy-management':<26}  {phase}") == 1
+        assert progress.count(f"Job deploy-management: {phase}") == 1
     assert "elapsed" not in progress
     job = objects["job", "deploy-management"]
     secret = objects["secret", "deploy-management-keys"]

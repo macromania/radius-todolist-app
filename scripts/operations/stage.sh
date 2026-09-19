@@ -37,7 +37,9 @@ case "$stage" in
     fi ;;
 esac
 cd "$ROOT"
-demo_status section "$DEMO_ENV: $stage"
+if [[ "$stage" != bootstrap && -z "${PLANE_DEMO_MAKE_TARGET:-}" ]]; then
+  demo_status title "$DEMO_ENV: $stage"
+fi
 case "$DEMO_ENV:$stage" in
   azure:build) exec bash scripts/operations/azure/build.sh "$@" ;;
   azure:inspect-build) exec bash scripts/operations/azure/build.sh --inspect ;;

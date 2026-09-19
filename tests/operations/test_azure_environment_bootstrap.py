@@ -125,7 +125,22 @@ def test_default_entrypoint_builds_three_cluster_capacity_before_reporting_succe
     monkeypatch.setattr(sys, "argv", ["bootstrap.py"])
     assert subject.main() == 0
     assert bootstrap["operator"].jobs == ["deploy-management", "prepare-shared"]
-    result = json.loads(capsys.readouterr().out)
+    output = capsys.readouterr()
+    result = json.loads(output.out)
+    assert output.err.count("\nAzure bootstrap\n") == 1
+    assert "demo | eastus2 | shared" in output.err
+    for number, title in enumerate(
+        (
+            "Prepare foundation",
+            "Build images and Recipes",
+            "Deploy management",
+            "Prepare shared environment",
+        ),
+        1,
+    ):
+        assert output.err.count(f"\n{number} / 4  {title}\n") == 1
+    assert output.err.count("Next:") == 3
+    assert "\n\n\n" not in output.err
     assert result["slots"] == list(AZURE_DEFAULT_SLOTS)
     assert result["status"] == "environment_prepared"
     assert any(
@@ -170,6 +185,22 @@ def test_readiness_failure_after_completed_jobs_releases_the_workstation_lease(
     with pytest.raises(EnvironmentError, match="health"):
         subject.main()
     assert bootstrap["calls"][-1] == ("release",)
+
+
+def test_failed_artifact_phase_never_announces_future_deployment_phases(
+    bootstrap, monkeypatch, capsys
+):
+    monkeypatch.setattr(sys, "argv", ["bootstrap.py"])
+    monkeypatch.setattr(
+        subject, "artifacts", MagicMock(side_effect=EnvironmentError("synthetic artifact failure"))
+    )
+    with pytest.raises(EnvironmentError, match="artifact failure"):
+        subject.main()
+    output = capsys.readouterr()
+    assert "\n2 / 4  Build images and Recipes\n" in output.err
+    assert "\n3 / 4 " not in output.err and "\n4 / 4 " not in output.err
+    assert "is prepared for tenant admission" not in output.err
+    assert "operator" not in bootstrap
 
 
 def test_management_radius_phase_is_independent_of_arm_submission(monkeypatch, tmp_path):
@@ -223,11 +254,17 @@ def test_isolated_entrypoint_never_redeploys_default_foundation_or_applications(
     assert bootstrap["operator"].jobs == ["prepare-isolated-blue"]
     assert ("isolated-foundation", "isolated-blue", 3) in bootstrap["calls"]
     assert not any(call[0] == "bash" for call in bootstrap["calls"])
-    assert json.loads(capsys.readouterr().out)["slots"] == [
+    output = capsys.readouterr()
+    assert json.loads(output.out)["slots"] == [
         *AZURE_DEFAULT_SLOTS,
         "isolated-blue-control",
         "isolated-blue-data",
     ]
+    assert "demo | eastus2 | isolated-blue" in output.err
+    assert "\n1 / 4  Verify default foundation\n" in output.err
+    assert "\n3 / 4  Prepare isolated foundation\n" in output.err
+    assert "\n4 / 4  Deploy isolated environment\n" in output.err
+    assert "\n3 / 4  Deploy management\n" not in output.err
     subject.node_sizes.select_size.assert_called_once()
     assert subject.node_sizes.select_size.call_args.args[3].clusters == 5
     subject.resource_sizes.select.assert_called_once()

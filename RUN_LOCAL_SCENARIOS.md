@@ -77,11 +77,14 @@ docker --context desktop-linux version
 creating resources. `make check` runs the full source checks if you want that
 checkpoint before deploying.
 
-Make workflows separate sections with headings and rules, and align entities
-with their messages. Progress has no bracketed label or icon. Styled terminals
-show green check marks for completed operations; plain output uses `OK`.
-Warnings and errors remain explicit. Progress reports phase starts and completion
-without elapsed-time counters or durations.
+Make workflows use a guided runbook with one command title, compact subheadings,
+and short phase separators. Local bootstrap has three phases: verify images and
+tools, prepare the management cluster, and install and verify Radius. Inspect
+mode labels the last two phases as verification instead. Each phase names the
+next step; the numbers are workflow steps, not time estimates. Nested wrappers
+do not repeat the title. Small colored check marks indicate completion; plain
+output uses `OK`. Warnings and errors remain explicit. The demo adds no elapsed-time
+counters, durations, spinners, or screen-clearing updates.
 Use `COLOR=always` to force styling, or `COLOR=never` or nonempty
 `NO_COLOR` to disable it. Redirected output is plain by default. Status goes to
 stderr; JSON/API stdout and native diagnostics are preserved. Build and push logs

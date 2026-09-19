@@ -1243,7 +1243,7 @@ def test_bootstrap_registers_new_subscription_before_service_checks(checkout, st
                 "json",
             ]
         assert index + 1 < all_calls.index(availability)
-        assert f"{namespace:<26}  {state}" in result.stderr
+        assert f"{namespace}: {state}" in result.stderr
     assert all_calls.index(feature) < registrations[-1][0]
     assert all_calls.index(availability) < all_calls.index(validate) < all_calls.index(create)
 

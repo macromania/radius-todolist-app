@@ -8,9 +8,11 @@ COLOR ?= auto
 BICEP ?= $(HOME)/.rad/bin/bicep
 RUN := uv run --no-sync
 STAGE := bash scripts/operations/stage.sh
-OPERATE = bash "$(dir $(abspath $(firstword $(MAKEFILE_LIST))))scripts/lib/progress.sh" "$@"
+OPERATE = env PLANE_DEMO_MAKE_TARGET="$@" \
+  bash "$(dir $(abspath $(firstword $(MAKEFILE_LIST))))scripts/lib/progress.sh" \
+  $(if $(filter bootstrap local-bootstrap,$@),--delegate,--summary-only) "$@"
 OUTPUT := $(dir $(abspath $(firstword $(MAKEFILE_LIST))))scripts/lib/output.sh
-SEPARATOR := ------------------------------------------------------------------------------
+SEPARATOR := --------------------------------------------
 export CONFIRM_AZURE CONFIRM_LOCAL COLOR
 export PYTHONDONTWRITEBYTECODE := 1
 CHECK_TMP := $(CURDIR)/.state/check/tmp
@@ -32,8 +34,9 @@ endef
 
 define SECTION
 @$(call TERMINAL_STYLE,2) \
-printf '\n\n%s== %s ==%s\n%s%s%s\n\n' \
-  "$$bold$$accent" '$@' "$$reset" "$$accent" "$(SEPARATOR)" "$$reset" >&2
+case '$@' in bootstrap|local-bootstrap) ;; \
+  *) source "$(OUTPUT)"; demo_status title '$@' ;; \
+esac
 endef
 
 .PHONY: help init show-config endpoints report api kube fault fault-status environment-clean-plan environment-clean check lint test test-integration check-bicep check-shell check-terraform check-work \
@@ -50,7 +53,7 @@ help: ## Show grouped commands; use GROUP=setup, checks, local, or azure
 	awk -v group="$(GROUP)" -v bold="$$bold" -v accent="$$accent" -v reset="$$reset" \
 	  -v rule="$(SEPARATOR)" '\
 	  function heading(title) { \
-	    printf "\n\n%s%s%s\n%s%s%s\n\n", bold accent, title, reset, accent, rule, reset; \
+	    printf "\n\n%s%s%s\n%s\n\n", bold, title, reset, rule; \
 	  } \
 	  function example(label, command) { \
 	    printf "  %-16s  %s%s%s\n", label, bold, command, reset; \

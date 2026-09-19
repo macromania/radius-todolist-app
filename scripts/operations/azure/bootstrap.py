@@ -35,7 +35,7 @@ from scripts.operations.azure.environment_operator import (  # noqa: E402
     selection_environment,
 )
 from scripts.operations.config import ConfigError, load_config  # noqa: E402
-from scripts.operations.output import progress, run_main, status  # noqa: E402
+from scripts.operations.output import phase, progress, run_main, status  # noqa: E402
 
 
 def check_source(identity):
@@ -88,18 +88,34 @@ def main():
     require(os.environ.get("CONFIRM_AZURE") == "yes", "Set CONFIRM_AZURE=yes")
     identity = load_config(ROOT / ".env")
     require(identity.environment == "azure", "Select Azure in .env")
-    revision = check_source(identity)
     pair = isolated_pair(args.isolated) if args.isolated else "shared"
+    steps = (
+        (
+            "Prepare foundation",
+            "Build images and Recipes",
+            "Deploy management",
+            "Prepare shared environment",
+        )
+        if pair == "shared"
+        else (
+            "Verify default foundation",
+            "Build images and Recipes",
+            "Prepare isolated foundation",
+            "Deploy isolated environment",
+        )
+    )
+    status("title", "Azure bootstrap")
+    status("detail", f"{identity.deployment} | {identity.location} | {pair}")
+    phase(1, steps)
+    revision = check_source(identity)
     base = base_deployment(identity)
     if base is None:
         require(pair == "shared", "Prepare the default environment before adding an isolated pair")
-        status("section", "Bootstrap: create the default foundation")
-        with progress("Default foundation"):
-            execute(
-                ["bash", str(ROOT / "scripts/operations/azure/foundation.sh")],
-                timeout=7200,
-                env=selection_environment(identity),
-            )
+        execute(
+            ["bash", str(ROOT / "scripts/operations/azure/foundation.sh")],
+            timeout=7200,
+            env=selection_environment(identity),
+        )
         observed = load_config(ROOT / ".env")
         require(
             observed
@@ -132,9 +148,11 @@ def main():
         ),
         "Selected resource sizes differ from the existing foundation; no automatic resize",
     )
+    phase(2, steps)
     proof = artifacts(identity=identity)
     require(proof.get("source_revision") == revision, "Artifact revision changed during bootstrap")
     with tempfile.TemporaryDirectory(prefix="plane-environments-") as directory:
+        phase(3, steps)
         operator = EnvironmentOperator(identity, Path(directory), base)
         operator.acquire()
         completed = False
@@ -182,6 +200,7 @@ def main():
                 operator.isolated_foundation(pair, record, fresh=fresh)
                 document = catalog(identity, base)
                 selected = operator_config(identity, document, proof)
+            phase(4, steps)
             inputs = Path(directory) / "foundation.json"
             from plane_demo.management.providers.commands import write_json
 
@@ -226,7 +245,7 @@ def main():
 
 if __name__ == "__main__":
     try:
-        raise SystemExit(run_main(main, "Azure environment bootstrap"))
+        raise SystemExit(run_main(main, "Azure bootstrap", announce=False))
     except (
         EnvironmentError,
         ConfigError,

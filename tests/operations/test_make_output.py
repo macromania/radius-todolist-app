@@ -1,7 +1,10 @@
 import errno
+import fcntl
 import os
 import pty
 import re
+import shutil
+import struct
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -27,7 +30,7 @@ SECTIONS = {
 }
 COMMAND = re.compile(r"^  ([a-z][a-z0-9_-]*) {2,}(\S.*)$", re.MULTILINE)
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
-RULE = "-" * 78
+RULE = "-" * 44
 
 
 def read_terminal(descriptor):
@@ -45,7 +48,7 @@ def read_terminal(descriptor):
     return b"".join(chunks).decode().replace("\r\n", "\n")
 
 
-def run_make(directory, *args, environment=None, terminal=None):
+def run_make(directory, *args, environment=None, terminal=None, columns=None):
     options = {
         "args": ["make", "--no-print-directory", "-f", str(ROOT / "Makefile"), *args],
         "cwd": directory,
@@ -69,6 +72,10 @@ def run_make(directory, *args, environment=None, terminal=None):
         raise ValueError(f"Unknown terminal stream: {terminal}")
     master, slave = pty.openpty()
     try:
+        if columns is not None:
+            import termios
+
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, columns, 0, 0))
         with ThreadPoolExecutor(max_workers=1) as executor:
             captured = executor.submit(read_terminal, master)
             try:
@@ -231,7 +238,8 @@ def test_stage_headings_preserve_tool_output_arguments_and_failures(
         "CONFIRM_LOCAL=yes",
     )
     assert result.stdout == "tool output line 1\ntool output line 2\n"
-    assert result.stderr.startswith(f"\n\n== {target} ==\n{RULE}\n\n      {target}\n")
+    assert result.stderr.startswith(f"\n{target}\n")
+    assert f"\n  {target}\n" not in result.stderr
     assert "tool diagnostic\n" in result.stderr
     assert f"{'OK  ' if exit_code == 0 else 'ERROR: '}{target}" in result.stderr
     assert (result.returncode == 0) == (exit_code == 0)
@@ -283,7 +291,14 @@ def test_check_groups_real_stages_and_reports_success_only_when_all_pass(tmp_pat
     )
     stages = ["lint", "check-bicep", "test", "check-shell", "check-terraform", "check"]
     expected = stages if failed_stage is None else stages[: stages.index(failed_stage) + 1]
-    assert re.findall(r"^== (.+) ==$", result.stderr, re.MULTILINE) == expected
+    assert (
+        re.findall(
+            r"^(lint|check-bicep|test|check-shell|check-terraform|check)$",
+            result.stderr,
+            re.MULTILINE,
+        )
+        == expected
+    )
     assert (result.returncode == 0) == (failed_stage is None)
     assert ("All source checks passed." in result.stdout) == (failed_stage is None)
     assert ("No deployment was performed." in result.stdout) == (failed_stage is None)
@@ -321,8 +336,8 @@ def test_help_styles_only_the_selected_output_stream(
     assert ANSI.sub("", result.stdout) == plain.stdout
     assert ("\x1b" in result.stdout) == styled
     if styled:
-        assert "\x1b[1m\x1b[34mChecks and tests\x1b[0m" in result.stdout
-        assert f"\x1b[34m{RULE}\x1b[0m" in result.stdout
+        assert "\x1b[1mChecks and tests\x1b[0m" in result.stdout
+        assert f"\n{RULE}\n" in result.stdout
         assert f"\x1b[1m{'lint':<28}\x1b[0m" in result.stdout
 
 
@@ -353,8 +368,10 @@ def test_styled_stage_headings_preserve_json_stdout(tmp_path, color, terminal, e
     assert result.returncode == 0, result.stderr
     assert result.stdout == '{"result":"unchanged"}\n'
     plain = ANSI.sub("", result.stderr)
-    assert plain.startswith(f"\n\n== show-config ==\n{RULE}\n\n      show-config\n")
-    assert f"{chr(0x2705) if styled else 'OK'}  show-config completed\n" in plain
+    assert plain.startswith("\nshow-config\n")
+    marker = f"{chr(0x2713)} " if styled else "OK  "
+    assert f"  {marker}show-config completed\n" in plain
+    assert "\n  show-config\n" not in plain
     assert "completed (" not in plain
     assert ("\x1b" in result.stderr) == styled
 
@@ -384,3 +401,79 @@ def test_build_forwards_explicit_recovery_arguments(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout == "recovery arguments forwarded\n"
+
+
+@pytest.mark.parametrize(
+    "color,terminal,columns",
+    [("never", None, None), ("always", None, None), ("auto", "stderr", 32)],
+)
+def test_real_bootstrap_wrapper_chain_has_one_header_and_keeps_failure_diagnostics(
+    tmp_path, color, terminal, columns
+):
+    for relative in (
+        "scripts/operations/stage.sh",
+        "scripts/operations/azure/bootstrap.sh",
+        "scripts/lib/env.sh",
+        "scripts/lib/output.sh",
+    ):
+        destination = tmp_path / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / relative, destination)
+    (tmp_path / ".env").write_text(
+        'DEMO_ENV="azure"\nDEMO_PROJECT="sample"\nDEMO_DEPLOYMENT="demo"\n'
+        'AZURE_SUBSCRIPTION_ID="11111111-1111-1111-1111-111111111111"\n'
+        'AZURE_LOCATION="eastus2"\n'
+    )
+    (tmp_path / ".env").chmod(0o600)
+    python = tmp_path / ".venv/bin/python"
+    python.parent.mkdir(parents=True)
+    python.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "from pathlib import Path\n"
+        f"sys.path.insert(0, {str(ROOT)!r})\n"
+        "from scripts.operations.azure import bootstrap as subject\n"
+        "from scripts.operations.output import run_main, status\n"
+        f"subject.ROOT = Path({str(tmp_path)!r})\n"
+        "assert sys.argv[1] == str(subject.ROOT / 'scripts/operations/azure/bootstrap.py')\n"
+        "sys.argv = sys.argv[1:]\n"
+        "subject.check_source = lambda _: 'a' * 40\n"
+        "subject.base_deployment = lambda _: None\n"
+        "def execute(argv, **kwargs):\n"
+        "    foundation = subject.ROOT / 'scripts/operations/azure/foundation.sh'\n"
+        "    assert argv == ['bash', str(foundation)]\n"
+        "    status('section', 'Bootstrap: configuration and tools')\n"
+        "    print('native diagnostic remains visible', file=sys.stderr)\n"
+        "    raise subject.EnvironmentError('synthetic failure before deployment')\n"
+        "subject.execute = execute\n"
+        "try:\n"
+        "    sys.exit(run_main(subject.main, 'Azure bootstrap', announce=False))\n"
+        "except subject.EnvironmentError as error:\n"
+        "    status('error', str(error))\n"
+        "    sys.exit(7)\n"
+    )
+    python.chmod(0o700)
+    result = run_make(
+        tmp_path,
+        "bootstrap",
+        "CONFIRM_AZURE=yes",
+        f"COLOR={color}",
+        terminal=terminal,
+        columns=columns,
+    )
+    assert result.returncode != 0
+    assert result.stdout == ""
+    plain = ANSI.sub("", result.stderr)
+    rule = "-" * min(44, columns or 80)
+    assert plain.startswith(
+        "\nAzure bootstrap\ndemo | eastus2 | shared\n\n"
+        "1 / 4  Prepare foundation\n" + rule + "\n"
+        "  Next: Build images and Recipes\n\n  Configuration and tools\n"
+    )
+    assert plain.count("\nAzure bootstrap\n") == 1
+    assert "== bootstrap ==" not in plain and "\n  bootstrap\n" not in plain
+    assert "Azure environment bootstrap" not in plain
+    assert "native diagnostic remains visible" in plain
+    assert "ERROR: synthetic failure before deployment" in plain
+    assert "completed" not in plain and "\n2 / 4" not in plain
+    assert "\n\n\n" not in plain

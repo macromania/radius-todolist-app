@@ -504,7 +504,16 @@ def test_foreign_image_is_not_overwritten(stage_lab):
 
 def test_bootstrap_only_creates_management_and_observes_completed_rerun(stage_lab):
     prepared(stage_lab)
-    first = report(execute(stage_lab, "bootstrap.sh"))
+    result = execute(stage_lab, "bootstrap.sh")
+    first = report(result)
+    assert result.stderr.count("\nLocal bootstrap\n") == 1
+    assert "one | Docker Desktop | management" in result.stderr
+    for number, title in enumerate(
+        ("Verify images and tools", "Prepare management cluster", "Install and verify Radius"), 1
+    ):
+        assert result.stderr.count(f"\n{number} / 3  {title}\n") == 1
+    assert result.stderr.count("Next:") == 2
+    assert "OK  Local bootstrap completed" in result.stderr
     assert first["namespace"] == f"{STEM}-management-management"
     assert first["environmentNamespace"] == f"{STEM}-management"
     assert first["environmentNamespace"] + "-management" == first["namespace"]
@@ -527,6 +536,10 @@ def test_bootstrap_only_creates_management_and_observes_completed_rerun(stage_la
     )
     assert encrypted < install
     second = report(execute(stage_lab, "bootstrap.sh"))
+    result = execute(stage_lab, "bootstrap.sh", "inspect")
+    assert report(result)["observedExisting"] is True
+    assert "\n2 / 3  Verify management cluster\n" in result.stderr
+    assert "\n3 / 3  Verify Radius\n" in result.stderr
     assert second["observedExisting"] is True
     assert (
         sum(

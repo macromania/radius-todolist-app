@@ -16,12 +16,19 @@ mode=${1:-apply}
 if [[ "$mode" != apply && "$mode" != inspect ]] || (( $# > 1 )); then
   demo_error 'Unexpected bootstrap arguments'; exit 1;
 fi
-demo_status section "Local bootstrap: $mode management foundation"
 for tool in docker kind kubectl jq rad uv; do
   command -v "$tool" >/dev/null || { demo_error "Required tool missing: $tool"; exit 1; }
 done
 demo_load_env "$ROOT/.env"
 [[ "$DEMO_ENV" == local ]] || { demo_error 'This entrypoint is local only'; exit 1; }
+demo_status title 'Local bootstrap'
+demo_status detail "$DEMO_DEPLOYMENT | Docker Desktop | management"
+if [[ "$mode" == inspect ]]; then
+  phases=('Verify images and tools' 'Verify management cluster' 'Verify Radius')
+else
+  phases=('Verify images and tools' 'Prepare management cluster' 'Install and verify Radius')
+fi
+demo_phase 1 "${phases[@]}"
 unset DEMO_KEY_MANAGEMENT DEMO_KEY_SHARED_CONTROL DEMO_KEY_SHARED_DATA \
   DEMO_KEY_ISOLATED_1_CONTROL DEMO_KEY_ISOLATED_1_DATA
 stem="$DEMO_PROJECT-$DEMO_DEPLOYMENT-local"
@@ -72,6 +79,7 @@ radius version --cli | grep -q '0.60.2' || { demo_error 'Radius 0.60.2 is requir
 grep -qx 'PORT_BLOCK_START=35490' "$ROOT/ports.env"
 grep -qx 'PORT_BLOCK_END=35499' "$ROOT/ports.env"
 node_image='kindest/node:v1.35.0@sha256:452d707d4862f52530247495d180205e029056831160e22870e37e3f6c1ac31f'
+demo_phase 2 "${phases[@]}"
 node_ids=$(docker_cli ps -aq --no-trunc --filter "label=io.x-k8s.kind.cluster=$cluster")
 existing=false
 if [[ -n "$node_ids" ]]; then
@@ -146,6 +154,7 @@ jq -e --arg id "$node_id" --arg cluster "$cluster" '
   .nodeId == $id and .cluster == $cluster and .syntheticCiphertextVerified == true
 ' <<<"$encryption" >/dev/null || { demo_error 'Management encryption proof differs'; exit 1; }
 
+demo_phase 3 "${phases[@]}"
 if [[ "$existing" == false ]]; then
   copy_container=$(docker_cli create --network none --entrypoint /bin/true "$operator_id")
   [[ "$copy_container" =~ ^[a-f0-9]{64}$ ]] || { demo_error 'Invalid artifact container'; exit 1; }
@@ -223,3 +232,4 @@ jq -n --arg cluster "$cluster" --arg namespace "$namespace" --arg group "$stem" 
   '{cluster:$cluster,namespace:$namespace,environmentNamespace:$cluster,radiusGroup:$group,nodeId:$id,
     revision:$revision,observedExisting:$observed,stage:"management-radius",
     applicationsDeployed:false,coldChildReady:false,artifacts:$artifacts[0]}'
+demo_status success 'Local bootstrap completed'

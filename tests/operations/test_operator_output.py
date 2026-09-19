@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import re
 import selectors
 import shutil
 import signal
@@ -14,7 +15,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-from scripts.operations.output import progress, run_main, status  # noqa: E402
+from scripts.operations.output import phase, progress, run_main, status  # noqa: E402
 
 WRAPPER = ROOT / "scripts/lib/progress.sh"
 SHELLS = sorted({"/bin/bash", shutil.which("bash")})
@@ -136,8 +137,12 @@ def test_shell_and_python_status_share_colors_without_changing_stdout(
     monkeypatch.setenv("COLOR", color)
     monkeypatch.setenv("NO_COLOR", no_color)
     for kind, code in {
-        "section": "1;34",
-        "progress": "36",
+        "title": "1",
+        "detail": "",
+        "phase": "1;34",
+        "next": "",
+        "section": "1",
+        "progress": "",
         "success": "32",
         "warning": "33",
         "error": "31",
@@ -159,7 +164,81 @@ def test_shell_and_python_status_share_colors_without_changing_stdout(
         output = capsys.readouterr()
         assert result.returncode == 0 and result.stdout == output.out == ""
         assert result.stderr == output.err
-        assert (f"\033[{code}m" in output.err) is colored
+        assert ("\033[" in output.err) is (colored and bool(code))
+        if colored and code:
+            assert f"\033[{code}m" in output.err
+
+
+@pytest.mark.parametrize("columns", ["80", "32", "0", "invalid"])
+def test_shell_and_python_runbooks_share_compact_phase_hierarchy(monkeypatch, capsys, columns):
+    monkeypatch.setenv("COLUMNS", columns)
+    monkeypatch.setenv("NO_COLOR", "1")
+    steps = ("Prepare foundation", "Build images and Recipes", "Deploy management")
+    status("title", "Azure bootstrap")
+    status("detail", "sample | eastus2 | shared")
+    phase(1, steps)
+    status("section", "Bootstrap: configuration and tools")
+    status("success", "Configuration is valid")
+    phase(3, steps)
+    python = capsys.readouterr()
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; demo_status title "Azure bootstrap"; '
+            'demo_status detail "sample | eastus2 | shared"; '
+            'demo_phase 1 "${@:2}"; demo_status section "Bootstrap: configuration and tools"; '
+            'demo_status success "Configuration is valid"; demo_phase 3 "${@:2}"',
+            "test",
+            str(ROOT / "scripts/lib/output.sh"),
+            *steps,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stderr == python.err
+    assert result.stdout == python.out == ""
+    assert "\n\n\n" not in result.stderr
+    assert result.stderr.count("Azure bootstrap") == 1
+    assert result.stderr.count("Next:") == 1
+    assert "1 / 3  Prepare foundation\n" in result.stderr
+    assert "3 / 3  Deploy management\n" in result.stderr
+    assert "BOOTSTRAP" not in result.stderr
+    rule = "-" * (32 if columns == "32" else 44)
+    assert result.stderr.count(rule + "\n") == 2
+
+
+@pytest.mark.parametrize("mode", ["--summary-only", "--delegate"])
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_make_wrappers_leave_the_workflow_announcement_to_the_entrypoint(mode, exit_code):
+    result = subprocess.run(
+        [
+            "bash",
+            str(WRAPPER),
+            mode,
+            "outer",
+            sys.executable,
+            "-c",
+            "import sys; print(sys.stdin.read()); "
+            "print('native diagnostic', file=sys.stderr); "
+            f"sys.exit({exit_code})",
+        ],
+        input='{"result":"unchanged"}',
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "NO_COLOR": "1"},
+    )
+    assert result.returncode == exit_code
+    assert json.loads(result.stdout) == {"result": "unchanged"}
+    assert "native diagnostic" in result.stderr
+    assert "\n  outer\n" not in result.stderr
+    if mode == "--delegate":
+        assert "outer" not in result.stderr
+    else:
+        assert ("outer completed" in result.stderr) is (exit_code == 0)
+        assert ("outer failed (exit 7)" in result.stderr) is (exit_code == 7)
 
 
 def test_wrapper_preserves_stdin_stdout_native_diagnostics_and_exit_code():
@@ -250,7 +329,7 @@ def test_progress_is_visible_before_completion_without_polling_lines(shell):
             with selectors.DefaultSelector() as selector:
                 selector.register(process.stderr, selectors.EVENT_READ)
                 assert selector.select(timeout=3), "No early status before the command blocks"
-                assert b"      Waiting for input\n" == process.stderr.readline()
+                assert b"  Waiting for input\n" == process.stderr.readline()
                 assert process.poll() is None
                 assert not selector.select(timeout=0.1), "Unexpected repeated progress"
             stdout, stderr = process.communicate(input=b"done", timeout=5)
@@ -278,7 +357,7 @@ def test_interruption_keeps_failure_without_reporting_completion():
         start_new_session=True,
         env={**os.environ, "NO_COLOR": "1"},
     ) as process:
-        assert process.stderr.readline() == b"      Interrupted command\n"
+        assert process.stderr.readline() == b"  Interrupted command\n"
         assert process.stdout.readline() == b"ready\n"
         os.killpg(process.pid, signal.SIGTERM)
         stdout, stderr = process.communicate(timeout=5)
@@ -292,7 +371,7 @@ def test_python_progress_stops_on_failure_and_sanitizes_controls(capsys):
             time.sleep(0.02)
             raise RuntimeError("failure")
     before = capsys.readouterr()
-    assert "      Synthetic failure\n" in before.err
+    assert "  Synthetic failure\n" in before.err
     time.sleep(0.03)
     assert capsys.readouterr().err == ""
     status("error", "unsafe\033[2J\nvalue")
@@ -328,13 +407,14 @@ def test_entities_sections_and_outcomes_are_visually_separate(monkeypatch, capsy
         assert result.stderr == capsys.readouterr().err
         assert not result.stdout
         assert f"[{kind}]" not in result.stderr
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", result.stderr)
         if kind == "section":
-            assert "BOOTSTRAP\nValidate the foundation\n" + "-" * 78 in result.stderr
+            assert plain == "\n  Validate the foundation\n"
         elif kind == "progress":
-            assert f"      {'Azure':<26}  deployment sub validate" in result.stderr
-            assert "\u2705" not in result.stderr
+            assert plain == "  Azure: deployment sub validate\n"
+            assert "\x1b" not in result.stderr
         else:
-            assert ("\u2705" in result.stderr) == (color == "always")
+            assert ("\u2713" in result.stderr) == (color == "always")
 
 
 def test_python_progress_emits_only_phase_boundaries(capsys):

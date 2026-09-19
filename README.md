@@ -49,11 +49,14 @@ Run `make help` for commands, or narrow it with `GROUP=azure`, `GROUP=local`,
 `GROUP=setup`, or `GROUP=checks`. `COLOR=never` or `NO_COLOR=1` disables styling;
 redirected output is plain.
 
-Operator commands use separated section headings and align entities with their
-messages. Progress has no bracketed label or icon. Styled terminals show green
-check marks for completed operations; plain output uses `OK`. Warnings and errors
-remain explicit. Progress reports phase starts, state changes, and completion
-without elapsed-time counters or durations.
+Operator commands use a guided runbook layout. Bootstrap prints one workflow
+title and the selected deployment, then numbers the real phases and names the
+next step. Azure has four phases; local management bootstrap has three.
+Nested scripts use compact subheadings instead of repeating workflow banners.
+Headings use the terminal's foreground; only numbered phases and status markers
+use color. Completed operations use a small check mark, or `OK` in plain output.
+Warnings and errors remain explicit. The demo adds no elapsed-time counters,
+durations, spinners, or screen-clearing updates.
 Use `COLOR=always` to force styling or `COLOR=never` to disable it; `NO_COLOR`
 overrides both. Progress goes to stderr, leaving API responses, reports and other
 machine-readable stdout unchanged. Native diagnostics and complete build/push

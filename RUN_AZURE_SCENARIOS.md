@@ -105,11 +105,16 @@ make check-bicep
 generates type extensions; it does not deploy resources. `make check` runs the
 full source checks if you want that checkpoint before deploying.
 
-Make workflows separate sections with headings and rules, and align entities
-with their messages. Progress has no bracketed label or icon. Styled terminals
-show green check marks for completed operations; plain output uses `OK`.
-Warnings and errors remain explicit. Progress reports phase starts, Job state
-changes, and completion without elapsed-time counters or durations.
+Make workflows use a guided runbook with one command title, compact subheadings,
+and short phase separators. Default bootstrap has four phases: prepare the
+foundation, build images and Recipes, deploy management, and prepare the shared
+environment. Isolated additions instead verify the default foundation, build
+artifacts, prepare the isolated foundation, and deploy that environment.
+Each phase names the next step. These numbers describe workflow order, not a
+time estimate or percentage complete. Nested wrappers do not repeat the title.
+Small colored check marks indicate completion; plain output uses `OK`.
+Warnings and errors remain explicit. The demo adds no elapsed-time counters,
+durations, spinners, or screen-clearing updates.
 `COLOR=always` forces styling; `COLOR=never` or nonempty `NO_COLOR`
 disables it. Redirected output is plain by default. Status goes to stderr;
 JSON/API stdout, native diagnostics, and complete build/push logs are preserved.
