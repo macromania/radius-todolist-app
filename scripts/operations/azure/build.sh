@@ -66,8 +66,15 @@ REVISION=$(git -C "$ROOT" rev-parse --verify "${DEMO_REVISION:-HEAD}^{commit}")
 }
 SOURCE="$AZURE_WORKSPACE/source"
 mkdir -m 700 "$SOURCE"
-git -C "$ROOT" archive --format=tar "$REVISION" \
-  src sql scripts infra images pyproject.toml uv.lock LICENSE .dockerignore > "$AZURE_WORKSPACE/source.tar"
+SOURCE_FILES=(src sql scripts infra images pyproject.toml uv.lock .dockerignore)
+LICENSE_ENTRY=$(git -C "$ROOT" ls-tree --name-only "$REVISION" -- LICENSE)
+case "$LICENSE_ENTRY" in
+  LICENSE) SOURCE_FILES+=(LICENSE) ;;
+  '') ;; # Recovery can select a revision from before the license was added.
+  *) demo_error 'Unexpected license path in selected source'; exit 1 ;;
+esac
+git -C "$ROOT" archive --format=tar "$REVISION" "${SOURCE_FILES[@]}" \
+  > "$AZURE_WORKSPACE/source.tar"
 tar -xpf "$AZURE_WORKSPACE/source.tar" -C "$SOURCE"
 [[ -z "$(find "$SOURCE" -type l -print)" ]] || {
   demo_error 'Build context must not contain symlinks'; exit 1;

@@ -211,10 +211,15 @@ elif tool=="git":
     command=args[2] if args[:1]==["-C"] else args[0]
     if command=="rev-parse":
         print("d"*40 if mode=="wrong-revision" else spec["revision"])
+    elif command=="ls-tree":
+        assert args[-2:]==["--","LICENSE"]
+        if (root/"committed/LICENSE").exists(): print("LICENSE")
     elif command=="archive":
         with tarfile.open(fileobj=sys.stdout.buffer,mode="w|") as archive:
-            for path in sorted((root/"committed").iterdir()):
-                archive.add(path,arcname=path.name)
+            for relative in args[args.index(spec["revision"])+1:]:
+                path=root/"committed"/relative
+                if not path.exists(): sys.exit("missing archive pathspec")
+                archive.add(path,arcname=relative)
     elif command=="show": print(spec.get("commit_time",1700000000))
     else: sys.exit("unexpected git command")
 elif tool=="az":
@@ -2011,7 +2016,14 @@ def test_ambiguous_submission_is_not_queued_again_on_retry(checkout):
     assert json.loads((checkout / "fake-state.json").read_text())["runs"] == before["runs"]
 
 
-def test_explicit_recovery_verifies_an_unrecorded_api_run_without_rebuilding(checkout):
+@pytest.mark.parametrize("licensed_source", [True, False])
+def test_explicit_recovery_verifies_an_unrecorded_api_run_without_rebuilding(
+    checkout, licensed_source
+):
+    if not licensed_source:
+        (checkout / "committed/LICENSE").unlink()
+        dockerfile = checkout / "committed/images/api/Dockerfile"
+        dockerfile.write_text(dockerfile.read_text().replace("uv.lock LICENSE", "uv.lock"))
     previous = seed_verified_build(checkout)
     state_path = checkout / "fake-state.json"
     state = json.loads(state_path.read_text())
@@ -2022,6 +2034,8 @@ def test_explicit_recovery_verifies_an_unrecorded_api_run_without_rebuilding(che
     recovered = run(checkout, "build", "--recover-build", f"api={run_id}")
     assert recovered.returncode == 0, recovered.stderr
     assert json.loads(recovered.stdout)["images"] == previous["images"]
+    (archive,) = selected(checkout, "git", ["-C", str(checkout), "archive"])
+    assert ("LICENSE" in archive["args"]) is licensed_source
     assert not selected(checkout, "az", ["acr", "build"])
     assert len(image_imports(checkout)) == 1
     assert any(
