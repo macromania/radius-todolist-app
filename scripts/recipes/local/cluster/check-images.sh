@@ -6,9 +6,9 @@ set -eu
 prefix=${1-}
 check_prefix "$prefix" || { echo "Invalid selected image prefix" >&2; exit 1; }
 shift
-[ "$#" -ge 2 ] && [ "$#" -le 128 ] && [ "$(($# % 2))" -eq 0 ] || {
+if [ "$#" -lt 2 ] || [ "$#" -gt 128 ] || [ "$(($# % 2))" -ne 0 ]; then
     echo "Expected bounded reference/image-ID pairs" >&2; exit 1
-}
+fi
 while [ "$#" -gt 0 ]; do
     check_image "$prefix" "$1" || { echo "Unapproved prepared image" >&2; exit 1; }
     id=${2#sha256:}

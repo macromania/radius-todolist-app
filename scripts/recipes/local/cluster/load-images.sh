@@ -44,9 +44,9 @@ while IFS= read -r image; do
     }
     count=$((count + 1))
 done < "$work/images"
-[ "$count" -ge 4 ] && [ "$count" -le 64 ] || {
+if [ "$count" -lt 4 ] || [ "$count" -gt 64 ]; then
     echo "Expected the complete prepared child image set" >&2; exit 1
-}
+fi
 
 # One deadline covers ownership checks, every import, and ctr verification.
 parent=$$
@@ -78,9 +78,9 @@ consumer=$!
 wait "$consumer"
 consumer=
 read -r role < "$work/role"
-[ "$label" = "$LOCAL_CLUSTER" ] && [ "$role" = control-plane ] || {
+if [ "$label" != "$LOCAL_CLUSTER" ] || [ "$role" != control-plane ]; then
     echo "Docker child ownership labels mismatch" >&2; exit 1
-}
+fi
 mkfifo "$work/stream"
 exec 3< "$work/ids"
 while IFS= read -r image; do
@@ -101,9 +101,9 @@ while IFS= read -r image; do
     producer=
     wait "$consumer" || imported=$?
     consumer=
-    [ "$saved" -eq 0 ] && [ "$imported" -eq 0 ] || {
+    if [ "$saved" -ne 0 ] || [ "$imported" -ne 0 ]; then
         echo "Image stream failed: save=$saved import=$imported" >&2; exit 1
-    }
+    fi
     docker exec "$node" ctr --namespace k8s.io images list --quiet > "$work/loaded" &
     consumer=$!
     wait "$consumer"

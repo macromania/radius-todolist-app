@@ -33,9 +33,9 @@ while (( $# )); do
     --recipes-only) RECIPES_ONLY=true; shift ;;
     --inspect) INSPECT_ONLY=true; shift ;;
     --recover-build)
-      (( $# >= 2 )) && [[ "$2" =~ ^api=[a-zA-Z0-9]{1,32}$ ]] || {
+      if (( $# < 2 )) || [[ ! "$2" =~ ^api=[a-zA-Z0-9]{1,32}$ ]]; then
         demo_error 'Use --recover-build api=RUN_ID'; exit 1;
-      }
+      fi
       if [[ -z "$RECOVER_API" ]]; then
         RECOVER_API="${2#*=}"
       else

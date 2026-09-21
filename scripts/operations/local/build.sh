@@ -132,9 +132,9 @@ if [[ "$stage" == build ]]; then
   helm_cli pull oci://ghcr.io/radius-project/helm-chart --version 0.60.2 \
     --destination "$work/chart"
   charts=("$work/chart/"*.tgz)
-  (( ${#charts[@]} == 1 )) && [[ -f "${charts[0]}" ]] || {
+  if (( ${#charts[@]} != 1 )) || [[ ! -f "${charts[0]}" ]]; then
     demo_error 'Exactly one Radius chart package is required'; exit 1;
-  }
+  fi
   cp "${charts[0]}" "$packaged/radius.tgz"
   helm_cli template radius "$packaged/radius.tgz" --namespace radius-system \
     --set dashboard.enabled=false --set global.terraform.enabled=false \

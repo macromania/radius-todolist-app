@@ -106,9 +106,9 @@ for module in cluster postgresql redis gateway; do
     fi
   done
   if ((count != 3)); then
-    ((count == 0)) && [[ "$mode" == apply ]] || {
+    if ((count != 0)) || [[ "$mode" != apply ]]; then
       demo_error 'Recipe publication is partial or missing; inspect the actual owners'; exit 1;
-    }
+    fi
     jq -n --slurpfile cm "$work/expected-ConfigMap.json" \
       --slurpfile deployment "$work/expected-Deployment.json" --slurpfile service "$work/expected-Service.json" \
       '{apiVersion:"v1",kind:"List",items:[$cm[0],$deployment[0],$service[0]]}' |

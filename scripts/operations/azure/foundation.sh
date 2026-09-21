@@ -16,7 +16,7 @@ if [[ "${1:-}" == --help ]]; then
 fi
 (( $# == 0 )) || { demo_error 'bootstrap takes no arguments'; exit 1; }
 demo_status section 'Bootstrap: configuration and tools'
-azure_init
+azure_init write
 demo_status section 'Bootstrap: account, vault and operator discovery'
 azure_discover_vault
 
