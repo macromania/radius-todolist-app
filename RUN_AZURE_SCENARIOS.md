@@ -8,7 +8,13 @@ Stop at each checkpoint before continuing.
 A fresh live end-to-end verification run of the current implementation remains
 outstanding. The checkpoints describe expected results to verify.
 
-Run this guide from the repository root. The order is:
+**Cost and scope:** the default demo creates three AKS clusters, three gateways,
+two PostgreSQL servers, Redis, and shared networking/registry resources.
+These are billable until removed. An isolated pair adds two clusters and their
+dependencies. Sizing estimates are not a full deployment budget.
+Read [cleanup](#4-clean-up-azure) before creating resources.
+
+The order is:
 
 1. [Prepare the workspace](#1-prepare-the-workspace).
 2. [Prepare the default Azure environment](#2-prepare-the-default-azure-environment).
@@ -105,23 +111,13 @@ make check-bicep
 generates type extensions; it does not deploy resources. `make check` runs the
 full source checks if you want that checkpoint before deploying.
 
-Make workflows use a guided runbook with one command title, compact subheadings,
-and short phase separators. Default bootstrap has four phases: prepare the
-foundation, build images and Recipes, deploy management, and prepare the shared
-environment. Isolated additions instead verify the default foundation, build
-artifacts, prepare the isolated foundation, and deploy that environment.
-Each phase names the next step. These numbers describe workflow order, not a
-time estimate or percentage complete. Nested wrappers do not repeat the title.
-Small colored check marks indicate completion; plain output uses `OK`.
-Warnings and errors remain explicit. Quiet Make command waits show one transient
-spinner when stdout and stderr are terminals. It clears before native output,
-stops at selection prompts, and disappears on completion or interruption.
-The demo does not clear the screen or print elapsed times. Redirecting either
-stream, `NO_COLOR=1`, `COLOR=never`, dumb terminals, and parallel Make jobs
-disable animation.
-`COLOR=always` forces styling; `COLOR=never` or nonempty `NO_COLOR`
-disables it. Redirected output is plain by default. Status goes to stderr;
-JSON/API stdout, native diagnostics, and complete build/push logs are preserved.
+Bootstrap shows four phases: foundation, artifacts, management, and the shared
+environment. Isolated additions verify the default foundation, build artifacts,
+then prepare and deploy the added pair. Phase numbers indicate order, not time.
+Progress goes to stderr; JSON/API stdout and complete native build/push logs
+remain intact. Redirected output is plain. Use `COLOR=never` or `NO_COLOR=1`
+to disable styling and animation; `COLOR=always` forces styling unless
+`NO_COLOR` is set. Spinners stop for prompts and native output.
 
 ### Select operator configuration
 
@@ -155,6 +151,12 @@ read, ask its administrator to review access; the demo will not bypass the check
 
 This is the simple administrative setup for the full demo, not a least-privilege
 production configuration. Use a dedicated demo subscription or temporary access.
+
+The templates retain the organization-specific `SecurityControl=Ignore` tag.
+Some ownership checks also expect this value. Review how your subscription's
+policies interpret it before deployment; the tag is not a standard Azure
+permission or a policy exemption granted by this demo. Do not remove it from
+existing resources or change only one template to bypass an ownership check.
 
 ### Select deployment identity
 
@@ -213,7 +215,7 @@ One bootstrap command drives the default foundation, verified artifact build,
 management deployment and shared environment preparation. It discovers the
 inputs; you do not assemble an inventory by hand.
 
-### Create the foundation
+### Bootstrap the default environment
 
 Bootstrap first creates management AKS, networking, registry, vault integration
 and scoped identities. It builds and inspects artifacts, then installs management
@@ -223,6 +225,19 @@ including Radius, PostgreSQL, Redis, gateways, certificates and workloads.
 ```bash
 make bootstrap CONFIRM_AZURE=yes
 ```
+
+On the first run, choose resource sizes, an AKS VM size, and PostgreSQL compute.
+Each menu shows a recommendation. Enter accepts it; a number overrides it;
+`q` or EOF cancels. Selections are saved privately in `.env`, and later runs
+recheck them without automatically resizing existing resources.
+
+Checkpoint: require `environment_prepared` for `shared`. Three planes should
+exist, with no tenants or isolated resources. Continue with
+[artifact inspection](#build-and-inspect-artifacts) and
+[setup completion](#inspect-setup-completion).
+
+<details>
+<summary>Registration, permissions, and resource-sizing details</summary>
 
 Before resource creation, bootstrap checks and registers the providers used by
 the foundation and later child Recipes: Network, Compute, Storage, ContainerService,
@@ -365,10 +380,6 @@ stop and read the failed operation's logs. Do not submit another tenant or reset
 database state to force a retry. Review another advertised SKU for a fresh run,
 or ask Azure support to confirm capacity.
 
-Checkpoint: bootstrap returns `environment_prepared` for `shared`. Management,
-shared control and shared data are deployed. No tenants or isolated resources
-have been created.
-
 Bootstrap and subsequent build/deployment commands check the selected Radius
 identities' grants, including inherited and group-based assignments. Missing
 reads, unexpected grants or changed custom roles fail explicitly. These are
@@ -383,36 +394,34 @@ an atomic merge guarantee; do not run concurrent NIC tag writers during the demo
 If it fails, inspect the error rather than granting Contributor or broad tag
 access.
 
+</details>
+
 ### Build and inspect artifacts
 
-Bootstrap builds Recipes and API/private-operator images. The private image
-retains the `plane-provisioner` repository name but runs only administrative Jobs
-on Azure. A separate Linux ACR
-task verifies each candidate's contents using pinned Docker/Python tooling and
-trusted inspection code, not code from the candidate image. It creates and exports
-a stopped, network-isolated container; the candidate is never started.
-Your workstation uploads the small verification context and retrieves a small
-verification report, rather than downloading the application images.
+Bootstrap builds Recipes and API/operator images, then verifies their actual
+contents in ACR. The operator image is named `plane-provisioner` but runs only
+administrative Jobs on Azure. The API image excludes provider tools and
+deployment credentials.
 
 ```bash
 make inspect-build
 ```
 
-`make build CONFIRM_AZURE=yes` remains available for a separate artifact
-checkpoint, but is not an additional required step after successful bootstrap.
+Require successful inspection before deployment. Do not overwrite a tag or
+bypass a failed inspection. A separate `make build CONFIRM_AZURE=yes` is only
+needed when artifacts require a confirmed build, not after successful bootstrap.
 
-Require successful inspection before deployment. The API image excludes
-provider tools and deployment credentials. The separate provisioner image has
-those administrative tools. Recipe publication checks registry permissions;
-do not overwrite a tag or bypass an inspection failure to continue.
+<details>
+<summary>Image verification, credentials, and interrupted-build recovery</summary>
 
-Build stores the ACR refresh token in a private, temporary Docker-format
-configuration using its `identitytoken` field. Radius uses this configuration
-to exchange the refresh token for repository-scoped access tokens.
-Build does not write registry credentials to the workstation's credential
-helper or permanent Docker configuration. Temporary credentials are removed
-when the command ends. Remote verification uses the ACR task's caller-scoped
-registry access; workstation credentials are not uploaded in its context.
+A separate Linux ACR task uses pinned tools and trusted verifier code to export
+a stopped, network-isolated candidate. It never starts the candidate or uploads
+workstation credentials. The workstation retrieves a small report, not the image.
+
+Radius receives an ACR refresh token through a private temporary Docker
+configuration's `identitytoken` field. It exchanges this for repository-scoped
+access. Credentials are removed when the command ends, without changing the
+workstation's credential helper or permanent Docker configuration.
 
 Verification reports are bound to the candidate digest, selected source, verifier
 code, and authenticated ACR run. ARM-owned verification receipts allow reuse on
@@ -425,11 +434,10 @@ run, and source fingerprint. Remote reports retain their own filesystem
 measurements; raw Docker-export metadata hashes are not compared across Docker
 Desktop and the ACR build agent.
 
-`image_contains_operator_state` reports an escaped path inside the candidate,
-never its contents. In particular, tool-version checks must not leave Azure CLI
-profiles in the image. The provisioner Dockerfile uses a disposable
-`AZURE_CONFIG_DIR` for its version probe. Existing images keep their original
-contents and must be rebuilt from a new source revision to incorporate that fix.
+`image_contains_operator_state` reports an escaped path, never its contents.
+Tool-version probes use disposable configuration so Azure CLI profiles do not
+remain in images. Fixes require a new source revision and a rebuilt image;
+existing immutable images are not changed.
 
 Image builds run in the foreground with their complete native build/push logs.
 After completion, the command matches its unique staging-image tag against
@@ -460,6 +468,8 @@ recovery. Existing verified proofs and different canonical image digests are
 never replaced. This explicit legacy recovery path is limited to API builds;
 new API and provisioner builds both use resumable receipts. Recovery cannot be
 combined with `--inspect` or `--recipes-only`.
+
+</details>
 
 ### Inspect setup completion
 
@@ -500,11 +510,9 @@ make kube ARGS='management logs job/prepare-shared --tail=20'
 make api ARGS='management GET /healthz'
 ```
 
-Initially the report contains three prepared endpoints and no tenants.
-Require shared environment availability and HTTP 200 before onboarding. There are no shell
-functions to define, detached worktrees to create, or provisioning files to
-assemble. `make fault-status ARGS='SLOT COMPONENT'` reads a fault's Kubernetes
-journal; the running fault helper performs the network checks.
+Initially require three prepared endpoints, no tenants, shared environment
+availability, and HTTP 200. `make fault-status ARGS='SLOT COMPONENT'` reads a
+fault's Kubernetes journal; the running fault helper performs the network checks.
 
 ### Prepare direct API requests
 
@@ -743,34 +751,45 @@ without resetting counters.
 ```bash
 make api ARGS='data:shared GET /tenants/shared-a'
 make api ARGS='data:shared GET /tenants/shared-b'
-make api ARGS='data:isolated-1 GET /tenants/isolated-c'
 make api ARGS='data:shared POST /tenants/shared-a/counter'
 make api ARGS='data:shared POST /tenants/shared-a/counter'
 ```
 
 Each POST must increment only `shared-a` by one. GET must not increment.
-Read the other two tenants again; their counters should be unchanged.
+Read `shared-b` again; its counter should be unchanged.
 Use the values you observed, rather than assuming zero after repeated commands.
 
-Update each tenant through control:
+Update the shared tenants through control:
 
 ```bash
 printf '%s\n' '{"message":"alpha-v2"}' | \
   make api ARGS='control:shared PUT /tenants/shared-a/configuration'
 printf '%s\n' '{"message":"bravo-v2"}' | \
   make api ARGS='control:shared PUT /tenants/shared-b/configuration'
-printf '%s\n' '{"message":"charlie-v2"}' | \
-  make api ARGS='control:isolated-1 PUT /tenants/isolated-c/configuration'
 make api ARGS='control:shared GET /tenants/shared-a'
 make api ARGS='data:shared GET /tenants/shared-a'
 make api ARGS='data:shared GET /tenants/shared-b'
-make api ARGS='data:isolated-1 GET /tenants/isolated-c'
 make kube ARGS='shared-data get configmap tenant-shared-a -o json' | jq .data
 ```
 
 Each PUT creates the next desired version. Wait for matching data messages and
 versions and control's `applied` reports. Counters must survive the update.
 Management supplied the initial message; control owns subsequent changes.
+
+#### Optional: update the isolated tenant
+
+Run this block only if you completed section C. Its counter must not have
+changed when incrementing `shared-a`:
+
+```bash
+make api ARGS='data:isolated-1 GET /tenants/isolated-c'
+printf '%s\n' '{"message":"charlie-v2"}' | \
+  make api ARGS='control:isolated-1 PUT /tenants/isolated-c/configuration'
+make api ARGS='control:isolated-1 GET /tenants/isolated-c'
+make api ARGS='data:isolated-1 GET /tenants/isolated-c'
+```
+
+Wait for `charlie-v2` and control `applied`. Its counter must survive the update.
 
 ### E. Observe polling, history, and access
 
@@ -853,8 +872,9 @@ The full in-Pod/named-permission check is available as
 An existing control/data pair should keep accepting configuration changes and
 serving requests while management PostgreSQL is unreachable.
 
-Finish onboarding and inspect all five endpoints before faults. Open a second
-terminal in the same checkout. It reads the same `.env`; no export is needed.
+Finish shared onboarding and inspect the three shared-demo endpoints before
+faults. If you completed section C, also verify its two isolated endpoints.
+Open a second terminal in the same checkout. It reads the same `.env`.
 Do not stop an API to simulate a database outage.
 The Azure fault helper uses Cilium policy to block the actual private parent
 database connection.

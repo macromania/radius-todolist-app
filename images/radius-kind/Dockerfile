@@ -22,6 +22,7 @@ RUN case "$TARGETARCH" in \
 FROM ghcr.io/radius-project/dynamic-rp:0.60@sha256:225dcb42382cc8f83fa1eda22e2a193fce9a76428af39cb67e9033172ecd4783 AS executor
 COPY --from=tools /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=tools /tools/terraform /opt/radplanes/terraform
+COPY --from=tools /tools/LICENSE.txt /opt/radplanes/LICENSE.terraform
 USER 65532:65532
 RUN docker --version && /opt/radplanes/terraform version && \
     test -x /dynamic-rp && git --version && test -s /etc/ssl/certs/ca-certificates.crt

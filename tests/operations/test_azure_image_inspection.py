@@ -57,7 +57,7 @@ def source(tmp_path):
             root / directory,
             ignore=shutil.ignore_patterns("__pycache__", "*.tgz", ".terraform", ".build", ".env*"),
         )
-    for name in ("pyproject.toml", "uv.lock"):
+    for name in ("pyproject.toml", "uv.lock", "LICENSE"):
         shutil.copy2(ROOT / name, root / name)
     dockerfile = root / "images/provisioner/Dockerfile"
     text = dockerfile.read_text()

@@ -8,10 +8,19 @@ from urllib.parse import unquote, urlsplit
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-SURVIVORS = ("README.md", "RUN_AZURE_SCENARIOS.md", "RUN_LOCAL_SCENARIOS.md", "AGENTS.md")
+PUBLIC_DOCS = (
+    "README.md",
+    "RUN_AZURE_SCENARIOS.md",
+    "RUN_LOCAL_SCENARIOS.md",
+    "AGENTS.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "THIRD_PARTY_NOTICES.md",
+    ".github/pull_request_template.md",
+)
 
 
-def test_tracked_documentation_is_demo_only():
+def test_documentation_is_limited_to_guides_and_contributor_policies():
     result = subprocess.run(
         ["git", "ls-files", "-z", "--", "*.md"],
         cwd=ROOT,
@@ -20,7 +29,8 @@ def test_tracked_documentation_is_demo_only():
         check=True,
         timeout=10,
     )
-    assert set(filter(None, result.stdout.split("\0"))) == set(SURVIVORS)
+    assert set(filter(None, result.stdout.split("\0"))) <= set(PUBLIC_DOCS)
+    assert all((ROOT / name).is_file() for name in PUBLIC_DOCS)
 
 
 def prose(text):
@@ -37,7 +47,7 @@ def anchors(text):
     return result
 
 
-@pytest.mark.parametrize("name", SURVIVORS)
+@pytest.mark.parametrize("name", PUBLIC_DOCS)
 def test_surviving_document_links_are_self_contained_and_resolve(name):
     path = ROOT / name
     text = path.read_text()
@@ -49,7 +59,7 @@ def test_surviving_document_links_are_self_contained_and_resolve(name):
         assert target.is_relative_to(ROOT), link
         assert target.exists(), f"{name}: {link}"
         if target.suffix == ".md":
-            assert target.relative_to(ROOT).as_posix() in SURVIVORS, f"{name}: {link}"
+            assert target.relative_to(ROOT).as_posix() in PUBLIC_DOCS, f"{name}: {link}"
             if parsed.fragment:
                 assert unquote(parsed.fragment) in anchors(target.read_text()), f"{name}: {link}"
 
@@ -153,3 +163,16 @@ def test_local_prerequisites_cover_native_stage_tools():
         for tool in declaration[1].split():
             name = aliases.get(tool, tool)
             assert re.search(rf"\b{re.escape(name)}\b", prerequisites), f"{script}: {tool}"
+
+
+def test_azure_shared_only_route_does_not_require_isolated_resources():
+    guide = (ROOT / "RUN_AZURE_SCENARIOS.md").read_text()
+    updates = guide.split("### D.", 1)[1].split("### E.", 1)[0]
+    shared, isolated = updates.split("#### Optional: update the isolated tenant", 1)
+    assert "isolated-1" not in shared and "isolated-c" not in shared
+    assert "only if you completed section C" in isolated
+    assert "control:isolated-1" in isolated and "data:isolated-1" in isolated
+    faults = guide.split("### F.", 1)[1].split("## 4.", 1)[0]
+    assert "three shared-demo endpoints" in faults
+    assert "all five endpoints" not in faults
+    assert not re.search(r"^\s*make .*isolated-1", faults, re.MULTILINE)

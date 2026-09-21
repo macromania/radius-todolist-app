@@ -67,7 +67,7 @@ REVISION=$(git -C "$ROOT" rev-parse --verify "${DEMO_REVISION:-HEAD}^{commit}")
 SOURCE="$AZURE_WORKSPACE/source"
 mkdir -m 700 "$SOURCE"
 git -C "$ROOT" archive --format=tar "$REVISION" \
-  src sql scripts infra images pyproject.toml uv.lock .dockerignore > "$AZURE_WORKSPACE/source.tar"
+  src sql scripts infra images pyproject.toml uv.lock LICENSE .dockerignore > "$AZURE_WORKSPACE/source.tar"
 tar -xpf "$AZURE_WORKSPACE/source.tar" -C "$SOURCE"
 [[ -z "$(find "$SOURCE" -type l -print)" ]] || {
   demo_error 'Build context must not contain symlinks'; exit 1;

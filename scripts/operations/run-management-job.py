@@ -18,13 +18,21 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 
-from config import load_config
+from config import ROOT, load_config
 from output import run_main, status
-from project import ROOT, CommandError, require_confirmation
 
 sys.path.insert(0, str(ROOT / "src"))
 from plane_demo.management.providers.identity import SECRET_KEYS, DemoConfig  # noqa: E402
 from plane_demo.management.provisioning import OperatorConfig  # noqa: E402
+
+
+class CommandError(RuntimeError):
+    pass
+
+
+def require_confirmation(environment: str) -> None:
+    if environment != "azure" or os.environ.get("CONFIRM_AZURE") != "yes":
+        raise CommandError("Azure mutation requires CONFIRM_AZURE=yes")
 
 
 def resources(

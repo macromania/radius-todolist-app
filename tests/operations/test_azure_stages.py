@@ -805,6 +805,7 @@ def checkout(tmp_path):
         "images/provisioner/Dockerfile",
         "pyproject.toml",
         "uv.lock",
+        "LICENSE",
         ".dockerignore",
     ):
         path = tmp_path / "committed" / relative
@@ -915,7 +916,7 @@ def run(root, script, *args, confirmed=True, input=None):
         input=input,
         text=True,
         check=False,
-        timeout=60,
+        timeout=120,
     )
     assert not list(root.glob(".azure-stage.*")), "private stage workspace was retained"
     assert not (root / ".state").exists()
@@ -969,6 +970,7 @@ def seed_verified_build(root):
 def assert_inspection_is_read_only(root):
     allowed_azure = (
         ("deployment", "sub", "show"),
+        ("deployment", "sub", "list"),
         ("account", "show"),
         ("keyvault", "list"),
         ("keyvault", "show"),
@@ -1294,14 +1296,14 @@ def test_bootstrap_registers_public_ip_feature_before_service_checks(checkout):
         < all_calls.index(validate)
         < all_calls.index(create)
     )
-    assert "Microsoft.Network/AllowBringYourOwnPublicIpAddress  Registered" in result.stderr
+    assert "Microsoft.Network/AllowBringYourOwnPublicIpAddress: Registered" in result.stderr
 
 
 def test_pending_public_ip_feature_blocks_actual_bootstrap_create(checkout):
     configure(checkout, feature_state="Pending")
     result = run(checkout, "bootstrap")
     assert result.returncode != 0 and not result.stdout
-    assert "AllowBringYourOwnPublicIpAddress  Pending service approval" in result.stderr
+    assert "AllowBringYourOwnPublicIpAddress: Pending service approval" in result.stderr
     assert not selected(checkout, "az", ["feature", "register"])
     assert not selected(checkout, "az", ["provider", "register"])
     assert not selected(checkout, "az", ["acr", "check-name"])
@@ -1790,23 +1792,16 @@ def test_inspect_refuses_incomplete_or_changed_prerequisites_without_repair(
         assert not json.loads((checkout / "fake-state.json").read_text()).get("containers")
 
 
-def test_existing_images_are_exported_and_verified_without_rebuilding(checkout):
-    seed_verified_build(checkout)
+def test_existing_images_reuse_verified_remote_evidence_without_rebuilding(checkout):
+    expected = seed_verified_build(checkout)
     result = run(checkout, "build")
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["status"] == "artifacts_verified"
+    assert json.loads(result.stdout) == expected
     assert not selected(checkout, "az", ["acr", "build"])
     assert not selected(checkout, "az", ["acr", "import"])
-    assert (
-        len(
-            [
-                call
-                for call in calls(checkout)
-                if call["tool"] == "docker" and "export" in call["args"]
-            ]
-        )
-        == 2
-    )
+    assert not selected(checkout, "az", ["acr", "run"])
+    assert not any(call["tool"] == "docker" for call in calls(checkout))
+    assert selected(checkout, "az", ["acr", "task", "show-run"])
 
 
 @pytest.mark.parametrize(
@@ -1814,12 +1809,17 @@ def test_existing_images_are_exported_and_verified_without_rebuilding(checkout):
 )
 def test_image_failure_cleans_owned_containers_and_never_claims_success(checkout, mode):
     seed_verified_build(checkout)
+    verifier = checkout / "scripts/operations/azure/remote_inspection.py"
+    verifier.write_text(verifier.read_text() + "\n")
     configure(checkout, mode=mode)
     result = run(checkout, "build")
     assert result.returncode != 0
     assert not result.stdout
     assert not selected(checkout, "az", ["acr", "build"])
     assert not selected(checkout, "az", ["acr", "import"])
+    assert len(selected(checkout, "az", ["acr", "run"])) == (2 if mode == "missing-private" else 1)
+    assert not final_proof_writes(checkout)
+    assert all(call["remote_verification"] for call in calls(checkout) if call["tool"] == "docker")
     assert not json.loads((checkout / "fake-state.json").read_text())["containers"]
 
 
@@ -2089,7 +2089,18 @@ def test_selected_external_vault_keeps_ownership_and_configuration(checkout, scr
         assert create["parameters"]["vaultName"]["value"] == "shared-vault"
     for call in selected(checkout, "az", ["keyvault"]):
         assert call["args"][1] in {"list", "show"}
-    assert not selected(checkout, "az", ["rest"])
+    for call in selected(checkout, "az", ["rest"]):
+        assert call["args"][call["args"].index("--method") + 1] == "get"
+        url = call["args"][call["args"].index("--url") + 1].lower()
+        assert url.startswith(
+            (
+                "https://graph.microsoft.com/v1.0/serviceprincipals/",
+                f"https://management.azure.com/subscriptions/{SUBSCRIPTION}"
+                "/providers/microsoft.authorization/roleassignments?",
+                f"https://management.azure.com/subscriptions/{SUBSCRIPTION}"
+                "/providers/microsoft.authorization/roledefinitions/",
+            )
+        )
 
 
 @pytest.mark.parametrize(

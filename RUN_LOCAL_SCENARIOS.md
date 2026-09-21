@@ -7,7 +7,12 @@ Stop at each checkpoint before continuing.
 A fresh live end-to-end verification run of the current implementation remains
 outstanding. The checkpoints describe expected results to verify.
 
-Run this guide from the repository root. The order is:
+**Resource scope:** the full walkthrough creates five kind clusters in Docker
+Desktop. Only one local deployment can use the reserved ports at a time.
+No Azure account is required. Read [cleanup](#5-clean-up-local) before starting;
+it destroys the selected demo's databases and local volume data.
+
+The order is:
 
 1. [Prepare the workspace](#1-prepare-the-workspace).
 2. [Deploy local management](#2-deploy-local-management).
@@ -77,21 +82,12 @@ docker --context desktop-linux version
 creating resources. `make check` runs the full source checks if you want that
 checkpoint before deploying.
 
-Make workflows use a guided runbook with one command title, compact subheadings,
-and short phase separators. Local bootstrap has three phases: verify images and
-tools, prepare the management cluster, and install and verify Radius. Inspect
-mode labels the last two phases as verification instead. Each phase names the
-next step; the numbers are workflow steps, not time estimates. Nested wrappers
-do not repeat the title. Small colored check marks indicate completion; plain
-output uses `OK`. Warnings and errors remain explicit. Quiet Make command waits
-show one transient spinner when stdout and stderr are terminals. It clears
-before native output and stops at prompts and command completion. The demo does
-not clear the screen or print elapsed times. Redirecting either stream,
-`NO_COLOR=1`, `COLOR=never`, dumb terminals, and parallel Make jobs disable animation.
-Use `COLOR=always` to force styling, or `COLOR=never` or nonempty
-`NO_COLOR` to disable it. Redirected output is plain by default. Status goes to
-stderr; JSON/API stdout and native diagnostics are preserved. Build and push logs
-are not filtered.
+Bootstrap shows three phases: verify tools/images, prepare management, and
+install/verify Radius. Phase numbers indicate order, not time. Progress goes
+to stderr; JSON/API stdout and complete native build/push logs remain intact.
+Redirected output is plain. Use `COLOR=never` or `NO_COLOR=1` to disable styling
+and animation; `COLOR=always` forces styling unless `NO_COLOR` is set. Spinners
+stop for prompts and native output.
 
 ### Select operator configuration
 
@@ -195,12 +191,10 @@ make kube ARGS='management logs deployment/provisioner --tail=20'
 make api ARGS='management GET /healthz'
 ```
 
-Initially the report contains only management and no tenants. Require a bound
-`postgres-data` PVC, `provisioner_ready`, and HTTP 200 before onboarding.
-There are no shell functions to define, detached worktrees to create, or
-provisioning files to assemble. `make fault-status ARGS='SLOT COMPONENT'` reads
-a fault's Kubernetes journal; the running fault helper performs the network
-checks.
+Initially require only management, no tenants, a bound `postgres-data` PVC,
+`provisioner_ready`, and HTTP 200. `make fault-status ARGS='SLOT COMPONENT'`
+reads a fault's Kubernetes journal; the running fault helper performs the
+network checks.
 
 ### Prepare response comparisons
 

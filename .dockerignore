@@ -2,6 +2,7 @@
 .state
 .rad
 .azure
+.local
 .venv
 .pytest*
 .ruff_cache

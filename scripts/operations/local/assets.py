@@ -73,7 +73,7 @@ def runtime_permissions(archive: tarfile.TarFile, role: str) -> dict[str, int]:
     uid = 10001 if role in {"api", "provisioner"} else 65532
     members = {item.name.removeprefix("./").rstrip("/"): item for item in archive.getmembers()}
     roots = ("app/src/plane_demo", "app/sql", "app/scripts", "app/infra/radius", "opt/radplanes")
-    files = {"app/pyproject.toml", "app/uv.lock"}
+    files = {"app/pyproject.toml", "app/uv.lock", "app/LICENSE"}
     executables = {
         "opt/radplanes/terraform",
         "usr/local/bin/rad",

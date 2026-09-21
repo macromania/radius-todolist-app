@@ -53,6 +53,7 @@ def check_source(identity):
             "infra",
             "pyproject.toml",
             "uv.lock",
+            "LICENSE",
             ".dockerignore",
         ]
     )

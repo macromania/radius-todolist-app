@@ -33,8 +33,8 @@ COPY infra/radius/bicepconfig.json /app/infra/radius/
 COPY infra/radius/recipes /app/infra/radius/recipes
 COPY scripts/__init__.py /app/scripts/
 COPY scripts/operations/__init__.py scripts/operations/config.py scripts/operations/demo.py \
-    scripts/operations/project.py scripts/operations/install-radius.py scripts/operations/deploy-plane.py \
-    scripts/operations/register-radius.py scripts/operations/issue-certificate.py scripts/operations/acme-hook.py \
+    scripts/operations/install-radius.py scripts/operations/deploy-plane.py \
+    scripts/operations/issue-certificate.py scripts/operations/acme-hook.py \
     scripts/operations/run-certificate-job.py /app/scripts/operations/
 COPY scripts/operations/install-radius.sh /app/scripts/operations/
 COPY scripts/operations/management_job.py /app/scripts/operations/

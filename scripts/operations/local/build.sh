@@ -28,7 +28,7 @@ revision=$(git -C "$ROOT" rev-parse HEAD)
   demo_error 'Check out the selected full source revision before building'; exit 1;
 }
 dirty=$(git -C "$ROOT" status --porcelain --untracked-files=all -- \
-  src sql images scripts infra pyproject.toml uv.lock .dockerignore)
+  src sql images scripts infra pyproject.toml uv.lock LICENSE .dockerignore)
 [[ -z "$dirty" ]] || { demo_error 'Commit all image inputs first'; exit 1; }
 [[ -z "$(git -C "$ROOT" ls-files -- .env)" ]] || { demo_error '.env must not be tracked'; exit 1; }
 host=$(env -i "PATH=$PATH" "HOME=$HOME" "LC_ALL=C" \

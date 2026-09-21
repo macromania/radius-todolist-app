@@ -169,7 +169,7 @@ def expected_files(root: Path, component: str) -> dict[str, Path]:
         require(
             all(
                 name in PUBLIC_FILES
-                or name in {"app/pyproject.toml", "app/uv.lock"}
+                or name in {"app/pyproject.toml", "app/uv.lock", "app/LICENSE"}
                 or name.startswith("app/sql/")
                 for name in result
             ),

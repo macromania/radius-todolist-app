@@ -73,6 +73,17 @@ def validate(
                 ],
             )
             run([*terraform, "validate"])
+            if recipe == "cluster":
+                graph = commands.run([*terraform, "graph", "-type=plan"], timeout=60)
+                for child, parent in (
+                    ("data.external.child_address", "kind_cluster.child"),
+                    ("kind_cluster.child", "data.external.prepared_images"),
+                ):
+                    edge = f'"[root] {child} (expand)" -> "[root] {parent} (expand)"'
+                    if edge not in graph:
+                        raise LocalError(
+                            f"Cluster Recipe dependency is missing: {child} -> {parent}"
+                        )
             run([*terraform, "test"])
     print("Offline Recipe checks passed; no cluster creation, state lifecycle, or live TLS proof.")
 

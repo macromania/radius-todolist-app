@@ -1,7 +1,9 @@
 # Radius three-plane demo
 
-This demo uses Radius to provision tenants across management, control, and data
-planes. Run it on Azure, then run the same scenarios locally with Docker Desktop.
+This demo uses [Radius](https://radapp.io/) to provision tenants across management,
+control, and data planes. It demonstrates configuration polling, shared and
+isolated placement, and continued data-plane operation during parent outages.
+Choose Azure or Docker Desktop; each has a standalone walkthrough.
 
 | Plane | Responsibility |
 |---|---|
@@ -12,13 +14,12 @@ planes. Run it on Azure, then run the same scenarios locally with Docker Desktop
 Each plane runs in its own cluster. Azure starts with three: management, shared
 control, and shared data. An operator can add a named isolated control/data pair
 later. Tenant onboarding never creates Azure infrastructure. Local scenarios
-retain the original on-demand five-cluster workflow.
+create the shared and isolated pairs on demand, reaching five clusters.
 
 Azure uses one resource group per plane instance and one shared platform group.
 AKS creates a separate node group for each provisioned cluster. Each Radius
 identity has resource-type-specific permissions instead of Contributor on its
-plane group. This workflow requires a fresh deployment name; it does not migrate existing
-on-demand deployments or older `*-cluster` and `*-app` group layouts.
+plane group. Use a fresh deployment name; existing layouts are not migrated.
 
 Control pulls tenant records from management PostgreSQL. Data pulls configuration
 from control PostgreSQL and writes local ConfigMaps. Data API requests use only
@@ -49,27 +50,11 @@ Run `make help` for commands, or narrow it with `GROUP=azure`, `GROUP=local`,
 `GROUP=setup`, or `GROUP=checks`. `COLOR=never` or `NO_COLOR=1` disables styling;
 redirected output is plain.
 
-Operator commands use a guided runbook layout. Bootstrap prints one workflow
-title and the selected deployment, then numbers the real phases and names the
-next step. Azure has four phases; local management bootstrap has three.
-Nested scripts use compact subheadings instead of repeating workflow banners.
-Headings use the terminal's foreground; only numbered phases and status markers
-use color. Completed operations use a small check mark, or `OK` in plain output.
-Warnings and errors remain explicit. During quiet Make command waits, one
-transient spinner appears on interactive terminals. It clears before native
-output and stops at selection prompts and command completion. It never clears
-the screen or prints elapsed times. Redirecting either output stream, setting
-`NO_COLOR=1` or `COLOR=never`, using a dumb terminal, or running parallel Make
-jobs disables animation.
-Use `COLOR=always` to force styling or `COLOR=never` to disable it; `NO_COLOR`
-overrides both. Progress goes to stderr, leaving API responses, reports and other
-machine-readable stdout unchanged. Native diagnostics and complete build/push
-logs remain visible.
-
-Bootstrap sizing choices include units and a recommendation for this demo.
-Press Enter to accept the marked option, choose a number to override it, or
-enter `q` to cancel. EOF cancels rather than silently selecting defaults.
-Saved choices and existing resource sizes are never replaced by recommendations.
+Commands show numbered phases, explicit errors, and a transient spinner on
+interactive terminals. Progress goes to stderr; JSON/API stdout stays
+machine-readable. Native diagnostics and full build/push logs remain visible.
+Sizing menus mark a recommendation: Enter accepts it, a number overrides it,
+and `q` or EOF cancels. Existing choices and resource sizes are preserved.
 
 Use `make report` for current endpoints and tenant status.
 `make fault-status ARGS='SLOT COMPONENT'` reads a fault journal without changing
@@ -120,9 +105,19 @@ validation, and ShellCheck. It does not create clusters, build images, or contac
 deployed databases. `make test-integration` is separate and requires explicitly
 configured disposable dependencies.
 
-The current implementation has source and mock-test coverage. A fresh live
-end-to-end verification run remains outstanding. The guides describe results
-to check; they are not a record of a passing deployment.
+**Verification status:** a fresh live end-to-end run remains outstanding.
+Source and mock checks do not prove a deployment. The guides describe expected
+checkpoints, not a recorded successful run.
+
+## Contribute and reuse
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) for development and pull-request guidance,
+and [SECURITY.md](SECURITY.md) for private vulnerability reporting and publication
+precautions. [AGENTS.md](AGENTS.md) maps the source and its contracts.
+
+Original source is [MIT-licensed](LICENSE). Downloaded tools and images retain
+their own terms, including Terraform and Redis; read
+[Third-party software](THIRD_PARTY_NOTICES.md) before redistributing built images.
 
 ## Demo boundaries
 
@@ -135,3 +130,8 @@ APIs are outside the demo.
 Management readiness means control created a tenant record. Control's `applied`
 report means data applied a ConfigMap. Neither report asserts that every
 downstream dependency is healthy.
+
+Azure creates billable resources, including at least three AKS clusters,
+gateways, two PostgreSQL servers, and Redis. Optional isolated capacity adds
+more. Local uses Docker Desktop resources and a fixed loopback port block.
+Read the chosen guide's prerequisites and cleanup steps before starting.

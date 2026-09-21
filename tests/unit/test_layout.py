@@ -50,12 +50,17 @@ def test_image_copy_allowlists_match_the_actual_acceptance_provenance():
     assert not any("providers/" in path or "provisioner.py" in path for path in api)
     assert not any(path.startswith("scripts/") for path in api)
     assert "src/plane_demo/management/provisioning.py" not in api
+    for component in ("provisioner", "local-provisioner"):
+        assert not image_sources(component) & {
+            "scripts/operations/project.py",
+            "scripts/operations/register-radius.py",
+        }
 
 
 def test_local_image_copy_allowlist_matches_acceptance_provenance():
     runner = acceptance_runner()
     expected = image_sources("api") | image_sources("local-provisioner")
-    assert expected | {"pyproject.toml", "uv.lock"} == set(
+    assert expected | {"pyproject.toml", "uv.lock", "LICENSE"} == set(
         runner.local_source_hashes("provisioner")
     )
     assert {

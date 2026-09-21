@@ -5,7 +5,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:$PATH" PYTHONPATH="/app/src" UV_COMPILE_BYTECODE=1
 WORKDIR /app
 COPY --from=uv /uv /usr/local/bin/uv
-COPY pyproject.toml uv.lock ./
+COPY pyproject.toml uv.lock LICENSE ./
 RUN mkdir -p .build-work && \
     TMPDIR=/app/.build-work UV_CACHE_DIR=/app/.uv-cache \
     uv sync --frozen --no-dev --no-install-project && \

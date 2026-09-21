@@ -2,6 +2,8 @@
 name = "plane-demo"
 version = "0.1.0"
 description = "Child-initiated three-plane configuration demonstration"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.13,<3.14"
 dependencies = [
   "fastapi>=0.115,<1",
@@ -11,6 +13,15 @@ dependencies = [
   "redis>=5.2,<7",
   "httpx>=0.28,<1",
 ]
+
+[project.urls]
+Repository = "https://github.com/macromania/radius-todolist-app"
+Issues = "https://github.com/macromania/radius-todolist-app/issues"
+
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+default = true
 
 [dependency-groups]
 dev = ["pytest>=8.3,<10", "ruff>=0.11,<1"]

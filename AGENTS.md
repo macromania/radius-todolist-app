@@ -4,6 +4,8 @@ Read [README.md](README.md) first. The public instructions are the standalone
 [Azure guide](RUN_AZURE_SCENARIOS.md) and [local guide](RUN_LOCAL_SCENARIOS.md).
 Keep these guides current rather than adding histories, plans, or reference docs.
 Git retains the historical material.
+Contributor and disclosure policies are in [CONTRIBUTING.md](CONTRIBUTING.md) and
+[SECURITY.md](SECURITY.md); dependency terms are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Scope and verification
 

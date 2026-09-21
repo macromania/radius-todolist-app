@@ -589,7 +589,11 @@ def test_canonical_management_configuration_and_suspended_job_use_live_inputs(
         == config.identity.demo_keys["management"]
     )
     assert not any(kind == "persistentvolumeclaim" for kind, _ in objects)
-    assert not any(".state" in argument for arguments in observed for argument in arguments)
+    assert not any(
+        ".state/" in argument.replace(str(tmp_path), "<temporary>")
+        for arguments in observed
+        for argument in arguments
+    )
     changed_identity = DemoConfig.from_values(
         {
             **config.identity.public_values(),
@@ -3045,6 +3049,8 @@ def test_selected_azure_main_uses_key_vault_without_seed_or_persistent_workspace
     identity = DemoConfig.from_values(selected_config.bootstrap_settings)
     discovery = MagicMock(return_value=selected_config)
     monkeypatch.setattr(provisioner, "read_runtime_configuration", discovery)
+    for name in PUBLIC_KEYS:
+        monkeypatch.delenv(name, raising=False)
     for name, value in identity.public_values().items():
         monkeypatch.setenv(name, value)
     identity_module, azure_module = ModuleType("azure.identity"), ModuleType("azure")
@@ -3201,11 +3207,15 @@ def test_incluster_management_command_uses_only_the_guarded_service_provider(
 
 def test_entrypoints_are_cloud_free_for_help():
     root = Path(__file__).resolve().parents[2]
-    for script in ("deploy-plane.py", "register-radius.py", "run-certificate-job.py"):
+    for script, option in (
+        ("deploy-plane.py", "--slot"),
+        ("run-management-job.py", "--execute"),
+        ("run-certificate-job.py", "--slot"),
+    ):
         result = subprocess.run(
             [sys.executable, str(root / "scripts/operations" / script), "--help"],
             text=True,
             capture_output=True,
             check=False,
         )
-        assert result.returncode == 0 and "--slot" in result.stdout
+        assert result.returncode == 0 and option in result.stdout

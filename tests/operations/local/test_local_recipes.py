@@ -2,7 +2,6 @@ import base64
 import io
 import json
 import os
-import shutil
 import signal
 import subprocess
 import sys
@@ -471,28 +470,31 @@ def test_prepared_image_data_source_checks_ids_without_pulling(docker_double):
     assert "changed or is missing" in result.stderr
 
 
-def test_first_create_graph_orders_preparation_node_and_address_probe():
-    compiler = ROOT / ".state/check/local-infra-tools/terraform"
-    if not compiler.is_file():
-        executable = shutil.which("terraform")
-        assert executable is not None, "Terraform is required for the Recipe graph regression"
-        compiler = Path(executable)
-    result = subprocess.run(
-        [str(compiler), f"-chdir={RECIPES / 'cluster'}", "graph", "-type=plan"],
-        env={**os.environ, "CHECKPOINT_DISABLE": "1"},
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
+CLUSTER_GRAPH = (
+    '"[root] data.external.child_address (expand)" -> "[root] kind_cluster.child (expand)"',
+    '"[root] kind_cluster.child (expand)" -> "[root] data.external.prepared_images (expand)"',
+)
+
+
+@pytest.mark.parametrize("missing", CLUSTER_GRAPH)
+def test_validator_rejects_missing_cluster_dependency_from_initialized_archive(
+    local_state, monkeypatch, missing
+):
+    validator = load("local_recipe_validator", ROOT / "scripts/operations/local/validate.py")
+    commands = Mock()
+    commands.environment = {"PATH": os.environ["PATH"]}
+    commands.run.side_effect = lambda argv, **_: (
+        "\n".join(edge for edge in CLUSTER_GRAPH if edge != missing) if argv[2] == "graph" else ""
     )
-    assert (
-        '"[root] data.external.child_address (expand)" -> "[root] kind_cluster.child (expand)"'
-        in result.stdout
-    )
-    assert (
-        '"[root] kind_cluster.child (expand)" -> "[root] data.external.prepared_images (expand)"'
-        in result.stdout
-    )
+    monkeypatch.setattr(validator, "Commands", Mock(return_value=commands))
+    with pytest.raises(common.LocalError, match="Cluster Recipe dependency is missing"):
+        validator.validate(recipes=("cluster",))
+    assert [call.args[0][2] for call in commands.run.call_args_list] == [
+        "fmt",
+        "init",
+        "validate",
+        "graph",
+    ]
 
 
 def test_validator_checks_the_actual_archive_of_every_recipe(local_state, monkeypatch):
@@ -503,6 +505,9 @@ def test_validator_checks_the_actual_archive_of_every_recipe(local_state, monkey
     seen, workspaces = [], []
 
     def check_archive(argv, **kwargs):
+        if argv[2] == "graph":
+            assert Path(argv[1].removeprefix("-chdir=")).parent in workspaces
+            return "\n".join(CLUSTER_GRAPH)
         if argv[2] != "init":
             return ""
         directory = Path(argv[1].removeprefix("-chdir="))
@@ -521,7 +526,15 @@ def test_validator_checks_the_actual_archive_of_every_recipe(local_state, monkey
     validator.validate()
     assert seen == list(prepare.RECIPE_FILES)
     assert [call.args[0][2] for call in commands.run.call_args_list] == [
-        stage for _ in prepare.RECIPE_FILES for stage in ("fmt", "init", "validate", "test")
+        stage
+        for recipe in prepare.RECIPE_FILES
+        for stage in (
+            "fmt",
+            "init",
+            "validate",
+            *(("graph",) if recipe == "cluster" else ()),
+            "test",
+        )
     ]
     assert all(not path.exists() for path in workspaces)
     assert not (local_state / "validation").exists()

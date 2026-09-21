@@ -158,7 +158,6 @@ COORDINATOR_SCRIPTS = [
     "__init__.py",
     "config.py",
     "demo.py",
-    "project.py",
     "management_job.py",
     "environment_job.py",
     "prepare-environment.py",
@@ -168,7 +167,6 @@ COORDINATOR_SCRIPTS = [
     "install-radius.py",
     "install-radius.sh",
     "deploy-plane.py",
-    "register-radius.py",
     "issue-certificate.py",
     "acme-hook.py",
     "run-certificate-job.py",
@@ -210,7 +208,8 @@ def source_hashes(component):
 
 
 def local_source_hashes(component):
-    paths = [ROOT / "pyproject.toml", ROOT / "uv.lock", *ROOT.glob("sql/*.sql")]
+    paths = [ROOT / name for name in ("pyproject.toml", "uv.lock", "LICENSE")]
+    paths += list(ROOT.glob("sql/*.sql"))
     if component != "provisioner":
         paths += [ROOT / f"src/plane_demo/{name}.py" for name in MODULES]
     else:
@@ -1828,6 +1827,7 @@ class Runner:
                         "images/provisioner",
                         "pyproject.toml",
                         "uv.lock",
+                        "LICENSE",
                         *(
                             [
                                 "scripts/operations/local",

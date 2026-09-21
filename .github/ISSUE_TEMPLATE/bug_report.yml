@@ -1,0 +1,38 @@
+name: Bug report
+description: Report a reproducible problem with the demo or its guides.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, kubeconfigs, state files, or raw cloud logs.
+        For vulnerabilities, follow SECURITY.md rather than this public form.
+  - type: input
+    id: revision
+    attributes:
+      label: Source revision
+      description: Commit SHA from git rev-parse HEAD.
+    validations:
+      required: true
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Affected workflow
+      options:
+        - Source checks
+        - Azure
+        - Local Docker Desktop
+        - Documentation
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction and expected behavior
+      description: Include tool versions, guide step, and the smallest safe command sequence.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      description: Include the relevant error and exit code. Remove keys, tokens, DSNs, and private identifiers.

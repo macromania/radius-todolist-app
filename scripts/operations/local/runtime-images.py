@@ -46,14 +46,12 @@ OPERATOR_FILES = (
     "__init__.py",
     "config.py",
     "demo.py",
-    "project.py",
     "install-radius.py",
     "install-radius.sh",
     "deploy-plane.py",
     "management_job.py",
     "azure/registry_policy.py",
     "azure/registry-policy.json",
-    "register-radius.py",
     "issue-certificate.py",
     "acme-hook.py",
     "run-certificate-job.py",
@@ -66,6 +64,7 @@ INPUTS = (
     "infra",
     "pyproject.toml",
     "uv.lock",
+    "LICENSE",
     ".dockerignore",
 )
 TOOL_HASHES = {
@@ -102,7 +101,7 @@ if component=="api":
 else:
     importlib.import_module("plane_demo.management.provisioner")
     importlib.import_module("plane_demo.management.providers.local")
-files=["pyproject.toml","uv.lock"]
+files=["pyproject.toml","uv.lock","LICENSE"]
 for directory in ("src/plane_demo","sql","scripts","infra/radius"):
     files.extend(str(p.relative_to(root)) for p in (root/directory).rglob("*")
                  if p.is_file()
@@ -143,7 +142,8 @@ def references(revision: str) -> dict[str, str]:
 
 
 def expected_hashes(role: str) -> dict[str, str]:
-    paths = [ROOT / "pyproject.toml", ROOT / "uv.lock", *ROOT.glob("sql/*.sql")]
+    paths = [ROOT / name for name in ("pyproject.toml", "uv.lock", "LICENSE")]
+    paths += list(ROOT.glob("sql/*.sql"))
     if role == "api":
         paths += [ROOT / f"src/plane_demo/{name}.py" for name in API_MODULES]
     elif role == "provisioner":
@@ -203,7 +203,7 @@ def rootfs_proof(path: Path, role: str, arch: str) -> dict:
             ):
                 raise LocalError("Exported API filesystem includes privileged code")
             source = name.startswith("app/") and (
-                relative in ("pyproject.toml", "uv.lock")
+                relative in ("pyproject.toml", "uv.lock", "LICENSE")
                 or (
                     relative.startswith(("src/plane_demo/", "sql/", "scripts/", "infra/radius/"))
                     and Path(name).suffix
