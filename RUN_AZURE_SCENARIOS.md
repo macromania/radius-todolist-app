@@ -1021,6 +1021,209 @@ make fault-status ARGS="'$FAULT_SLOT' '$FAULT_COMPONENT'" | jq '{outcome, restor
 Do not use `kill -9`, replace the faulted reconciler, or delete its cluster to
 clear a fault. Do not proceed until the original link is confirmed restored.
 
+### H. Check what a plane key can reach
+
+API keys belong to a plane instance, not to a tenant. Any caller holding the
+shared data key can read and change every tenant on the shared pair.
+This section shows that boundary rather than testing tenant authentication.
+
+Read the shared control and data URLs and keys into shell variables without
+printing them:
+
+```bash
+set -o pipefail
+CONTROL_URL=$(make endpoints ARGS=shared-control | jq -er '.url') || exit 1
+CONTROL_KEY=$(make kube ARGS='shared-control get secret control-api-runtime -o json' | \
+  jq -er '.data.DEMO_KEY | @base64d') || exit 1
+DATA_URL=$(make endpoints ARGS=shared-data | jq -er '.url') || exit 1
+DATA_KEY=$(make kube ARGS='shared-data get secret data-api-runtime -o json' | \
+  jq -er '.data.DEMO_KEY | @base64d') || exit 1
+```
+
+Use one key for both shared tenants:
+
+```bash
+for tenant in shared-a shared-b; do
+  curl -q -sS -o /dev/null -w "control $tenant: HTTP %{http_code}\n" \
+    -H "X-Demo-Key: $CONTROL_KEY" "$CONTROL_URL/tenants/$tenant"
+  curl -q -sS -o /dev/null -w "data $tenant: HTTP %{http_code}\n" \
+    -H "X-Demo-Key: $DATA_KEY" "$DATA_URL/tenants/$tenant"
+done
+make api ARGS='data:shared GET /tenants/shared-b' | jq '{counter}'
+curl -q -sS --fail-with-body -X POST -H "X-Demo-Key: $DATA_KEY" \
+  "$DATA_URL/tenants/shared-b/counter" | jq '{tenant_id, counter}'
+```
+
+Expect four 200 responses. The POST increments `shared-b` by one: the same key
+that serves `shared-a` changed another tenant. Nothing in the request identifies
+the caller as a tenant.
+
+Keys do not cross planes:
+
+```bash
+MANAGEMENT_URL=$(make endpoints ARGS=management | jq -er '.url') || exit 1
+curl -q -sS -o /dev/null -w 'data key on control: HTTP %{http_code}\n' \
+  -H "X-Demo-Key: $DATA_KEY" "$CONTROL_URL/tenants/shared-a"
+curl -q -sS -o /dev/null -w 'control key on data: HTTP %{http_code}\n' \
+  -H "X-Demo-Key: $CONTROL_KEY" "$DATA_URL/tenants/shared-a"
+curl -q -sS -o /dev/null -w 'data key on management: HTTP %{http_code}\n' \
+  -H "X-Demo-Key: $DATA_KEY" "$MANAGEMENT_URL/tenants/shared-a"
+```
+
+Expect 401 for each. If you completed section C, the shared key must also fail
+on the isolated pair:
+
+```bash
+curl -q -sS -o /dev/null -w 'shared data key on isolated-1: HTTP %{http_code}\n' \
+  -H "X-Demo-Key: $DATA_KEY" \
+  "$(make endpoints ARGS=isolated-1-data | jq -er '.url')/tenants/isolated-c"
+```
+
+Expect 401. Shared and isolated placement separate infrastructure and data;
+authorization is per plane instance, not per tenant. This demo does not provide
+hostile-tenant isolation.
+
+### I. Observe a noisy neighbor
+
+Generate sustained counter traffic for `shared-b` and watch `shared-a` on the
+same data API, Redis and reconciler. The demo has no rate limits or per-tenant
+quotas, so this records behavior rather than asserting a threshold. Keep the
+volume low: every request is billable gateway traffic.
+
+Reuse the variables from section H and record a baseline:
+
+```bash
+NOISE=$(mktemp -d "${TMPDIR:-/tmp}/plane-noise.XXXXXX")
+probe() {
+  for _ in $(seq 1 30); do
+    curl -q -sS -o /dev/null -w '%{http_code} %{time_total}\n' \
+      -H "X-Demo-Key: $DATA_KEY" "$DATA_URL/tenants/shared-a"
+    sleep 0.5
+  done | sort -k2 -n | awk '{t[NR]=$2; if ($1 != 200) e++}
+    END {printf "requests=%d errors=%d p50=%.3fs p95=%.3fs max=%.3fs\n",
+      NR, e, t[int(NR/2)+1], t[int(NR*0.95)], t[NR]}'
+}
+make api ARGS='data:shared GET /tenants/shared-a' | jq '{message, applied_version, counter}'
+make api ARGS='data:shared GET /tenants/shared-b' | jq '{counter}'
+probe
+```
+
+Start four workers for 60 seconds, then measure `shared-a` and one
+configuration change while they run:
+
+```bash
+for worker in 1 2 3 4; do
+  (end=$((SECONDS + 60))
+   while (( SECONDS < end )); do
+     curl -q -sS -o /dev/null -w '%{http_code}\n' -X POST \
+       -H "X-Demo-Key: $DATA_KEY" "$DATA_URL/tenants/shared-b/counter"
+   done > "$NOISE/worker-$worker.txt") &
+done
+sleep 5
+probe
+START=$SECONDS
+VERSION=$(printf '%s\n' '{"message":"alpha-under-load"}' | \
+  make api ARGS='control:shared PUT /tenants/shared-a/configuration' | jq -er '.desired.version') || exit 1
+until make api ARGS='data:shared GET /tenants/shared-a' 2>/dev/null | \
+  jq -e --argjson v "$VERSION" '.applied_version == $v' >/dev/null; do sleep 1; done
+echo "applied version $VERSION after about $((SECONDS - START)) s"
+make kube ARGS='shared-data top pods'
+wait
+```
+
+Then count the noise and compare counters:
+
+```bash
+cat "$NOISE"/worker-*.txt | sort | uniq -c
+make api ARGS='data:shared GET /tenants/shared-a' | jq '{message, applied_version, counter}'
+make api ARGS='data:shared GET /tenants/shared-b' | jq '{counter}'
+rm -rf "$NOISE"
+```
+
+Require zero `shared-a` errors, `alpha-under-load` applied within a few poll
+intervals, an unchanged `shared-a` counter, and a `shared-b` counter increased by
+exactly the number of 200 responses. Record the latency percentiles, any
+non-200 codes and Pod usage. Workstation round-trip time bounds this load; it is
+not a capacity test of Redis, PostgreSQL connections or API workers.
+
+### J. Redis outage (local only)
+
+Azure Redis is a managed private service, and the fault helper cannot yet block
+it. The [local guide](RUN_LOCAL_SCENARIOS.md#j-stop-redis-and-recover) stops the
+data pair's Redis and checks counters after recovery. Its behavior is the same on
+Azure: every tenant on that pair gets 503 `local_counter_unavailable`, including
+GET requests, because each response reads the counter.
+
+### K. Control-record failure (local only)
+
+Stopping Azure PostgreSQL for a pair is not part of this demo. The
+[local guide](RUN_LOCAL_SCENARIOS.md#k-fail-and-retry-a-control-record) takes
+the shared control database down during onboarding. Management then shows
+`onboarding_status: pending` with `control_record.status: failed`, and becomes
+`ready` after the reconciler's next successful poll. It never reports
+`onboarding_status: failed`.
+
+### L. Block a ConfigMap update
+
+Data should keep serving its last applied configuration when the data reconciler
+cannot write the tenant's ConfigMap. Control should report the new version as
+failed, then applied after the block is removed.
+
+This marks one tenant ConfigMap immutable, so Kubernetes rejects the
+reconciler's next change to it. An immutable ConfigMap cannot be made mutable
+again; the only restore is deleting it so the reconciler recreates it. Target
+only `tenant-shared-a`.
+
+Read the current state:
+
+```bash
+make api ARGS='data:shared GET /tenants/shared-a' | jq '{message, applied_version, counter}'
+make api ARGS='data:shared GET /tenants/shared-b' | jq '{message, applied_version}'
+make kube ARGS="shared-data patch configmap tenant-shared-a --type=merge '--patch={\"immutable\":true}'"
+make kube ARGS='shared-data get configmap tenant-shared-a -o json' | jq '{immutable, data}'
+```
+
+Require `immutable: true`. Now create a version that data cannot write:
+
+```bash
+printf '%s\n' '{"message":"blocked-write"}' | \
+  make api ARGS='control:shared PUT /tenants/shared-a/configuration'
+make api ARGS='control:shared GET /tenants/shared-a' | jq '.data_config'
+make kube ARGS='shared-data logs deployment/data-reconciler --tail=20'
+make api ARGS='data:shared GET /tenants/shared-a'
+make api ARGS='data:shared POST /tenants/shared-a/counter'
+make api ARGS='data:shared GET /tenants/shared-b'
+```
+
+Wait for control to report `status: failed` with `last_report.type:
+config_apply_failed` and `error_code: config_write_failed`. Data must keep the
+message and version from before the PUT while its counter still increments.
+`shared-b` stays `applied`: the reconciler does not rewrite ConfigMaps that are
+already current.
+
+Restore by deleting only that ConfigMap:
+
+```bash
+make kube ARGS='shared-data delete configmap tenant-shared-a'
+make api ARGS='data:shared GET /tenants/shared-a'
+make api ARGS='control:shared GET /tenants/shared-a' | jq '.data_config'
+make kube ARGS='shared-data get configmap tenant-shared-a -o json' | jq '{immutable, data}'
+```
+
+Data may return 404 `tenant_config_not_applied` until the next data poll.
+Then require `blocked-write` at the new version, control `applied`, no
+`immutable` field, and the counter value observed before the restore.
+The timeline keeps one `config_apply_failed` followed by `config_applied` for
+that version.
+
+### M. Provisioner interruption (local only)
+
+Azure tenant admission assigns prepared capacity and never queues infrastructure
+work, so there is no tenant operation to interrupt. Setup Jobs are the Azure
+equivalent; see [After a failed bootstrap](#after-a-failed-bootstrap). The
+[local guide](RUN_LOCAL_SCENARIOS.md#m-interrupt-the-provisioner) restarts the
+provisioner during an operation and inspects the `interrupted` record.
+
 ## 4. Clean up Azure
 
 ### Remove only an unused isolated environment
@@ -1120,6 +1323,8 @@ resources; it does not require an empty plane group.
 | Redis reports `InsufficientCapacity` | Azure could not allocate the selected `AZURE_REDIS_SKU` in this region. Published offers do not prove live capacity. Inspect the retained cache and failed Job. A new deployment can use a different explicit size or region; changing `.env` does not resize or recover the failed environment. Do not reset or replay the Job blindly. |
 | No isolated capacity | Add a named isolated environment with `make bootstrap ... ARGS='--isolated NAME'`. Do not submit tenant requests to create clusters. |
 | Control is ready but data is stale | Read the control data report, data-reconciler logs and tenant ConfigMap. Check for a paused reconciler or active fault. |
+| Control reports data `failed` | Read `last_report.error_code` and data-reconciler logs. An immutable tenant ConfigMap left from section L blocks writes until that one ConfigMap is deleted. |
+| Data returns 503 `local_counter_unavailable` | Redis is unreachable from the data API. Every tenant on that pair is affected; configuration reads still work. |
 | SQL observation fails | Preserve credentials and the database. Missing/drifted schema metadata does not authorize reinitialization. |
 | Cleanup refuses an owner or journal | Inspect the named resource and restore its fault first. Do not remove guards or force-delete children. |
 
@@ -1178,9 +1383,11 @@ use the [journal restoration procedure](#interrupted-fault).
 ## Limits to keep in mind
 
 Use synthetic data. Per-plane demo keys do not provide production tenant
-authentication. Administrative setup has no HA scheduler or automatic
-replay of interrupted infrastructure work; tenant migration and deletion APIs
-are outside the demo.
+authentication: any holder of a pair's key can read and change every tenant on
+that pair, and there are no per-tenant rate limits. Shared and isolated placement
+separate infrastructure and data, not hostile tenants. Administrative setup has
+no HA scheduler or automatic replay of interrupted infrastructure work; tenant
+migration and deletion APIs are outside the demo.
 
 PostgreSQL and Redis use private Azure connectivity and verified TLS. Certificate
 issuance is implemented, but automatic certificate renewal is not. Parent
