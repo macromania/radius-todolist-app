@@ -40,6 +40,10 @@ Use either the manual scenarios or the automated harness for a run. They use the
 same tenant names, so do not run both concurrently. Each guide includes the
 automated alternative.
 
+For a visual walkthrough of how requests and polls move between the planes, and
+what each manual scenario changes, open [docs/architecture.html](docs/architecture.html)
+in a browser. It follows the guides; they remain the source of truth.
+
 On Azure, `make bootstrap CONFIRM_AZURE=yes` prepares the default environment,
 including verified images, databases, gateways and workloads. Later,
 `make bootstrap CONFIRM_AZURE=yes ARGS='--isolated blue'` adds only that isolated
@@ -122,7 +126,9 @@ their own terms, including Terraform and Redis; read
 ## Demo boundaries
 
 Use synthetic data and a trusted operator. Shared demo keys are simple per-plane
-API access, not production tenant authentication. Azure setup uses serialized,
+API access, not production tenant authentication: a pair's key reaches every
+tenant on that pair. Shared and isolated placement separate infrastructure and
+data, not hostile tenants. Azure setup uses serialized,
 owned administrative Jobs; local uses one provisioner. Neither path
 automatically replays interrupted infrastructure work. Tenant migration/deletion
 APIs are outside the demo.

@@ -1,0 +1,1450 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How a request moves through the three planes · Radius three-plane demo</title>
+<meta name="description" content="Interactive map of the Radius three-plane demo: management, control and data planes, how requests and polls move between them, and what each manual scenario proves.">
+<meta name="color-scheme" content="dark">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Schibsted+Grotesk:wght@400;500;600;700;800&display=swap">
+<style>
+:root {
+  --ink: oklch(0.165 0.018 248);
+  --ink-2: oklch(0.2 0.022 248);
+  --ink-3: oklch(0.245 0.026 248);
+  --rule: oklch(0.34 0.03 245);
+  --line: oklch(0.52 0.035 240);
+  --text: oklch(0.94 0.008 240);
+  --soft: oklch(0.8 0.018 240);
+  --muted: oklch(0.72 0.022 240);
+  --signal: oklch(0.82 0.155 72);
+  --signal-deep: oklch(0.7 0.15 62);
+  --signal-wash: oklch(0.82 0.155 72 / 0.14);
+  --fault: oklch(0.68 0.19 27);
+  --fault-wash: oklch(0.68 0.19 27 / 0.16);
+  --ok: oklch(0.8 0.12 160);
+  --sans: "Schibsted Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --stage-w: 62%;
+}
+* { box-sizing: border-box; }
+html { background: var(--ink); color: var(--text); scrollbar-color: var(--rule) var(--ink); }
+body { margin: 0; font: 400 16.5px/1.6 var(--sans); -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+::selection { background: var(--signal); color: var(--ink); }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: var(--ink); }
+::-webkit-scrollbar-thumb { background: var(--rule); border-radius: 10px; border: 2px solid var(--ink); }
+a { color: var(--signal); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; text-decoration-color: color-mix(in oklch, var(--signal) 45%, transparent); }
+a:hover { text-decoration-color: var(--signal); }
+:focus-visible { outline: 2px solid var(--signal); outline-offset: 3px; border-radius: 4px; }
+code, pre, kbd { font-family: var(--mono); font-variant-ligatures: none; }
+:not(pre) > code { font-size: 0.86em; padding: 0.1em 0.35em; border-radius: 4px; background: var(--ink-3); color: var(--soft); white-space: nowrap; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* Environment switch: one body attribute hides the other environment's copy */
+body[data-env="azure"] [data-env="local"], body[data-env="local"] [data-env="azure"] { display: none !important; }
+
+/* Masthead */
+.masthead { padding: clamp(28px, 5vw, 64px) clamp(20px, 4vw, 56px) 28px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 24px 48px; align-items: end; border-bottom: 1px solid var(--rule); }
+.masthead h1 { margin: 0; font-weight: 800; font-size: clamp(2.1rem, 4.6vw, 4.1rem); line-height: 1.02; letter-spacing: -0.03em; max-width: 17ch; text-wrap: balance; }
+.masthead h1 em { font-style: normal; color: var(--signal); }
+.masthead p { margin: 18px 0 0; color: var(--soft); max-width: 62ch; font-size: 1.06rem; text-wrap: pretty; }
+.env { display: grid; gap: 10px; justify-items: end; }
+.env-label { font-size: 0.84rem; color: var(--muted); }
+.segmented { display: inline-flex; padding: 4px; border-radius: 999px; background: var(--ink-2); border: 1px solid var(--rule); }
+.segmented button { appearance: none; border: 0; background: transparent; color: var(--soft); font: 600 0.92rem var(--sans); padding: 9px 18px; border-radius: 999px; cursor: pointer; transition: background 240ms var(--ease-out), color 240ms var(--ease-out); }
+.segmented button:hover { color: var(--text); }
+.segmented button[aria-pressed="true"] { background: var(--signal); color: var(--ink); }
+
+/* Split instrument */
+.split { display: grid; grid-template-columns: var(--stage-w) minmax(0, 1fr); }
+.stage { position: sticky; top: 0; height: 100vh; height: 100dvh; display: grid; grid-template-rows: minmax(0, 1fr) auto auto; border-right: 1px solid var(--rule); background: var(--ink-2); }
+.map-wrap { position: relative; min-height: 0; padding: 18px 18px 6px; background:
+  repeating-linear-gradient(0deg, oklch(0.26 0.028 245 / 0.55) 0 1px, transparent 1px 28px),
+  repeating-linear-gradient(90deg, oklch(0.26 0.028 245 / 0.55) 0 1px, transparent 1px 28px),
+  var(--ink); }
+.map-wrap svg { width: 100%; height: 100%; display: block; font-variant-ligatures: none; }
+.readout { border-top: 1px solid var(--rule); background: var(--ink-2); padding: 14px 18px 16px; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 18px; align-items: start; }
+.controls { display: flex; gap: 6px; grid-row: span 2; }
+.controls button { appearance: none; width: 40px; height: 40px; display: grid; place-items: center; border-radius: 10px; border: 1px solid var(--rule); background: var(--ink); color: var(--text); cursor: pointer; transition: border-color 200ms, background 200ms, color 200ms; }
+.controls button:hover:not(:disabled) { border-color: var(--signal); color: var(--signal); }
+.controls button:disabled { opacity: 0.35; cursor: not-allowed; }
+.controls button.primary { background: var(--signal); color: var(--ink); border-color: var(--signal); }
+.controls button.primary:hover:not(:disabled) { background: oklch(0.87 0.14 78); color: var(--ink); }
+.controls svg { width: 18px; height: 18px; }
+.readout-head { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; font-size: 0.86rem; color: var(--muted); }
+.readout-head strong { color: var(--text); font-weight: 600; font-size: 0.95rem; }
+.readout-count { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 0.8rem; }
+.caption { margin: 0; font-size: 1rem; line-height: 1.5; color: var(--soft); min-height: 3em; max-width: 78ch; }
+.caption code { white-space: normal; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; padding: 0 18px 12px; background: var(--ink-2); font-size: 0.8rem; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 8px; }
+.legend svg { width: 30px; height: 10px; overflow: visible; }
+
+/* Narrative */
+.narrative { padding: 8px clamp(20px, 3vw, 44px) 30vh; min-width: 0; }
+.narrative section { padding: 56px 0 8px; }
+.narrative section + section { border-top: 1px solid var(--rule); }
+.narrative h2 { font-size: clamp(1.6rem, 2.2vw, 2.1rem); line-height: 1.12; letter-spacing: -0.025em; font-weight: 800; margin: 0 0 14px; text-wrap: balance; }
+.narrative h3 { font-size: 1.22rem; line-height: 1.25; letter-spacing: -0.015em; font-weight: 700; margin: 0 0 8px; display: flex; flex-wrap: wrap; gap: 2px 12px; align-items: baseline; }
+.narrative p, .narrative li { max-width: 68ch; text-wrap: pretty; }
+.narrative p { margin: 0 0 14px; color: var(--soft); }
+.narrative strong { color: var(--text); font-weight: 600; }
+.narrative .phase { position: relative; padding: 22px 0 18px 30px; margin-left: -30px; }
+.narrative section.phase { padding-top: 56px; }
+.phase::before { content: ""; position: absolute; left: 7px; top: 30px; width: 9px; height: 9px; border-radius: 50%; border: 1px solid var(--line); background: var(--ink); transition: background 300ms var(--ease-out), border-color 300ms var(--ease-out), box-shadow 300ms var(--ease-out); }
+section.phase::before { top: 70px; }
+.phase.is-active::before { background: var(--signal); border-color: var(--signal); box-shadow: 0 0 0 5px var(--signal-wash); }
+div.phase + div.phase::after { content: ""; position: absolute; left: 11px; top: -4px; height: 30px; width: 1px; background: var(--rule); }
+.phase h3 .when { font: 500 0.78rem var(--mono); color: var(--muted); letter-spacing: 0; white-space: nowrap; }
+.play { appearance: none; display: inline-flex; align-items: center; gap: 8px; margin: 2px 0 14px; padding: 7px 14px 7px 11px; border-radius: 999px; border: 1px solid var(--rule); background: var(--ink-2); color: var(--text); font: 600 0.86rem var(--sans); cursor: pointer; transition: border-color 200ms, color 200ms, background 200ms; }
+.play:hover { border-color: var(--signal); color: var(--signal); }
+.play svg { width: 14px; height: 14px; }
+.phase.is-active .play { border-color: color-mix(in oklch, var(--signal) 55%, var(--rule)); }
+
+.scenario-head { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 16px; align-items: baseline; margin-bottom: 10px; }
+.letter { grid-row: span 2; width: 46px; height: 46px; display: grid; place-items: center; border-radius: 12px; background: var(--ink-3); color: var(--signal); font: 800 1.4rem/1 var(--sans); }
+.scenario-head h2 { margin: 0; }
+.proves { margin: 0 !important; color: var(--muted) !important; font-size: 0.95rem; }
+.guide-links { font-size: 0.88rem; color: var(--muted); margin: 0 0 6px !important; }
+
+.code { position: relative; margin: 10px 0 14px; }
+pre { margin: 0; padding: 14px 16px; padding-right: 52px; border-radius: 10px; background: oklch(0.13 0.016 248); border: 1px solid var(--rule); overflow-x: auto; font-size: 0.82rem; line-height: 1.6; color: var(--soft); tab-size: 2; }
+pre .c { color: var(--muted); }
+.copy { position: absolute; top: 8px; right: 8px; width: 32px; height: 32px; display: grid; place-items: center; border-radius: 8px; border: 1px solid transparent; background: oklch(0.13 0.016 248); color: var(--muted); cursor: pointer; transition: color 200ms, border-color 200ms, background 200ms; }
+.copy:hover { color: var(--text); border-color: var(--rule); background: var(--ink-3); }
+.copy[data-copied="true"] { color: var(--ok); }
+.copy svg { width: 16px; height: 16px; }
+
+.expect { list-style: none; padding: 0; margin: 6px 0 16px; display: grid; gap: 7px; }
+.expect li { position: relative; padding-left: 26px; color: var(--soft); font-size: 0.97rem; }
+.expect li::before { content: ""; position: absolute; left: 2px; top: 0.42em; width: 13px; height: 13px; border-radius: 4px; border: 1.5px solid var(--ok); background: linear-gradient(var(--ok) 0 0) center / 5px 5px no-repeat; }
+.expect.no li::before { border-color: var(--fault); background: linear-gradient(45deg, transparent 44%, var(--fault) 44% 56%, transparent 56%), linear-gradient(-45deg, transparent 44%, var(--fault) 44% 56%, transparent 56%); }
+
+table { width: 100%; border-collapse: collapse; margin: 12px 0 18px; font-size: 0.93rem; }
+th, td { text-align: left; padding: 11px 12px 11px 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font-weight: 600; color: var(--muted); font-size: 0.8rem; }
+td:first-child { width: 44%; }
+td { color: var(--soft); }
+td code { white-space: normal; }
+
+.columns { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin: 16px 0 20px; }
+.columns div { padding-top: 12px; border-top: 1px solid var(--line); }
+.columns b { display: block; font-weight: 700; margin-bottom: 4px; }
+.columns span { color: var(--muted); font-size: 0.9rem; line-height: 1.45; display: block; }
+
+.status-note { display: flex; gap: 12px; align-items: flex-start; padding: 14px 16px; margin: 18px 0; border-radius: 12px; background: var(--ink-2); border: 1px solid var(--rule); font-size: 0.93rem; color: var(--soft); }
+.status-note svg { flex: none; width: 20px; height: 20px; color: var(--signal); margin-top: 2px; }
+.status-note p { margin: 0 !important; }
+
+.footer { padding: 36px clamp(20px, 3vw, 44px) 56px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 0.9rem; }
+
+/* SVG map */
+.m-box rect { fill: oklch(0.19 0.022 248 / 0.92); stroke: var(--rule); stroke-width: 1.2; transition: stroke 400ms var(--ease-out), fill 400ms var(--ease-out), opacity 400ms; }
+.m-box .box-name { font: 600 15px var(--mono); fill: var(--muted); letter-spacing: 0.01em; }
+.m-box .box-note { font: 500 13px var(--mono); fill: var(--muted); }
+.m-plane { font: 800 13px var(--sans); fill: var(--line); letter-spacing: 0.14em; text-transform: uppercase; }
+.m-node rect { fill: var(--ink-3); stroke: var(--line); stroke-width: 1.3; transition: stroke 300ms var(--ease-out), fill 300ms var(--ease-out); }
+.m-node .n-label { font: 700 17px var(--sans); fill: var(--text); }
+.m-node .n-sub { font: 400 12.5px var(--mono); fill: var(--muted); font-variant-ligatures: none; }
+.m-node.caller rect { fill: transparent; stroke-dasharray: 3 4; }
+.m-node.lit rect { stroke: var(--signal); fill: oklch(0.29 0.05 70 / 0.55); stroke-width: 2; }
+.m-node.lit .n-sub { fill: var(--soft); }
+.m-node.paused rect { stroke-dasharray: 5 5; fill: transparent; }
+.m-node.paused .n-label, .m-node.paused .n-sub { opacity: 0.55; }
+.m-node.pulse rect { animation: pulse 1.4s var(--ease-out) 1; }
+@keyframes pulse { 0% { stroke-width: 6; stroke: var(--signal); } 100% { stroke-width: 2; } }
+.m-edge { fill: none; stroke: var(--line); stroke-width: 1.6; opacity: 0.75; transition: stroke 300ms, opacity 300ms; }
+.m-edge.pull { stroke-dasharray: 2 5; stroke-linecap: round; }
+.m-edge.infra { stroke-dasharray: 9 7; opacity: 0.5; }
+.m-edge.trail { stroke: var(--signal-deep); opacity: 0.8; }
+.m-edge.faulted { stroke: var(--fault); opacity: 0.95; }
+.m-hot { fill: none; stroke: var(--signal); stroke-width: 3.2; stroke-linecap: round; pointer-events: none; }
+.m-hot.fail { stroke: var(--fault); }
+.m-dot { fill: var(--signal); }
+.m-dot.fail { fill: var(--fault); }
+.m-dot-halo { fill: var(--signal); opacity: 0.22; }
+.m-dot-halo.fail { fill: var(--fault); }
+.m-fault circle { fill: var(--ink); stroke: var(--fault); stroke-width: 2; }
+.m-fault path { stroke: var(--fault); stroke-width: 2.6; stroke-linecap: round; }
+.m-badge rect { fill: var(--ink); stroke: var(--signal); stroke-width: 1.2; }
+.m-badge text { font: 500 12.5px var(--mono); fill: var(--signal); }
+.m-badge.bad rect { stroke: var(--fault); } .m-badge.bad text { fill: var(--fault); }
+.m-badge.good rect { stroke: var(--ok); } .m-badge.good text { fill: var(--ok); }
+.m-pair { transition: opacity 500ms var(--ease-out); }
+.m-pair.absent { opacity: 0.2; }
+.m-pair.absent .m-box rect { stroke-dasharray: 6 6; fill: transparent; }
+.m-pair.ghost { opacity: 0.42; }
+.m-pair.creating .m-box rect { stroke: var(--signal); stroke-dasharray: 10 8; animation: march 1.2s linear infinite; }
+@keyframes march { to { stroke-dashoffset: -36; } }
+.m-arrow { fill: var(--line); }
+.m-arrow-trail { fill: var(--signal-deep); }
+.m-arrow-fault { fill: var(--fault); }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition-duration: 1ms !important; animation: none !important; }
+}
+@media (max-width: 1080px) {
+  .split { grid-template-columns: 1fr; }
+  .stage { height: auto; max-height: none; top: 0; z-index: 5; border-right: 0; border-bottom: 1px solid var(--rule); grid-template-rows: auto auto; }
+  .map-wrap { height: min(52vh, 62vw); padding: 10px; }
+  .legend { display: none; }
+  .readout { padding: 10px 12px 12px; gap: 4px 12px; }
+  .controls button { width: 36px; height: 36px; }
+  .caption { font-size: 0.92rem; min-height: 2.6em; }
+  .narrative { padding-bottom: 20vh; }
+  .narrative .phase { margin-left: 0; padding-left: 26px; }
+}
+@media (max-width: 640px) {
+  .masthead { grid-template-columns: 1fr; }
+  .env { justify-items: start; }
+  .columns { grid-template-columns: 1fr; }
+  .readout { grid-template-columns: 1fr; }
+  .controls { grid-row: auto; order: 2; }
+  .caption { max-height: 7.6em; overflow-y: auto; }
+  td:first-child { width: 48%; }
+}
+</style>
+</head>
+<body data-env="azure">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12.5-7.5z" fill="currentColor"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M6.5 4.5h4v15h-4zM13.5 4.5h4v15h-4z" fill="currentColor"/></symbol>
+  <symbol id="i-prev" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-next" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-replay" viewBox="0 0 24 24"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3M4.5 4.5v3.9h3.9" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="11" height="11" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M15.5 8.5V6.7a2.2 2.2 0 0 0-2.2-2.2H6.7a2.2 2.2 0 0 0-2.2 2.2v6.6a2.2 2.2 0 0 0 2.2 2.2h1.8" fill="none" stroke="currentColor" stroke-width="1.8"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 11v6M12 7.2v.1" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>
+</svg>
+
+<header class="masthead">
+  <div>
+    <h1>How a request moves through <em>three planes</em></h1>
+    <p>Management accepts tenants, control owns their configuration, and data serves them. Nothing is pushed downstream: each child plane pulls from its parent’s database. Scroll the right-hand column and the map follows, or play any step on its own.</p>
+  </div>
+  <div class="env">
+    <span class="env-label" id="env-label">Show commands and behavior for</span>
+    <div class="segmented" role="group" aria-labelledby="env-label">
+      <button type="button" data-set-env="azure" aria-pressed="true">Azure</button>
+      <button type="button" data-set-env="local" aria-pressed="false">Docker Desktop</button>
+    </div>
+  </div>
+</header>
+
+<noscript><p style="padding:20px">This page animates the architecture with JavaScript. The same content is in <a href="../RUN_AZURE_SCENARIOS.md">the Azure guide</a> and <a href="../RUN_LOCAL_SCENARIOS.md">the local guide</a>.</p></noscript>
+
+<main class="split">
+  <div class="stage" aria-label="Architecture map">
+    <div class="map-wrap"><svg id="map" viewBox="0 0 1120 760" role="img" aria-labelledby="map-title map-desc"><title id="map-title">Three-plane architecture map</title><desc id="map-desc">Management cluster on top with its API, PostgreSQL and provisioner. Below it, a shared and an isolated control cluster, each with an API, PostgreSQL and a reconciler that polls management PostgreSQL. At the bottom, matching data clusters with an API, a ConfigMap, Redis and a reconciler that polls its control PostgreSQL.</desc></svg></div>
+    <div class="readout" aria-live="polite">
+      <div class="controls">
+        <button type="button" id="btn-prev" aria-label="Previous step"><svg><use href="#i-prev"/></svg></button>
+        <button type="button" id="btn-play" class="primary" aria-label="Play"><svg><use href="#i-play"/></svg></button>
+        <button type="button" id="btn-next" aria-label="Next step"><svg><use href="#i-next"/></svg></button>
+      </div>
+      <div class="readout-head"><strong id="flow-name">The map</strong><span class="readout-count" id="flow-count"></span></div>
+      <p class="caption" id="caption">Scroll the explanation or press play on any step.</p>
+    </div>
+    <div class="legend" aria-hidden="true">
+      <span><svg viewBox="0 0 30 10"><path d="M0 5h30" stroke="var(--line)" stroke-width="1.6"/></svg>API call or write</span>
+      <span><svg viewBox="0 0 30 10"><path d="M1 5h28" stroke="var(--line)" stroke-width="1.8" stroke-dasharray="2 5" stroke-linecap="round"/></svg>Reconciler poll or report</span>
+      <span><svg viewBox="0 0 30 10"><path d="M0 5h30" stroke="var(--line)" stroke-width="1.6" stroke-dasharray="9 7"/></svg>Creates clusters</span>
+      <span><svg viewBox="0 0 30 10"><circle cx="15" cy="5" r="5" fill="var(--signal)"/></svg>Moving request</span>
+      <span><svg viewBox="0 0 30 10"><path d="M0 5h30" stroke="var(--fault)" stroke-width="1.8"/></svg>Blocked or rejected</span>
+    </div>
+  </div>
+
+  <div class="narrative">
+
+    <section data-scene="intro" data-flow="none" class="phase" id="read-the-map">
+      <h2>Read the map top to bottom</h2>
+      <p>Each plane runs in its own Kubernetes cluster. <span data-env="azure">On Azure, bootstrap prepares three: management, shared control and shared data. An operator can add a named isolated control/data pair later with a separate bootstrap command; tenant requests never create infrastructure.</span><span data-env="local">On Docker Desktop, only management exists at first. The provisioner creates the shared pair for the first shared tenant and an isolated pair for the first isolated tenant, reaching five kind clusters.</span></p>
+      <p>Inside each cluster the columns mean the same thing:</p>
+      <div class="columns">
+        <div><b>Left: entry</b><span>An API that checks the plane’s own <code>X-Demo-Key</code>.</span></div>
+        <div><b>Middle: state</b><span>PostgreSQL in management and control; a ConfigMap and Redis in data.</span></div>
+        <div><b>Right: automation</b><span><span data-env="azure">Setup Jobs with Radius</span><span data-env="local">The provisioner with Radius</span> in management; a reconciler that polls every 5 s in control and data.</span></div>
+      </div>
+      <p>Dotted links always start at the child. A control reconciler reads management PostgreSQL and writes its report back; a data reconciler does the same against its control PostgreSQL. No API call travels from one plane to the next.</p>
+    </section>
+
+    <section data-scene="flow" data-flow="onboard" class="phase" id="flow-onboard">
+      <h2>Onboard a tenant</h2>
+      <p>One POST to management starts a chain of pulls. Management calls a tenant <strong>ready</strong> once control has created its record. It does not wait for data.</p>
+      <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play onboarding</button>
+      <p data-env="azure">Admission assigns an <em>available</em> prepared pair inside <code>management.accept_tenant</code>, so <code>provisioning_status</code> is <code>succeeded</code> straight away. With no unused pair of the requested kind, admission returns 503 <code>allocation_unavailable</code> and creates nothing.</p>
+      <p data-env="local">The provisioner takes one operation at a time. A second request while it works gets 503 <code>provisioner_busy</code>. The first shared tenant waits while management Radius creates the shared kind clusters.</p>
+    </section>
+
+    <section data-scene="flow" data-flow="config" class="phase" id="flow-config">
+      <h2>Change configuration</h2>
+      <p>After onboarding, control owns the message. A PUT to control creates the next desired version. The data reconciler picks it up on its next poll, rewrites the ConfigMap and reports <code>config_applied</code>.</p>
+      <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play a configuration change</button>
+      <p>Management supplied only the initial message. Later control polls call <code>control.ensure_tenant</code> again without replacing control’s newer versions.</p>
+    </section>
+
+    <section data-scene="flow" data-flow="request" class="phase" id="flow-request">
+      <h2>Serve a data request</h2>
+      <p>The data API answers from what is already in its cluster: the tenant’s ConfigMap and a Redis counter. It holds no parent database credentials, which is why it keeps serving when control or management is unreachable.</p>
+      <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play a counter request</button>
+      <p>The counter key includes the <code>onboarding_id</code>, so configuration updates keep the count. Its service account <code>data-api-runtime</code> can get ConfigMaps and nothing in Secrets.</p>
+    </section>
+
+    <section data-scene="flow" data-flow="none" class="phase" id="status-words">
+      <h2>Each status reports one thing</h2>
+      <p>Most confusion in a run comes from reading a status as broader than it is.</p>
+      <table>
+        <thead><tr><th scope="col">Where you read it</th><th scope="col">What it means, and only that</th></tr></thead>
+        <tbody>
+          <tr><td>Management <code>onboarding_status: ready</code></td><td>Control created the tenant record.</td></tr>
+          <tr><td>Management <code>provisioning_status: succeeded</code></td><td><span data-env="azure">The tenant was assigned prepared capacity. No infrastructure work was queued.</span><span data-env="local">The provisioning operation finished.</span></td></tr>
+          <tr data-env="azure"><td>Environment <code>stage: available</code></td><td>Operator setup completed for that pair.</td></tr>
+          <tr><td>Control <code>data_config.status: applied</code></td><td>Data applied the requested ConfigMap version.</td></tr>
+          <tr><td>Management <code>control_record.status: failed</code></td><td>Control could not write the record yet. The tenant stays <code>pending</code> and the next poll retries.</td></tr>
+          <tr><td>Control <code>data_config.status: failed</code></td><td>Data could not write the current version. It keeps serving the previous one.</td></tr>
+          <tr><td>Data returns message, version and counter</td><td>The request used the local ConfigMap and Redis.</td></tr>
+          <tr><td><code>/healthz</code> returns 200</td><td>The API process is alive. Not dependency readiness.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="scenarios">
+      <div class="phase" data-scene="inspect" data-flow="none">
+        <h2>Run the manual scenarios</h2>
+        <p>The scenarios A to G follow the guide sections of the same letter. Each one changes a single thing on the map and names the observation that proves it. Commands here are the key ones; the guide has every block and wait condition.</p>
+        <p class="guide-links"><span data-env="azure">Full walkthrough: <a href="../RUN_AZURE_SCENARIOS.md#3-run-the-manual-scenarios">RUN_AZURE_SCENARIOS.md</a>. Prepare the default environment first with <code>make bootstrap CONFIRM_AZURE=yes</code>.</span><span data-env="local">Full walkthrough: <a href="../RUN_LOCAL_SCENARIOS.md#3-run-the-manual-scenarios">RUN_LOCAL_SCENARIOS.md</a>. Deploy local management first.</span></p>
+        <h3>Start from a clean management plane</h3>
+<pre data-env="azure"><code>make report
+make kube ARGS='management get pods,pvc'
+make kube ARGS='management logs job/prepare-shared --tail=20'
+make api ARGS='management GET /healthz'</code></pre>
+<pre data-env="local"><code>make report
+make kube ARGS='management get pods,pvc'
+make kube ARGS='management logs deployment/provisioner --tail=20'
+make api ARGS='management GET /healthz'</code></pre>
+        <ul class="expect">
+          <li data-env="azure">Three prepared endpoints, no tenants, shared environment available, HTTP 200.</li>
+          <li data-env="local">Only management, no tenants, a bound <code>postgres-data</code> PVC, <code>provisioner_ready</code>, HTTP 200.</li>
+        </ul>
+        <div class="status-note"><svg><use href="#i-info"/></svg><p>Run blocks one at a time. Expected 401, 404, 409, 422 and 503 checks exit nonzero on purpose. Do not run the automated harness at the same time; it uses the same tenant names.</p></div>
+      </div>
+    </section>
+
+    <section id="scenario-a">
+      <div class="scenario-head"><span class="letter" aria-hidden="true">A</span><h2>Provision the first shared tenant</h2><p class="proves">Proves one request reaches a working data response.</p></div>
+      <div class="phase" data-scene="A" data-flow="onboard">
+        <h3>Accept <code>shared-a</code> <span class="when">management</span></h3>
+        <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play</button>
+<pre data-env="azure"><code>make api ARGS='management GET /tenants/shared-a'   <span class="c"># 404 first</span>
+curl -i -sS --fail-with-body "$MANAGEMENT_URL/tenants" \
+  -H "X-Demo-Key: $MANAGEMENT_KEY" \
+  -H 'Content-Type: application/json' \
+  --data '{"tenant_id":"shared-a","isolation":"shared","initial_message":"alpha"}'</code></pre>
+<pre data-env="local"><code>make api ARGS='management GET /tenants/shared-a'   <span class="c"># 404 first</span>
+printf '%s\n' '{"tenant_id":"shared-a","isolation":"shared","initial_message":"alpha"}' | \
+  make api ARGS='management POST /tenants' &gt; "$NOTES/shared-a-request.json"</code></pre>
+        <p><span data-env="azure">Set <code>MANAGEMENT_URL</code> and <code>MANAGEMENT_KEY</code> as the guide shows, without printing the Secret. The operation is already <code>succeeded</code> with stage <code>available</code>.</span><span data-env="local">Watch the provisioner log while management Radius creates the shared clusters and installs child Radius.</span></p>
+      </div>
+      <div class="phase" data-scene="A-done" data-flow="request-get">
+        <h3>Follow it to data <span class="when">control · data</span></h3>
+        <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play</button>
+<pre><code>make api ARGS='management GET /tenants/shared-a' | jq '{pair_id, provisioning_status, provisioning_stage, onboarding_status, control_record}'
+make api ARGS='control:shared GET /tenants/shared-a'
+make api ARGS='data:shared GET /tenants/shared-a'
+make kube ARGS='shared-data get configmap tenant-shared-a -o json' | jq .data</code></pre>
+        <ul class="expect">
+          <li><code>provisioning_status: succeeded</code> and <code>onboarding_status: ready</code>.</li>
+          <li>Control reports <code>applied</code>; data returns <code>alpha</code>, version 1, counter 0.</li>
+          <li>The same <code>onboarding_id</code> from all three APIs.</li>
+        </ul>
+        <p>Stop on <code>failed</code> or <code>interrupted</code>. Never reset database status values to force a retry. Record <code>pair_id</code> and the two <code>kube-system</code> namespace UIDs for scenario B.</p>
+      </div>
+    </section>
+
+    <section id="scenario-b">
+      <div class="scenario-head"><span class="letter" aria-hidden="true">B</span><h2>Reuse the pair while data reconciliation is paused</h2><p class="proves">Proves management readiness does not wait for data, and shared tenants share clusters.</p></div>
+      <div class="phase" data-scene="B-paused" data-flow="onboard-paused">
+        <h3>Pause data, accept <code>shared-b</code> <span class="when">data reconciler at 0</span></h3>
+        <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play</button>
+<pre><code>make kube ARGS='shared-data scale deployment/data-reconciler --current-replicas=1 --replicas=0'
+printf '%s\n' '{"tenant_id":"shared-b","isolation":"shared","initial_message":"bravo"}' | \
+  make api ARGS='management POST /tenants'
+make api ARGS='control:shared GET /tenants/shared-b'
+make api ARGS='data:shared GET /tenants/shared-b'</code></pre>
+        <ul class="expect">
+          <li>Wait until no data reconciler Pods remain before the POST.</li>
+          <li>Management reaches <code>ready</code>; control has <code>bravo</code> with data <code>pending</code>; data returns 404.</li>
+        </ul>
+      </div>
+      <div class="phase" data-scene="B-restored" data-flow="data-pull">
+        <h3>Restore it, then compare placement <span class="when">always restore</span></h3>
+        <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play</button>
+<pre><code>make kube ARGS='shared-data scale deployment/data-reconciler --current-replicas=0 --replicas=1'
+make kube ARGS='shared-data rollout status deployment/data-reconciler --timeout=60s'
+make api ARGS='management GET /tenants/shared-b' | jq '{tenant_id, pair_id}'
+make report | jq '.endpoints | keys'</code></pre>
+        <ul class="expect">
+          <li>Control shows <code>applied</code> and data returns <code>bravo</code>.</li>
+          <li>Same <code>pair_id</code> as <code>shared-a</code>, unchanged cluster UIDs, still three slots.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="scenario-c">
+      <div class="scenario-head"><span class="letter" aria-hidden="true">C</span><h2>Provision an isolated tenant</h2><p class="proves">Proves an isolated tenant gets its own pair, and pairs never serve each other’s records.</p></div>
+      <div class="phase" data-scene="C-prepare" data-flow="prepare-isolated" data-env="azure">
+        <h3>Prepare <code>isolated-1</code> first <span class="when">operator, optional</span></h3>
+        <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play</button>
+<pre><code>make bootstrap CONFIRM_AZURE=yes ARGS='--isolated 1'
+make kube ARGS='management logs job/prepare-isolated-1 --tail=40'
+make report</code></pre>
+        <ul class="expect">
+          <li><code>isolated-1.stage: available</code>. Only that pair’s foundation, clusters and dependencies are created; management and shared apps are not redeployed.</li>
+        </ul>
+        <p>Isolated capacity is billable. Skip C and the isolated blocks in later sections for a shared-only demo.</p>
+      </div>
+      <div class="phase" data-scene="C-onboard" data-flow="onboard-isolated">
+        <h3>Accept <code>isolated-c</code> <span class="when">management</span></h3>
+        <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play</button>
+<pre><code>printf '%s\n' '{"tenant_id":"isolated-c","isolation":"isolated","initial_message":"charlie"}' | \
+  make api ARGS='management POST /tenants'
+make api ARGS='control:isolated-1 GET /tenants/isolated-c'
+make api ARGS='data:isolated-1 GET /tenants/isolated-c'</code></pre>
+        <ul class="expect">
+          <li>Five slots with five distinct <code>kube-system</code> UIDs.</li>
+          <li>Data returns <code>charlie</code>, version 1, from its own PostgreSQL and Redis.</li>
+        </ul>
+      </div>
+      <div class="phase" data-scene="C-cross" data-flow="cross-check">
+        <h3>Ask the wrong pair <span class="when">expect 404 ×4</span></h3>
+        <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play</button>
+<pre><code>make api ARGS='control:shared GET /tenants/isolated-c'
+make api ARGS='data:shared GET /tenants/isolated-c'
+make api ARGS='control:isolated-1 GET /tenants/shared-a'
+make api ARGS='data:isolated-1 GET /tenants/shared-a'</code></pre>
+        <p>These use valid plane keys. They demonstrate placement, not production tenant authentication.</p>
+      </div>
+    </section>
+
+    <section id="scenario-d">
+      <div class="scenario-head"><span class="letter" aria-hidden="true">D</span><h2>Update configuration and compare counters</h2><p class="proves">Proves control changes reach data without resetting counters.</p></div>
+      <div class="phase" data-scene="D" data-flow="request-post">
+        <h3>Increment one tenant <span class="when">data</span></h3>
+        <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play</button>
+<pre><code>make api ARGS='data:shared GET /tenants/shared-b'
+make api ARGS='data:shared POST /tenants/shared-a/counter'
+make api ARGS='data:shared POST /tenants/shared-a/counter'
+make api ARGS='data:shared GET /tenants/shared-b'</code></pre>
+        <ul class="expect">
+          <li>Each POST adds one to <code>shared-a</code> only. GET never increments. Use observed values, not assumed zeros.</li>
+        </ul>
+      </div>
+      <div class="phase" data-scene="D" data-flow="config">
+        <h3>Change the message through control <span class="when">control → data</span></h3>
+        <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play</button>
+<pre><code>printf '%s\n' '{"message":"alpha-v2"}' | \
+  make api ARGS='control:shared PUT /tenants/shared-a/configuration'
+printf '%s\n' '{"message":"bravo-v2"}' | \
+  make api ARGS='control:shared PUT /tenants/shared-b/configuration'
+make api ARGS='control:shared GET /tenants/shared-a'
+make api ARGS='data:shared GET /tenants/shared-a'</code></pre>
+        <ul class="expect">
+          <li>Each PUT creates the next version; control reports <code>applied</code> and data shows the new message and version.</li>
+          <li>Counters survive. If you ran C, <code>isolated-c</code>’s counter did not move either.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="scenario-e">
+      <div class="scenario-head"><span class="letter" aria-hidden="true">E</span><h2>Observe polling, history and access</h2><p class="proves">Proves repeated polls keep control’s changes, and every API rejects bad input the same way.</p></div>
+      <div class="phase" data-scene="E" data-flow="control-poll">
+        <h3>Let control poll again <span class="when">≈15 s</span></h3>
+        <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play</button>
+<pre><code>POLL_FROM=$(uv run --no-sync python -c \
+  'from datetime import UTC, datetime; print(datetime.now(UTC).isoformat())')
+sleep 15
+make kube ARGS="shared-control logs deployment/control-reconciler '--since-time=$POLL_FROM' --timestamps=true --tail=20"</code></pre>
+        <ul class="expect">
+          <li>A <code>control_poll</code> after <code>$POLL_FROM</code> with <code>succeeded</code> above zero and <code>failed=0</code>.</li>
+          <li>Management, control and data responses unchanged from before the wait. No successful poll means no proof yet.</li>
+        </ul>
+      </div>
+      <div class="phase" data-scene="E" data-flow="timeline">
+        <h3>Page through the timeline <span class="when">control</span></h3>
+        <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play</button>
+<pre><code>make api ARGS="control:shared GET '/tenants/shared-a?limit=2'" | jq '{timeline, next_after_event_id}'
+make api ARGS="control:shared GET '/tenants/shared-a?limit=2&amp;after_event_id=&lt;event-id&gt;'"</code></pre>
+        <p>Follow each cursor until it is <code>null</code>. Event IDs increase but need not be consecutive.</p>
+      </div>
+      <div class="phase" data-scene="E" data-flow="reject">
+        <h3>Send bad requests <span class="when">401 · 401 · 422 · 409</span></h3>
+        <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play</button>
+<pre><code>curl -q -sS -o /dev/null -w 'HTTP %{http_code}\n' "$(make endpoints ARGS=management | jq -er '.url')/tenants/shared-a"
+curl -q -sS -o /dev/null -w 'HTTP %{http_code}\n' \
+  -H 'X-Demo-Key: wrong' "$(make endpoints ARGS=management | jq -er '.url')/tenants/shared-a"
+printf '%s\n' '{"tenant_id":"Bad ID","isolation":"shared","initial_message":"invalid"}' | \
+  make api ARGS='management POST /tenants'
+printf '%s\n' '{"tenant_id":"shared-a","isolation":"shared","initial_message":"must not replace alpha"}' | \
+  make api ARGS='management POST /tenants'</code></pre>
+        <ul class="expect">
+          <li>The duplicate does not reset control’s configuration or the counter. Repeat the curl checks against <code>make endpoints ARGS=all</code>.</li>
+        </ul>
+      </div>
+      <div class="phase" data-scene="E-access" data-flow="access">
+        <h3>Check the data API’s permissions <span class="when">yes · no · no</span></h3>
+        <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play</button>
+<pre><code>DATA_NS=$(make kube ARGS='shared-data get deployment data-api -o json' | jq -er '.metadata.namespace')
+API_ID="system:serviceaccount:$DATA_NS:data-api-runtime"
+make kube ARGS="shared-data auth can-i get configmaps '--as=$API_ID'"
+make kube ARGS="shared-data auth can-i get secret/data-reconciler-runtime '--as=$API_ID'"
+make kube ARGS="shared-data auth can-i list secrets '--as=$API_ID'"</code></pre>
+        <p>A denial exits nonzero. An impersonation error from your operator account is not a successful denial.</p>
+      </div>
+    </section>
+
+    <section id="scenario-f">
+      <div class="scenario-head"><span class="letter" aria-hidden="true">F</span><h2>Block the management database link</h2><p class="proves">Proves a control/data pair keeps working while management PostgreSQL is unreachable.</p></div>
+      <div class="phase" data-scene="F-block" data-flow="fault-management">
+        <h3>Cut control’s link to management <span class="when">second terminal</span></h3>
+        <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play</button>
+<pre data-env="azure"><code>make fault CONFIRM_AZURE=yes \
+  ARGS='--slot shared-control --component control-reconciler --duration 300'</code></pre>
+<pre data-env="local"><code>make fault CONFIRM_LOCAL=yes \
+  ARGS='--slot shared-control --component control-reconciler --duration 300'</code></pre>
+        <p><span data-env="azure">The helper applies a Cilium policy to the private database connection.</span><span data-env="local">kind’s default CNI does not enforce NetworkPolicy, so the helper blocks inside the reconciler Pod’s network namespace.</span> It does not stop any API. In the main terminal, wait for <code>blocked_verified</code>, then keep working for at least 60 s:</p>
+<pre><code>FAULT_SLOT=shared-control
+FAULT_COMPONENT=control-reconciler
+make fault-status ARGS="'$FAULT_SLOT' '$FAULT_COMPONENT'" | jq '{slot, component, outcome, blocked_at, restored}'
+printf '%s\n' '{"message":"without-management"}' | \
+  make api ARGS='control:shared PUT /tenants/shared-a/configuration'
+make api ARGS='data:shared GET /tenants/shared-a'
+make api ARGS='data:shared POST /tenants/shared-a/counter'</code></pre>
+        <ul class="expect">
+          <li><code>without-management</code> reaches data through control’s own database; the counter still increments.</li>
+          <li>Management’s response for <code>shared-a</code> does not change during the block.</li>
+        </ul>
+      </div>
+      <div class="phase" data-scene="F-restore" data-flow="control-poll">
+        <h3>After the timer restores it <span class="when">journal</span></h3>
+        <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play</button>
+<pre><code>make fault-status ARGS="'$FAULT_SLOT' '$FAULT_COMPONENT'" | jq '{outcome, restored, physical_restored, restoration_started_at, restored_at}'</code></pre>
+        <ul class="expect">
+          <li><code>verified_and_restored</code>, both restoration flags true, and a successful control poll after restoration.</li>
+          <li>No duplicate <code>control_record_created</code> event.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="scenario-g">
+      <div class="scenario-head"><span class="letter" aria-hidden="true">G</span><h2>Block control, queue updates, restart data</h2><p class="proves">Proves data serves its applied configuration through an outage and a restart, then jumps to the newest version.</p></div>
+      <div class="phase" data-scene="G-block" data-flow="fault-control">
+        <h3>Cut data’s link to control, queue two versions <span class="when">second terminal</span></h3>
+        <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play</button>
+<pre data-env="azure"><code>make fault CONFIRM_AZURE=yes \
+  ARGS='--slot shared-data --component data-reconciler --duration 300'</code></pre>
+<pre data-env="local"><code>make fault CONFIRM_LOCAL=yes \
+  ARGS='--slot shared-data --component data-reconciler --duration 300'</code></pre>
+<pre><code>FAULT_SLOT=shared-data
+FAULT_COMPONENT=data-reconciler
+printf '%s\n' '{"message":"queued-first"}' | \
+  make api ARGS='control:shared PUT /tenants/shared-a/configuration'
+printf '%s\n' '{"message":"queued-latest"}' | \
+  make api ARGS='control:shared PUT /tenants/shared-a/configuration'
+make api ARGS='data:shared GET /tenants/shared-a'
+make api ARGS='data:shared POST /tenants/shared-a/counter'</code></pre>
+        <ul class="expect">
+          <li>Start only after F is restored, and wait for <code>blocked_verified</code>.</li>
+          <li>Control shows the latest version <code>pending</code>. Data keeps the pre-outage message and version; its counter still works.</li>
+        </ul>
+      </div>
+      <div class="phase" data-scene="G-restart" data-flow="restart-data-api">
+        <h3>Replace the data API mid-outage <span class="when">new Pod UID</span></h3>
+        <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play</button>
+<pre><code>make kube ARGS='shared-data rollout restart deployment/data-api'
+make kube ARGS='shared-data rollout status deployment/data-api --timeout=30s'
+make api ARGS='data:shared GET /tenants/shared-a'</code></pre>
+        <ul class="expect">
+          <li>A new Pod UID still returns the old applied message and version with the current counter.</li>
+        </ul>
+        <ul class="expect no">
+          <li>Do not replace the data reconciler during the fault; the helper checks its Pod identity.</li>
+        </ul>
+      </div>
+      <div class="phase" data-scene="G-restore" data-flow="catch-up">
+        <h3>Reconnect and catch up <span class="when">journal</span></h3>
+        <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play</button>
+<pre><code>make fault-status ARGS="'$FAULT_SLOT' '$FAULT_COMPONENT'" | jq '{outcome, restored, physical_restored}'
+make api ARGS='control:shared GET /tenants/shared-a'
+make kube ARGS='shared-data get configmap tenant-shared-a -o json' | jq .data</code></pre>
+        <ul class="expect">
+          <li>Data shows <code>queued-latest</code>; control reports <code>applied</code>.</li>
+          <li>Both versions have <code>configuration_updated</code> events; <code>queued-first</code> never gets <code>config_applied</code>.</li>
+        </ul>
+        <p>If a fault process stops without confirmed restoration, restore that exact fault with <code>--restore</code> as the guide’s <em>Interrupted fault</em> step shows. Never <code>kill -9</code>, replace the faulted reconciler or delete its cluster.</p>
+      </div>
+    </section>
+
+    <section id="scenario-h">
+      <div class="scenario-head"><span class="letter" aria-hidden="true">H</span><h2>Check what a plane key can reach</h2><p class="proves">Proves keys are per plane instance, not per tenant.</p></div>
+      <div class="phase" data-scene="H-keys" data-flow="keys">
+        <h3>One key, two tenants <span class="when">data · control</span></h3>
+        <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play</button>
+<pre><code>DATA_URL=$(make endpoints ARGS=shared-data | jq -er '.url') || exit 1
+DATA_KEY=$(make kube ARGS='shared-data get secret data-api-runtime -o json' | \
+  jq -er '.data.DEMO_KEY | @base64d') || exit 1
+curl -q -sS --fail-with-body -X POST -H "X-Demo-Key: $DATA_KEY" \
+  "$DATA_URL/tenants/shared-b/counter" | jq '{tenant_id, counter}'</code></pre>
+        <ul class="expect">
+          <li>The shared control and data keys each return 200 for both <code>shared-a</code> and <code>shared-b</code>; the POST increments <code>shared-b</code>.</li>
+          <li>A data key on control, a control key on data, and a data key on management each return 401. <span data-env="azure">If you ran C, the</span><span data-env="local">The</span> shared key also gets 401 from isolated-1.</li>
+        </ul>
+        <p>Shared and isolated placement separate infrastructure and data. Authorization is per plane instance, so this demo does not provide hostile-tenant isolation.</p>
+      </div>
+    </section>
+
+    <section id="scenario-i">
+      <div class="scenario-head"><span class="letter" aria-hidden="true">I</span><h2>Observe a noisy neighbor</h2><p class="proves">Records what one busy tenant does to another on the same pair.</p></div>
+      <div class="phase" data-scene="I-noise" data-flow="noise">
+        <h3>Load <code>shared-b</code>, watch <code>shared-a</code> <span class="when">4 workers · 60 s</span></h3>
+        <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play</button>
+<pre><code>for worker in 1 2 3 4; do
+  (end=$((SECONDS + 60))
+   while (( SECONDS &lt; end )); do
+     curl -q -sS -o /dev/null -w '%{http_code}\n' -X POST \
+       -H "X-Demo-Key: $DATA_KEY" "$DATA_URL/tenants/shared-b/counter"
+   done &gt; "$NOISE/worker-$worker.txt") &amp;
+done</code></pre>
+        <ul class="expect">
+          <li>Zero <code>shared-a</code> errors, and a PUT made under load applied within a few polls.</li>
+          <li><code>shared-a</code>’s counter is unchanged; <code>shared-b</code>’s rose by exactly the number of 200 responses.</li>
+        </ul>
+        <p>This records latency and errors rather than asserting a threshold. There are no rate limits or per-tenant quotas<span data-env="azure">, and every request is billable gateway traffic</span>. The guide has the baseline probe and the timed PUT.</p>
+      </div>
+    </section>
+
+    <section id="scenario-j">
+      <div class="scenario-head"><span class="letter" aria-hidden="true">J</span><h2>Stop Redis and recover</h2><p class="proves">Proves a Redis outage stops counters for the whole pair, and counters survive recovery.</p></div>
+      <p class="guide-links" data-env="azure">Local only: the fault helper can’t block Azure’s managed Redis yet, but the Azure behavior is the same. See <a href="../RUN_LOCAL_SCENARIOS.md#j-stop-redis-and-recover">the local guide</a>.</p>
+      <div class="phase" data-scene="J-down" data-flow="redis-down">
+        <h3>Scale the shared Redis to 0 <span class="when">shared-data</span></h3>
+        <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play</button>
+<pre data-env="local"><code>make kube ARGS='shared-data scale statefulset/redis --current-replicas=1 --replicas=0'
+make api ARGS='data:shared GET /tenants/shared-a'
+make api ARGS='data:shared POST /tenants/shared-b/counter'
+make api ARGS='data:isolated-1 GET /tenants/isolated-c'</code></pre>
+        <ul class="expect">
+          <li>503 <code>local_counter_unavailable</code> for both shared tenants, GET included. The ConfigMap is still readable.</li>
+          <li>The isolated tenant keeps returning 200 from its own Redis.</li>
+        </ul>
+      </div>
+      <div class="phase" data-scene="J-restored" data-flow="redis-back">
+        <h3>Restore it and compare <span class="when">always restore</span></h3>
+        <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play</button>
+<pre data-env="local"><code>make kube ARGS='shared-data scale statefulset/redis --current-replicas=0 --replicas=1'
+make kube ARGS='shared-data rollout status statefulset/redis --timeout=180s'</code></pre>
+        <ul class="expect">
+          <li>Responses match the ones saved before the outage. This is a clean shutdown, not forced-crash durability.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="scenario-k">
+      <div class="scenario-head"><span class="letter" aria-hidden="true">K</span><h2>Fail and retry a control record</h2><p class="proves">Proves a failed control record is reported, then retried without anyone resubmitting.</p></div>
+      <p class="guide-links" data-env="azure">Local only: this demo doesn’t stop Azure PostgreSQL. See <a href="../RUN_LOCAL_SCENARIOS.md#k-fail-and-retry-a-control-record">the local guide</a>.</p>
+      <div class="phase" data-scene="K-down" data-flow="record-fail">
+        <h3>Onboard while control PostgreSQL is down <span class="when">shared-control</span></h3>
+        <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play</button>
+<pre data-env="local"><code>make kube ARGS='shared-control scale statefulset/postgres --current-replicas=1 --replicas=0'
+printf '%s\n' '{"tenant_id":"shared-k","isolation":"shared","initial_message":"kilo"}' | \
+  make api ARGS='management POST /tenants'
+make api ARGS='management GET /tenants/shared-k' | jq '{provisioning_status, onboarding_status, control_record}'</code></pre>
+        <ul class="expect">
+          <li><code>onboarding_status: pending</code> with <code>control_record.status: failed</code>. Management never reports a failed tenant.</li>
+          <li>Control returns 503 <code>database_unavailable</code>; data keeps serving <code>shared-a</code>.</li>
+        </ul>
+      </div>
+      <div class="phase" data-scene="K-restored" data-flow="record-retry">
+        <h3>Restore it and watch the retry <span class="when">always restore</span></h3>
+        <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play</button>
+<pre data-env="local"><code>make kube ARGS='shared-control scale statefulset/postgres --current-replicas=0 --replicas=1'
+make kube ARGS='shared-control rollout status statefulset/postgres --timeout=180s'
+make api ARGS='management GET /tenants/shared-k' | jq '{onboarding_status, control_record}'</code></pre>
+        <ul class="expect">
+          <li><code>ready</code>, with one <code>control_record_failed</code> event then one <code>control_record_created</code>; data returns <code>kilo</code>, version 1.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="scenario-l">
+      <div class="scenario-head"><span class="letter" aria-hidden="true">L</span><h2>Block a ConfigMap update</h2><p class="proves">Proves data keeps its applied configuration when it can’t write a new one, and control reports the failure.</p></div>
+      <div class="phase" data-scene="L-block" data-flow="write-block">
+        <h3>Make one ConfigMap immutable, then PUT <span class="when">shared-data</span></h3>
+        <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play</button>
+<pre><code>make kube ARGS="shared-data patch configmap tenant-shared-a --type=merge '--patch={\"immutable\":true}'"
+printf '%s\n' '{"message":"blocked-write"}' | \
+  make api ARGS='control:shared PUT /tenants/shared-a/configuration'
+make api ARGS='control:shared GET /tenants/shared-a' | jq '.data_config'</code></pre>
+        <ul class="expect">
+          <li>Control shows <code>failed</code> with <code>config_apply_failed</code> and <code>config_write_failed</code>.</li>
+          <li>Data keeps the previous message and version; its counter still works. <code>shared-b</code> stays <code>applied</code>.</li>
+        </ul>
+      </div>
+      <div class="phase" data-scene="L-restored" data-flow="write-restore">
+        <h3>Delete only that ConfigMap <span class="when">restore</span></h3>
+        <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play</button>
+<pre><code>make kube ARGS='shared-data delete configmap tenant-shared-a'
+make api ARGS='control:shared GET /tenants/shared-a' | jq '.data_config'</code></pre>
+        <ul class="expect">
+          <li>After at most one poll with 404, data serves <code>blocked-write</code>, control reports <code>applied</code>, and the counter is unchanged.</li>
+        </ul>
+        <p>An immutable ConfigMap can’t be made mutable again, so deletion is the only restore. Target only <code>tenant-shared-a</code>.</p>
+      </div>
+    </section>
+
+    <section id="scenario-m">
+      <div class="scenario-head"><span class="letter" aria-hidden="true">M</span><h2>Interrupt the provisioner</h2><p class="proves">Proves an interrupted operation is recorded and never replayed.</p></div>
+      <p class="guide-links" data-env="azure">Local only: on Azure, tenant admission queues no infrastructure work; setup Jobs follow <a href="../RUN_AZURE_SCENARIOS.md#after-a-failed-bootstrap">After a failed bootstrap</a>.</p>
+      <div class="phase" data-scene="M-interrupt" data-flow="interrupt">
+        <h3>Restart it mid-operation <span class="when">management</span></h3>
+        <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play</button>
+<pre data-env="local"><code>printf '%s\n' '{"tenant_id":"shared-m","isolation":"shared","initial_message":"mike"}' | \
+  make api ARGS='management POST /tenants' &gt; "$NOTES/shared-m-request.json"
+OP_M=$(jq -er '.operation_id' "$NOTES/shared-m-request.json") || exit 1
+make api ARGS="management GET '/operations/$OP_M'" | jq '{status, stage}'
+make kube ARGS='management rollout restart deployment/provisioner'</code></pre>
+        <ul class="expect">
+          <li><code>interrupted</code> with <code>provisioner_restarted</code>, the stage reached and a <code>provisioning_interrupted</code> event.</li>
+          <li>A repeated POST returns 409. If it already <code>succeeded</code>, the interruption wasn’t exercised; repeat with a new name.</li>
+        </ul>
+        <p>Run this after the other scenarios. The tenant can’t be retried or deleted; recovery is whole-demo cleanup.</p>
+      </div>
+    </section>
+
+    <section id="scenario-persistence" data-env="local">
+      <div class="scenario-head"><span class="letter" aria-hidden="true">+</span><h2>Check datastore persistence</h2><p class="proves">Proves stored data outlives datastore Pods. Local only.</p></div>
+      <div class="phase" data-scene="H" data-flow="persistence">
+        <h3>Replace one datastore at a time <span class="when">same PVC</span></h3>
+        <button type="button" class="play" data-play><svg><use href="#i-play"/></svg>Play</button>
+<pre><code>make kube ARGS='shared-control rollout restart statefulset/postgres'
+make kube ARGS='shared-control rollout status statefulset/postgres --timeout=180s'
+make kube ARGS='shared-data rollout restart statefulset/redis'
+make kube ARGS='shared-data rollout status statefulset/redis --timeout=180s'</code></pre>
+        <ul class="expect">
+          <li>New Pod UIDs, unchanged PVC UIDs and volume names, identical API responses before and after.</li>
+        </ul>
+        <p>Repeat for management PostgreSQL and the isolated pair. This is Pod replacement, not backup, forced-crash durability or HA. Never delete PVCs.</p>
+      </div>
+    </section>
+
+    <section id="clean-up">
+      <div class="phase" data-scene="cleanup" data-flow="none">
+        <h2>Clean up</h2>
+        <p>Restore every fault and paused workload first. Then follow the guide’s cleanup step exactly; it verifies owners before deleting anything.</p>
+        <p><span data-env="azure"><a href="../RUN_AZURE_SCENARIOS.md#4-clean-up-azure">Azure cleanup</a> can remove only an unused isolated environment or the whole demo. Azure resources are billable until removed.</span><span data-env="local"><a href="../RUN_LOCAL_SCENARIOS.md#5-clean-up-local">Local cleanup</a> destroys the demo’s PostgreSQL, Redis and volume data: review <code>make clean-plan</code> before <code>make clean CONFIRM_LOCAL=yes</code>, then require <code>make verify-clean</code> to report <code>status: clean</code>.</span></p>
+        <div class="status-note"><svg><use href="#i-info"/></svg><p>A fresh live end-to-end run of the current implementation is still outstanding. This page shows the designed behavior and the checkpoints to verify, not a recorded result.</p></div>
+      </div>
+    </section>
+  </div>
+</main>
+
+<footer class="footer">Radius three-plane demo. Guides: <a href="../RUN_AZURE_SCENARIOS.md">Azure</a> · <a href="../RUN_LOCAL_SCENARIOS.md">Docker Desktop</a> · <a href="../README.md">README</a>.</footer>
+
+<script>
+(() => {
+  "use strict";
+  const NS = "http://www.w3.org/2000/svg";
+  const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)");
+  const svg = document.getElementById("map");
+  let env = "azure";
+
+  const PAIRS = { s: { x: 176, name: "shared" }, i: { x: 656, name: "isolated-1" } };
+  const N = {
+    "op-m": { x: 12, y: 100, w: 130, h: 64, label: "Operator", sub: "tenant request", caller: true },
+    "op-c": { x: 12, y: 340, w: 130, h: 64, label: "Operator", sub: "configuration", caller: true },
+    "app": { x: 12, y: 596, w: 130, h: 64, label: "Client", sub: "application", caller: true },
+    "m-api": { x: 200, y: 100, w: 150, h: 64, label: "API", sub: "POST /tenants" },
+    "m-pg": { x: 560, y: 100, w: 170, h: 64, label: "PostgreSQL", sub: "management schema" },
+    "m-prov": { x: 908, y: 100, w: 176, h: 64, label: () => (env === "azure" ? "Setup Jobs" : "Provisioner"), sub: "+ management Radius" },
+  };
+  const BOXES = { m: { x: 176, y: 24, w: 932, h: 180, name: "management" } };
+  for (const [p, { x: bx, name }] of Object.entries(PAIRS)) {
+    BOXES[p + "c"] = { x: bx, y: 262, w: 452, h: 182, name: name + "-control", pair: p };
+    BOXES[p + "d"] = { x: bx, y: 500, w: 452, h: 244, name: name + "-data", pair: p };
+    Object.assign(N, {
+      [p + "c-api"]: { x: bx + 18, y: 340, w: 120, h: 64, label: "API", sub: "GET · PUT", pair: p },
+      [p + "c-pg"]: { x: bx + 166, y: 340, w: 120, h: 64, label: "PostgreSQL", sub: "control schema", pair: p },
+      [p + "c-rec"]: { x: bx + 314, y: 340, w: 120, h: 64, label: "Reconciler", sub: "polls · 5 s", pair: p },
+      [p + "d-api"]: { x: bx + 18, y: 596, w: 120, h: 64, label: "API", sub: "GET · POST", pair: p },
+      [p + "d-cm"]: { x: bx + 166, y: 548, w: 120, h: 56, label: "ConfigMap", sub: "tenant-<id>", pair: p },
+      [p + "d-redis"]: { x: bx + 166, y: 652, w: 120, h: 56, label: "Redis", sub: "counter", pair: p },
+      [p + "d-rec"]: { x: bx + 314, y: 596, w: 120, h: 64, label: "Reconciler", sub: "polls · 5 s", pair: p },
+    });
+  }
+  const L = (n) => [N[n].x, N[n].y + N[n].h / 2];
+  const R = (n) => [N[n].x + N[n].w, N[n].y + N[n].h / 2];
+  const T = (n) => [N[n].x + N[n].w / 2, N[n].y];
+  const B = (n) => [N[n].x + N[n].w / 2, N[n].y + N[n].h];
+  const line = (a, b) => `M${a[0]},${a[1]} L${b[0]},${b[1]}`;
+
+  const E = {
+    "opm": { d: line(R("op-m"), L("m-api")), kind: "call", from: "op-m", to: "m-api" },
+    "mapi-mpg": { d: line(R("m-api"), L("m-pg")), kind: "call", from: "m-api", to: "m-pg" },
+    "prov-mpg": { d: line(L("m-prov"), R("m-pg")), kind: "call", from: "m-prov", to: "m-pg" },
+  };
+  for (const [p, { x: bx }] of Object.entries(PAIRS)) {
+    const recX = bx + 374, pgX = bx + 226, mEnd = p === "s" ? 622 : 668;
+    const apiMid = bx + 78;
+    Object.assign(E, {
+      ["prov-" + p]: { d: `M996,164 C996,232 ${pgX},196 ${pgX},262`, kind: "infra", from: "m-prov", to: null, pair: p },
+      ["opc-" + p]: { d: p === "s" ? line(R("op-c"), L("sc-api")) : `M142,372 H158 V236 H${apiMid} V340`, kind: "call", from: "op-c", to: p + "c-api", pair: p },
+      ["capi-cpg-" + p]: { d: line(R(p + "c-api"), L(p + "c-pg")), kind: "call", from: p + "c-api", to: p + "c-pg", pair: p },
+      ["crec-cpg-" + p]: { d: line(L(p + "c-rec"), R(p + "c-pg")), kind: "call", from: p + "c-rec", to: p + "c-pg", pair: p },
+      ["crec-mpg-" + p]: { d: `M${recX},340 C${recX},270 ${mEnd},236 ${mEnd},164`, kind: "pull", from: p + "c-rec", to: "m-pg", pair: p },
+      ["drec-cpg-" + p]: { d: `M${recX},596 C${recX},528 ${pgX},472 ${pgX},404`, kind: "pull", from: p + "d-rec", to: p + "c-pg", pair: p },
+      ["drec-cm-" + p]: { d: `M${bx + 314},628 C${bx + 300},628 ${bx + 300},576 ${bx + 286},576`, kind: "call", from: p + "d-rec", to: p + "d-cm", pair: p },
+      ["dapi-cm-" + p]: { d: `M${bx + 138},620 C${bx + 152},620 ${bx + 152},576 ${bx + 166},576`, kind: "call", from: p + "d-api", to: p + "d-cm", pair: p },
+      ["dapi-redis-" + p]: { d: `M${bx + 138},636 C${bx + 152},636 ${bx + 152},680 ${bx + 166},680`, kind: "call", from: p + "d-api", to: p + "d-redis", pair: p },
+      ["app-" + p]: { d: p === "s" ? line(R("app"), L("sd-api")) : `M142,628 H164 V472 H${apiMid} V596`, kind: "call", from: "app", to: p + "d-api", pair: p },
+    });
+  }
+
+  const el = (tag, attrs = {}, parent) => {
+    const node = document.createElementNS(NS, tag);
+    for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+    if (parent) parent.appendChild(node);
+    return node;
+  };
+
+  // Build the static drawing once
+  const defs = el("defs", {}, svg);
+  for (const [id, cls] of [["arrow", "m-arrow"], ["arrow-trail", "m-arrow-trail"], ["arrow-fault", "m-arrow-fault"]]) {
+    const m = el("marker", { id, viewBox: "0 0 10 10", refX: "9", refY: "5", markerWidth: "7", markerHeight: "7", orient: "auto-start-reverse" }, defs);
+    el("path", { d: "M0,1 L9,5 L0,9 z", class: cls }, m);
+  }
+  const planeLabels = [["Management", 88], ["Control", 328], ["Data", 584]];
+  for (const [t, y] of planeLabels) el("text", { x: 12, y, class: "m-plane" }, svg).textContent = t;
+
+  const groups = { m: el("g", {}, svg), s: el("g", { class: "m-pair" }, svg), i: el("g", { class: "m-pair" }, svg) };
+  const layers = {};
+  for (const g of ["m", "s", "i"]) {
+    layers[g] = { box: el("g", {}, groups[g]), edge: el("g", {}, groups[g]), node: el("g", {}, groups[g]) };
+  }
+  const boxNotes = {};
+  for (const [id, b] of Object.entries(BOXES)) {
+    const g = el("g", { class: "m-box" }, layers[b.pair || "m"].box);
+    el("rect", { x: b.x, y: b.y, width: b.w, height: b.h, rx: 14 }, g);
+    const control = b.pair && id.endsWith("c");
+    const nameY = b.pair ? b.y + b.h - 16 : b.y + 26;
+    el("text", { x: control ? b.x + 16 : b.x + b.w - 16, y: nameY, "text-anchor": control ? "start" : "end", class: "box-name" }, g).textContent = b.name + " cluster";
+    boxNotes[id] = el("text", { x: b.x + b.w - 16, y: b.pair ? b.y + 28 : b.y + 45, "text-anchor": "end", class: "box-note" }, g);
+  }
+  const edgeEls = {};
+  for (const [id, e] of Object.entries(E)) {
+    const path = el("path", { d: e.d, class: `m-edge ${e.kind}`, "marker-end": "url(#arrow)" }, layers[e.pair || "m"].edge);
+    edgeEls[id] = path;
+  }
+  const nodeEls = {};
+  for (const [id, n] of Object.entries(N)) {
+    const g = el("g", { class: "m-node" + (n.caller ? " caller" : "") }, layers[n.pair || "m"].node);
+    el("rect", { x: n.x, y: n.y, width: n.w, height: n.h, rx: 9 }, g);
+    const small = n.h < 60;
+    g.label = el("text", { x: n.x + n.w / 2, y: n.y + (small ? 25 : 28), "text-anchor": "middle", class: "n-label" }, g);
+    el("text", { x: n.x + n.w / 2, y: n.y + (small ? 43 : 48), "text-anchor": "middle", class: "n-sub" }, g).textContent = n.sub;
+    nodeEls[id] = g;
+  }
+  const overlay = el("g", {}, svg);
+  const faultLayer = el("g", {}, overlay);
+  const badgeLayer = el("g", {}, overlay);
+  const hot = el("path", { class: "m-hot", d: "M0,0" }, overlay);
+  const halo = el("circle", { r: 15, class: "m-dot-halo", cx: -50, cy: -50 }, overlay);
+  const dot = el("circle", { r: 7, class: "m-dot", cx: -50, cy: -50 }, overlay);
+  hot.style.opacity = "0";
+
+  function relabel() {
+    for (const [id, n] of Object.entries(N)) nodeEls[id].label.textContent = typeof n.label === "function" ? n.label() : n.label;
+  }
+
+  // Scenes: the static state of the map for one phase of the narrative
+  function scene(key) {
+    const az = env === "azure";
+    const s = { pairs: { s: "present", i: "present" }, paused: [], faults: [], badges: [], notes: {}, title: "", caption: "" };
+    const absentNote = az ? "not prepared" : "not created yet";
+    const set = (sp, ip) => { s.pairs.s = sp; s.pairs.i = ip; };
+    switch (key) {
+      case "intro":
+        s.title = "The map";
+        s.caption = "Three planes, each in its own cluster. Children read from their parent’s database; APIs never forward requests down the stack.";
+        break;
+      case "flow":
+        set("present", "ghost");
+        break;
+      case "inspect":
+        set(az ? "present" : "absent", "absent");
+        s.title = "Starting point";
+        s.caption = az
+          ? "Bootstrap prepared management and the shared pair. No tenants exist, and no isolated pair has been added."
+          : "Only the management kind cluster exists. The provisioner will create child clusters when tenants need them.";
+        break;
+      case "A": set(az ? "present" : "absent", "absent"); break;
+      case "A-done": case "B-restored": set("present", "absent"); break;
+      case "B-paused":
+        set("present", "absent");
+        s.paused = ["sd-rec"];
+        s.badges = [{ n: "sd-rec", t: "replicas 0", k: "bad" }];
+        break;
+      case "C-prepare": set("present", "absent"); break;
+      case "C-onboard": set("present", az ? "present" : "absent"); break;
+      case "C-cross": case "cleanup": break;
+      case "D": case "E": set("present", "ghost"); break;
+      case "E-access":
+        set("present", "ghost");
+        s.badges = [{ n: "sd-api", t: "ConfigMaps only", k: "good" }];
+        break;
+      case "F-block":
+        set("present", "ghost");
+        s.faults = ["crec-mpg-s"];
+        s.badges = [{ n: "m-api", t: "no new reports" }];
+        break;
+      case "F-restore":
+        set("present", "ghost");
+        s.badges = [{ n: "sc-rec", t: "poll ok", k: "good" }];
+        break;
+      case "G-block": case "G-restart":
+        set("present", "ghost");
+        s.faults = ["drec-cpg-s"];
+        s.badges = [{ n: "sc-pg", t: "latest pending" }, { n: "sd-cm", t: "old version" }];
+        if (key === "G-restart") s.badges.push({ n: "sd-api", t: "new Pod UID" });
+        break;
+      case "G-restore":
+        set("present", "ghost");
+        s.badges = [{ n: "sd-cm", t: "queued-latest", k: "good" }];
+        break;
+      case "H-keys":
+        set("present", "ghost");
+        s.badges = [{ n: "sd-api", t: "one key, whole pair" }];
+        break;
+      case "I-noise":
+        set("present", "ghost");
+        s.badges = [{ n: "sd-redis", t: "shared by pair" }, { n: "sd-api", t: "no rate limit" }];
+        break;
+      case "J-down":
+        set("present", "present");
+        s.paused = ["sd-redis"];
+        s.faults = ["dapi-redis-s"];
+        s.badges = [{ n: "sd-redis", t: "replicas 0", k: "bad" }];
+        break;
+      case "J-restored":
+        set("present", "ghost");
+        s.badges = [{ n: "sd-redis", t: "same PVC", k: "good" }];
+        break;
+      case "K-down":
+        set("present", "ghost");
+        s.paused = ["sc-pg"];
+        s.faults = ["crec-cpg-s", "capi-cpg-s", "drec-cpg-s"];
+        s.badges = [{ n: "sc-pg", t: "replicas 0", k: "bad" }, { n: "m-api", t: "record failed", k: "bad" }];
+        break;
+      case "K-restored":
+        set("present", "ghost");
+        s.badges = [{ n: "m-api", t: "ready", k: "good" }];
+        break;
+      case "L-block":
+        set("present", "ghost");
+        s.faults = ["drec-cm-s"];
+        s.badges = [{ n: "sd-cm", t: "immutable", k: "bad" }, { n: "sc-pg", t: "data failed", k: "bad" }];
+        break;
+      case "L-restored":
+        set("present", "ghost");
+        s.badges = [{ n: "sd-cm", t: "recreated", k: "good" }];
+        break;
+      case "M-interrupt":
+        set("present", "ghost");
+        s.badges = [{ n: "m-prov", t: "restarted", k: "bad" }, { n: "m-pg", t: "interrupted", k: "bad" }];
+        break;
+      case "H":
+        set("present", "ghost");
+        s.badges = [{ n: "sc-pg", t: "new Pod · same PVC", k: "good" }, { n: "sd-redis", t: "new Pod · same PVC", k: "good" }];
+        break;
+    }
+    for (const p of ["s", "i"]) if (s.pairs[p] === "absent") { s.notes[p + "c"] = absentNote; s.notes[p + "d"] = absentNote; }
+    return s;
+  }
+
+  // Flows: ordered steps that move a request across the map
+  const P = { s: "shared", i: "isolated-1" };
+  function dataPull(p, tenant, what) {
+    return [
+      { e: "drec-cpg-" + p, t: `The ${P[p]} data reconciler polls control PostgreSQL for its pair’s desired configuration.` },
+      { e: "drec-cpg-" + p, rev: true, t: `It receives <code>${tenant}</code>: ${what}.` },
+      { e: "drec-cm-" + p, t: `It writes ConfigMap <code>tenant-${tenant}</code> in its own cluster and checks what was stored.` },
+      { e: "drec-cpg-" + p, t: "It reports <code>config_applied</code> through <code>control.report_data</code>. Control now shows <code>data_config.status: applied</code>." },
+    ];
+  }
+  function onboard(p, { tenant, msg, create = false, paused = false }) {
+    const az = env === "azure";
+    const kind = p === "s" ? "shared" : "isolated";
+    const steps = [
+      { e: "opm", t: `The operator sends <code>POST /tenants</code> for <code>${tenant}</code> with <code>isolation: ${kind}</code>. Management answers 202 with an <code>operation_id</code>.` },
+      { e: "mapi-mpg", t: az
+        ? `<code>management.accept_tenant</code> stores the tenant on an available prepared ${kind} pair. Nothing is built, so <code>provisioning_status</code> is already <code>succeeded</code>.`
+        : "<code>management.accept_tenant</code> stores the tenant and a pending operation. Only one operation runs at a time." },
+    ];
+    if (!az && create) {
+      steps.push(
+        { e: "prov-mpg", rev: true, t: "The provisioner claims the pending operation from management PostgreSQL." },
+        { e: "prov-" + p, create: p, t: `Management Radius creates the ${P[p]} control and data kind clusters. Each child gets its own Radius, which deploys that plane’s applications and datastores.` },
+        { e: "prov-mpg", t: "The provisioner marks the pair available and the operation <code>succeeded</code>." },
+      );
+    } else if (!az) {
+      steps.push({ e: "prov-mpg", rev: true, t: `The provisioner completes the operation on the existing ${P[p]} pair. No new clusters are created.` });
+    }
+    steps.push(
+      { e: "crec-mpg-" + p, t: `Within 5 s, the ${P[p]} control reconciler polls management PostgreSQL for tenants placed on its own available pair.` },
+      { e: "crec-mpg-" + p, rev: true, t: `It receives <code>${tenant}</code> with its <code>onboarding_id</code> and initial message <code>${msg}</code>.` },
+      { e: "crec-cpg-" + p, t: "<code>control.ensure_tenant</code> creates the tenant record in control PostgreSQL." },
+      { e: "crec-mpg-" + p, t: "It reports <code>control_record_created</code>. Management now shows <code>onboarding_status: ready</code>. Readiness stops here." },
+    );
+    if (paused) {
+      steps.push({ node: "sd-rec", t: "The shared data reconciler is scaled to 0, so nothing pulls the new record. Control reports data <code>pending</code> and the data API returns 404." });
+    } else {
+      steps.push(...dataPull(p, tenant, `message <code>${msg}</code>, version 1`));
+    }
+    return steps;
+  }
+  function request(p, tenant, inc, last) {
+    return [
+      { e: "app-" + p, t: inc ? `The client sends <code>POST /tenants/${tenant}/counter</code> with the data plane’s own key.` : `The client sends <code>GET /tenants/${tenant}</code> with the data plane’s own key.` },
+      { e: "dapi-cm-" + p, t: "The data API reads the tenant’s local ConfigMap: message, version and <code>onboarding_id</code>. It never queries a parent database." },
+      { e: "dapi-redis-" + p, t: inc ? "Redis <code>INCR</code> on a key scoped by <code>onboarding_id</code> and tenant." : "Redis <code>GET</code> reads the counter without changing it." },
+      { e: "app-" + p, rev: true, t: last || "The response carries message, version and counter." },
+    ];
+  }
+  function config(p, tenant, msg) {
+    return [
+      { e: "opc-" + p, t: `The operator sends <code>PUT /tenants/${tenant}/configuration</code> with message <code>${msg}</code> to control.` },
+      { e: "capi-cpg-" + p, t: "<code>control.update_configuration</code> stores the next desired version and a <code>configuration_updated</code> event. Data status is <code>pending</code> until data reports." },
+      ...dataPull(p, tenant, `message <code>${msg}</code> at the new version`),
+    ];
+  }
+  function controlPoll(first) {
+    return [
+      { e: "crec-mpg-s", t: first },
+      { e: "crec-mpg-s", rev: true, t: "The same tenant rows come back, still carrying each initial message." },
+      { e: "crec-cpg-s", t: "<code>control.ensure_tenant</code> finds each existing record and keeps control’s newer configuration." },
+      { e: "crec-mpg-s", t: "It reports again. The log shows <code>control_poll</code> with <code>succeeded</code> above zero and <code>failed=0</code>; management keeps one <code>control_record_created</code> event per tenant." },
+    ];
+  }
+
+  function flow(key) {
+    const az = env === "azure";
+    switch (key) {
+      case "onboard": return { title: "Onboard a tenant", steps: onboard("s", { tenant: "shared-a", msg: "alpha", create: !az }) };
+      case "onboard-paused": return { title: "B · Readiness without data", steps: onboard("s", { tenant: "shared-b", msg: "bravo", paused: true }) };
+      case "onboard-isolated": return { title: "C · Isolated onboarding", steps: onboard("i", { tenant: "isolated-c", msg: "charlie", create: !az }) };
+      case "data-pull": return { title: "B · Data catches up", steps: [
+        { node: "sd-rec", t: "The data reconciler is back at one replica." },
+        ...dataPull("s", "shared-b", "message <code>bravo</code>, version 1"),
+        ...request("s", "shared-b", false, "Data now returns <code>bravo</code>. <code>shared-b</code> shares <code>shared-a</code>’s pair and clusters."),
+      ] };
+      case "config": return { title: "Change configuration", steps: config("s", "shared-a", "alpha-v2") };
+      case "request": return { title: "Serve a data request", steps: request("s", "shared-a", true) };
+      case "request-get": return { title: "A · Read from data", steps: request("s", "shared-a", false, "Data returns <code>alpha</code>, version 1, counter 0, with the same <code>onboarding_id</code> management and control report.") };
+      case "request-post": return { title: "D · Increment a counter", steps: request("s", "shared-a", true, "Only <code>shared-a</code>’s counter moves. <code>shared-b</code> has its own key.") };
+      case "prepare-isolated": return { title: "C · Prepare isolated capacity", steps: [
+        { node: "m-prov", t: "<code>make bootstrap … --isolated 1</code> adds only that pair’s Azure foundation and runs setup Job <code>prepare-isolated-1</code> in management." },
+        { e: "prov-i", create: "i", t: "Management Radius creates the isolated-1 control and data clusters. Each child’s Radius deploys its applications, PostgreSQL and Redis." },
+        { e: "prov-mpg", t: "The environment reaches <code>stage: available</code>. Isolated admission can now succeed." },
+      ] };
+      case "cross-check": return { title: "C · Ask the wrong pair", steps: [
+        { e: "opc-s", t: "Ask shared control for <code>isolated-c</code>." },
+        { e: "opc-s", rev: true, fail: true, t: "404. That record exists only in isolated-1’s control PostgreSQL." },
+        { e: "app-s", t: "Ask shared data for <code>isolated-c</code>." },
+        { e: "app-s", rev: true, fail: true, t: "404. The shared data cluster has no ConfigMap for it." },
+        { e: "opc-i", t: "Ask isolated-1 control for <code>shared-a</code>." },
+        { e: "opc-i", rev: true, fail: true, t: "404." },
+        { e: "app-i", t: "Ask isolated-1 data for <code>shared-a</code>." },
+        { e: "app-i", rev: true, fail: true, t: "404. Each pair serves only its own tenants." },
+      ] };
+      case "control-poll": return { title: "Control polls again", steps: controlPoll("The control reconciler polls management PostgreSQL again, as it does every 5 s.") };
+      case "timeline": return { title: "E · Timeline pages", steps: [
+        { e: "opc-s", t: "<code>GET /tenants/shared-a?limit=2</code> asks control for two timeline events." },
+        { e: "capi-cpg-s", t: "Control reads the configuration and one page of events in a single read-only snapshot." },
+        { e: "opc-s", rev: true, t: "The response includes <code>next_after_event_id</code>. Pass it as <code>after_event_id</code> until it is <code>null</code>." },
+      ] };
+      case "reject": return { title: "E · Rejected requests", steps: [
+        { e: "opm", t: "A request with no key, then one with a wrong <code>X-Demo-Key</code>." },
+        { e: "opm", rev: true, fail: true, t: "401 and 401. The key check runs before the handler touches the database." },
+        { e: "opm", t: "A POST whose <code>tenant_id</code> is <code>Bad ID</code>." },
+        { e: "opm", rev: true, fail: true, t: "422. Validation fails and nothing is stored." },
+        { e: "opm", t: "A second POST for <code>shared-a</code> with a different message." },
+        { e: "mapi-mpg", t: "<code>management.accept_tenant</code> finds the existing tenant." },
+        { e: "opm", rev: true, fail: true, t: "409 <code>duplicate_tenant</code>. No new operation; control’s configuration and the counter are untouched." },
+      ] };
+      case "access": return { title: "E · Data API permissions", steps: [
+        { e: "app-s", t: "A client calls the data API with the data plane’s key." },
+        { e: "dapi-cm-s", t: "Service account <code>data-api-runtime</code> may get ConfigMaps: <code>yes</code>." },
+        { node: "sd-api", t: "It may not get <code>secret/data-reconciler-runtime</code> or list Secrets: <code>no</code>, <code>no</code>. Database credentials stay with the reconciler." },
+      ] };
+      case "fault-management": return { title: "F · Management link blocked", steps: [
+        { e: "crec-mpg-s", stop: true, fail: true, t: "The control reconciler’s connection to management PostgreSQL is blocked. It logs <code>management_poll_failed</code> and retries every 5 s." },
+        ...config("s", "shared-a", "without-management"),
+        ...request("s", "shared-a", true, "Data serves <code>without-management</code> and the counter still increments."),
+        { node: "m-api", t: "Management’s response for <code>shared-a</code> does not change: no reports arrive while the link is cut." },
+      ] };
+      case "fault-control": return { title: "G · Control link blocked", steps: [
+        { e: "opc-s", t: "PUT message <code>queued-first</code> to control." },
+        { e: "capi-cpg-s", t: "Stored as the next desired version." },
+        { e: "opc-s", t: "PUT message <code>queued-latest</code>." },
+        { e: "capi-cpg-s", t: "Stored as the version after that. Control reports the latest version <code>pending</code>." },
+        { e: "drec-cpg-s", stop: true, fail: true, t: "The data reconciler cannot reach control PostgreSQL and logs <code>control_poll_failed</code>. The ConfigMap keeps the version applied before the outage." },
+        ...request("s", "shared-a", true, "Data returns the pre-outage message and version. The counter still increments."),
+      ] };
+      case "restart-data-api": return { title: "G · Restart the data API", steps: [
+        { node: "sd-api", t: "<code>rollout restart deployment/data-api</code> replaces the API Pod while the link stays blocked." },
+        ...request("s", "shared-a", false, "The new Pod returns the old applied message and version with the current counter."),
+      ] };
+      case "catch-up": return { title: "G · Data catches up", steps: [
+        { e: "drec-cpg-s", t: "The link is restored. The next data poll reaches control PostgreSQL." },
+        { e: "drec-cpg-s", rev: true, t: "Only the current desired version comes back: <code>queued-latest</code>." },
+        { e: "drec-cm-s", t: "The ConfigMap jumps straight to <code>queued-latest</code>." },
+        { e: "drec-cpg-s", t: "It reports <code>config_applied</code> for that version only. <code>queued-first</code> never gets one." },
+      ] };
+      case "persistence": return { title: "Datastore persistence", steps: [
+        { node: "sc-pg", t: "<code>rollout restart statefulset/postgres</code>: a new Pod mounts the same <code>postgres-data</code> PVC." },
+        { node: "sd-redis", t: "The same for Redis and its <code>redis-data</code> PVC." },
+        ...request("s", "shared-a", false, "Responses match the ones captured before the restarts."),
+      ] };
+      case "keys": return { title: "H · One key, whole pair", steps: [
+        { e: "app-s", t: "The client reads <code>shared-a</code> with the shared data key." },
+        { e: "app-s", rev: true, t: "200. The key names a plane instance, not a tenant." },
+        { e: "app-s", t: "The same key sends <code>POST /tenants/shared-b/counter</code>." },
+        { e: "dapi-redis-s", t: "Redis increments <code>shared-b</code>’s counter. Nothing in the request identifies a tenant." },
+        { e: "app-s", rev: true, t: "200: one key read one tenant and changed another." },
+        { e: "opc-s", t: "Now the data key is sent to the control API." },
+        { e: "opc-s", rev: true, fail: true, t: "401. Keys do not cross planes, and a shared key gets 401 from isolated-1 too." },
+      ] };
+      case "noise": return { title: "I · Noisy neighbor", steps: [
+        { e: "app-s", t: "Four workers send <code>POST /tenants/shared-b/counter</code> for 60 s." },
+        { e: "dapi-redis-s", t: "Every request lands on the same data API and the same Redis as <code>shared-a</code>. There are no rate limits or quotas." },
+        ...request("s", "shared-a", false, "<code>shared-a</code> reads keep working. Record their p50, p95 and errors against the baseline."),
+        ...config("s", "shared-a", "alpha-under-load").slice(0, 2),
+        { e: "drec-cm-s", t: "The data reconciler still applies the change within a few 5 s polls, while the noise continues." },
+        { node: "sd-redis", t: "Afterwards, <code>shared-b</code>’s counter rose by exactly the number of 200 responses, and <code>shared-a</code>’s did not move." },
+      ] };
+      case "redis-down": return { title: "J · Redis stopped", steps: [
+        { e: "app-s", t: "A client reads <code>shared-a</code> while the shared data Redis has 0 replicas." },
+        { e: "dapi-cm-s", t: "The ConfigMap read still works." },
+        { e: "dapi-redis-s", stop: true, fail: true, t: "The counter read cannot reach Redis." },
+        { e: "app-s", rev: true, fail: true, t: "503 <code>local_counter_unavailable</code>, even for GET. Every tenant on the shared pair is affected." },
+        { e: "app-i", t: "The isolated tenant uses its own Redis." },
+        { e: "dapi-redis-i", t: "Its counter read succeeds." },
+        { e: "app-i", rev: true, t: "200. The outage stops at the pair boundary." },
+      ] };
+      case "redis-back": return { title: "J · Redis restored", steps: [
+        { node: "sd-redis", t: "Redis scales back to 1 on its retained <code>redis-data</code> PVC and replays its append-only file." },
+        ...request("s", "shared-a", false, "Responses match the ones saved before the outage. The rejected POST did not count."),
+      ] };
+      case "record-fail": return { title: "K · Control record fails", steps: [
+        { e: "opm", t: "The operator accepts <code>shared-k</code> while shared control PostgreSQL has 0 replicas." },
+        { e: "mapi-mpg", t: "Management stores the tenant. Provisioning never touches control PostgreSQL, so it still succeeds." },
+        { e: "crec-mpg-s", t: "The control reconciler polls management and finds <code>shared-k</code>." },
+        { e: "crec-mpg-s", rev: true, t: "It receives the tenant row." },
+        { e: "crec-cpg-s", stop: true, fail: true, t: "<code>control.ensure_tenant</code> cannot reach control PostgreSQL." },
+        { e: "crec-mpg-s", fail: true, t: "It reports <code>control_record_failed</code> once. Management shows <code>onboarding_status: pending</code> and <code>control_record.status: failed</code>, never a failed tenant." },
+        ...request("s", "shared-a", false, "Data still serves existing tenants from its ConfigMaps and Redis. Control’s API returns 503."),
+      ] };
+      case "record-retry": return { title: "K · Automatic retry", steps: [
+        { node: "sc-pg", t: "Control PostgreSQL scales back to 1." },
+        { e: "crec-mpg-s", t: "The next poll finds <code>shared-k</code> again. No one resubmits anything." },
+        { e: "crec-cpg-s", t: "<code>control.ensure_tenant</code> now creates the record." },
+        { e: "crec-mpg-s", t: "It reports <code>control_record_created</code>. The tenant becomes <code>ready</code>, with one failed and one created event." },
+        ...dataPull("s", "shared-k", "message <code>kilo</code>, version 1"),
+      ] };
+      case "write-block": return { title: "L · ConfigMap write blocked", steps: [
+        { node: "sd-cm", t: "The operator marks <code>tenant-shared-a</code> immutable. Kubernetes will now reject changes to it." },
+        { e: "opc-s", t: "PUT message <code>blocked-write</code> to control." },
+        { e: "capi-cpg-s", t: "Control stores the next desired version." },
+        { e: "drec-cpg-s", t: "The data reconciler polls control PostgreSQL." },
+        { e: "drec-cpg-s", rev: true, t: "It receives <code>blocked-write</code> at the new version." },
+        { e: "drec-cm-s", stop: true, fail: true, t: "Kubernetes rejects the write. The reconciler logs <code>config_write_failed</code>." },
+        { e: "drec-cpg-s", fail: true, t: "It reports <code>config_apply_failed</code>. Control shows <code>data_config.status: failed</code>." },
+        ...request("s", "shared-a", true, "Data keeps the previous message and version, and the counter still increments. <code>shared-b</code> stays applied."),
+      ] };
+      case "write-restore": return { title: "L · Recreate the ConfigMap", steps: [
+        { node: "sd-cm", t: "The operator deletes only <code>tenant-shared-a</code>. Data may return 404 until the next poll." },
+        { e: "drec-cpg-s", t: "The next poll reads the current desired version." },
+        { e: "drec-cm-s", t: "The reconciler recreates the ConfigMap with <code>blocked-write</code>, mutable again." },
+        { e: "drec-cpg-s", t: "It reports <code>config_applied</code>. Control shows <code>applied</code>." },
+        ...request("s", "shared-a", false, "Same <code>onboarding_id</code>, so the counter is unchanged."),
+      ] };
+      case "interrupt": return { title: "M · Provisioner interrupted", steps: [
+        { e: "opm", t: "The operator accepts <code>shared-m</code>." },
+        { e: "mapi-mpg", t: "Management stores the tenant and a pending operation." },
+        { e: "prov-mpg", rev: true, t: "The provisioner claims it; the status becomes <code>running</code>." },
+        { node: "m-prov", t: "<code>rollout restart deployment/provisioner</code> stops it mid-operation." },
+        { e: "prov-mpg", fail: true, t: "On start-up the new provisioner marks the running operation <code>interrupted</code>, with <code>provisioner_restarted</code> and the stage it reached." },
+        { e: "opm", t: "The operator repeats the same POST." },
+        { e: "opm", rev: true, fail: true, t: "409. Nothing replays the operation, and there is no retry or delete API. Recovery is whole-demo cleanup." },
+      ] };
+      default: return { title: "", steps: [] };
+    }
+  }
+
+  // Player
+  const ui = {
+    prev: document.getElementById("btn-prev"),
+    play: document.getElementById("btn-play"),
+    next: document.getElementById("btn-next"),
+    name: document.getElementById("flow-name"),
+    count: document.getElementById("flow-count"),
+    caption: document.getElementById("caption"),
+  };
+  const st = { scene: scene("intro"), sceneKey: "intro", flowKey: "none", flow: { title: "", steps: [] }, i: -1, playing: false, raf: 0, timer: 0 };
+
+  function badge({ n, t, k }) {
+    const node = N[n];
+    const w = t.length * 7.6 + 16;
+    const g = el("g", { class: "m-badge" + (k ? " " + k : "") }, badgeLayer);
+    el("rect", { x: node.x + node.w - w, y: node.y - 27, width: w, height: 22, rx: 6 }, g);
+    el("text", { x: node.x + node.w - w / 2, y: node.y - 11.5, "text-anchor": "middle" }, g).textContent = t;
+  }
+  // Where a blocked link is drawn cut: inside the gap between plane rows
+  const cutAt = (id) => (id.startsWith("drec-cpg") ? 0.66 : 0.5);
+  function faultMark(id) {
+    const path = edgeEls[id];
+    const pt = path.getPointAtLength(path.getTotalLength() * cutAt(id));
+    const g = el("g", { class: "m-fault", transform: `translate(${pt.x},${pt.y})` }, faultLayer);
+    el("circle", { r: 13 }, g);
+    el("path", { d: "M-5,-5 L5,5 M5,-5 L-5,5" }, g);
+  }
+
+  function render() {
+    const sc = st.scene, steps = st.flow.steps, i = st.i;
+    const pairState = { ...sc.pairs };
+    steps.forEach((s, j) => { if (s.create && j < i) pairState[s.create] = "present"; });
+    if (steps[i] && steps[i].create) pairState[steps[i].create] = "creating";
+    for (const p of ["s", "i"]) groups[p].setAttribute("class", "m-pair " + pairState[p]);
+    for (const [id, t] of Object.entries(boxNotes)) {
+      const pair = BOXES[id].pair;
+      t.textContent = pair && pairState[pair] === "creating" ? "creating…" : (pair && pairState[pair] === "absent" ? sc.notes[id] || "" : "");
+    }
+    const trail = new Set();
+    steps.forEach((s, j) => { if (j < i && s.e && !s.fail) trail.add(s.e); });
+    for (const [id, path] of Object.entries(edgeEls)) {
+      const faulted = sc.faults.includes(id);
+      path.classList.toggle("faulted", faulted);
+      path.classList.toggle("trail", trail.has(id) && !faulted);
+      path.setAttribute("marker-end", faulted ? "url(#arrow-fault)" : trail.has(id) ? "url(#arrow-trail)" : "url(#arrow)");
+    }
+    const lit = new Set();
+    const cur = steps[i];
+    if (cur) {
+      if (cur.node) lit.add(cur.node);
+      if (cur.e) { lit.add(E[cur.e].from); if (E[cur.e].to && !cur.stop) lit.add(E[cur.e].to); }
+    }
+    for (const [id, g] of Object.entries(nodeEls)) {
+      g.classList.toggle("lit", lit.has(id));
+      g.classList.toggle("paused", sc.paused.includes(id));
+      g.classList.remove("pulse");
+    }
+    faultLayer.replaceChildren();
+    sc.faults.forEach(faultMark);
+    badgeLayer.replaceChildren();
+    sc.badges.forEach(badge);
+
+    ui.name.textContent = st.flow.steps.length ? st.flow.title : (sc.title || "The map");
+    ui.count.textContent = steps.length ? `${Math.max(i + 1, 0)} / ${steps.length}` : "";
+    ui.caption.innerHTML = cur ? cur.t : (steps.length ? "Press play to follow this step by step." : sc.caption || "Scroll the explanation or press play on any step.");
+    ui.prev.disabled = !steps.length || i <= 0;
+    ui.next.disabled = !steps.length || i >= steps.length - 1;
+    ui.play.disabled = !steps.length;
+    const atEnd = steps.length && i >= steps.length - 1 && !st.playing;
+    ui.play.innerHTML = `<svg><use href="#${st.playing ? "i-pause" : atEnd ? "i-replay" : "i-play"}"/></svg>`;
+    ui.play.setAttribute("aria-label", st.playing ? "Pause" : atEnd ? "Replay" : "Play");
+  }
+
+  function stopMotion() {
+    cancelAnimationFrame(st.raf);
+    clearTimeout(st.timer);
+  }
+  function hideDot() {
+    dot.setAttribute("cx", -50); dot.setAttribute("cy", -50);
+    halo.setAttribute("cx", -50); halo.setAttribute("cy", -50);
+    hot.style.opacity = "0";
+  }
+  const plainLength = (html) => html.replace(/<[^>]+>/g, "").length;
+
+  function travel(step, animate, done) {
+    if (!step.e) {
+      hideDot();
+      const g = nodeEls[step.node];
+      void g.getBoundingClientRect();
+      if (animate) g.classList.add("pulse");
+      done();
+      return;
+    }
+    const path = edgeEls[step.e];
+    const len = path.getTotalLength();
+    const end = step.stop ? cutAt(step.e) : 1;
+    hot.setAttribute("d", path.getAttribute("d"));
+    hot.classList.toggle("fail", !!step.fail);
+    dot.classList.toggle("fail", !!step.fail);
+    halo.classList.toggle("fail", !!step.fail);
+    hot.style.opacity = "1";
+    const duration = animate && !reduceMotion.matches ? Math.max(700, Math.min(1500, len * 2.4)) : 0;
+    const t0 = performance.now();
+    const frame = (now) => {
+      const k = duration ? Math.min(1, (now - t0) / duration) : 1;
+      const eased = 1 - Math.pow(1 - k, 4);
+      const pos = eased * end;
+      const at = step.rev ? len * (1 - pos) : len * pos;
+      const pt = path.getPointAtLength(at);
+      dot.setAttribute("cx", pt.x); dot.setAttribute("cy", pt.y);
+      halo.setAttribute("cx", pt.x); halo.setAttribute("cy", pt.y);
+      hot.style.strokeDasharray = step.rev ? `0 ${len * (1 - pos)} ${len * pos} ${len}` : `${len * pos} ${len}`;
+      if (k < 1) st.raf = requestAnimationFrame(frame);
+      else done();
+    };
+    st.raf = requestAnimationFrame(frame);
+  }
+
+  function show(i, animate) {
+    stopMotion();
+    st.i = i;
+    render();
+    const step = st.flow.steps[i];
+    if (!step) { hideDot(); return; }
+    travel(step, animate, () => {
+      if (!st.playing) return;
+      if (st.i >= st.flow.steps.length - 1) { st.playing = false; render(); return; }
+      const dwell = Math.min(4800, 1100 + plainLength(step.t) * 24);
+      st.timer = setTimeout(() => show(st.i + 1, true), dwell);
+    });
+  }
+  function play() {
+    if (!st.flow.steps.length) return;
+    st.playing = true;
+    const start = st.i >= st.flow.steps.length - 1 ? 0 : st.i + 1;
+    show(start, true);
+  }
+  function pause() { st.playing = false; stopMotion(); render(); }
+
+  ui.play.addEventListener("click", () => (st.playing ? pause() : play()));
+  ui.prev.addEventListener("click", () => { st.playing = false; show(Math.max(0, st.i - 1), false); });
+  ui.next.addEventListener("click", () => { st.playing = false; show(Math.min(st.flow.steps.length - 1, st.i + 1), true); });
+
+  function load(sceneKey, flowKey) {
+    stopMotion();
+    hideDot();
+    st.playing = false;
+    st.sceneKey = sceneKey;
+    st.flowKey = flowKey;
+    st.scene = scene(sceneKey);
+    st.flow = flow(flowKey);
+    st.i = -1;
+    render();
+  }
+
+  // Narrative: the phase nearest the reading line drives the map
+  let active = null;
+  const visible = (p) => p.offsetParent !== null;
+  function activate(phase, { autoplay }) {
+    if (active) active.classList.remove("is-active");
+    active = phase;
+    phase.classList.add("is-active");
+    load(phase.dataset.scene, phase.dataset.flow || "none");
+    if (autoplay && !reduceMotion.matches && st.flow.steps.length) {
+      st.timer = setTimeout(play, 450);
+    }
+  }
+  const phases = () => [...document.querySelectorAll(".phase[data-scene]")].filter(visible);
+  function readingLine() {
+    return innerWidth <= 1080 ? innerHeight * 0.78 : innerHeight * 0.42;
+  }
+  function pick() {
+    const lineY = readingLine();
+    let best = null;
+    for (const p of phases()) {
+      const r = p.getBoundingClientRect();
+      if (r.top <= lineY) best = p;
+    }
+    return best || phases()[0];
+  }
+  let ticking = false;
+  addEventListener("scroll", () => {
+    if (ticking) return;
+    ticking = true;
+    requestAnimationFrame(() => {
+      ticking = false;
+      const p = pick();
+      if (p && p !== active) activate(p, { autoplay: true });
+    });
+  }, { passive: true });
+
+  document.querySelectorAll("[data-play]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const phase = btn.closest(".phase");
+      if (phase !== active) activate(phase, { autoplay: false });
+      st.i = -1;
+      play();
+    });
+  });
+
+  // Environment switch
+  function setEnv(next, { persist = true } = {}) {
+    env = next === "local" ? "local" : "azure";
+    document.body.dataset.env = env;
+    document.querySelectorAll("[data-set-env]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.setEnv === env)));
+    if (persist) try { localStorage.setItem("plane-demo-env", env); } catch (_) { /* storage unavailable */ }
+    relabel();
+    const p = active && visible(active) ? active : pick();
+    if (p) activate(p, { autoplay: false });
+  }
+  document.querySelectorAll("[data-set-env]").forEach((b) => b.addEventListener("click", () => setEnv(b.dataset.setEnv)));
+
+  // Copy buttons on every command block
+  document.querySelectorAll("pre").forEach((pre) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "copy";
+    btn.setAttribute("aria-label", "Copy commands");
+    btn.innerHTML = '<svg><use href="#i-copy"/></svg>';
+    btn.addEventListener("click", async () => {
+      const code = pre.querySelector("code").cloneNode(true);
+      code.querySelectorAll(".c").forEach((c) => c.remove());
+      const text = code.textContent.replace(/[ \t]+$/gm, "");
+      try {
+        await navigator.clipboard.writeText(text);
+        btn.dataset.copied = "true";
+        btn.innerHTML = '<svg><use href="#i-check"/></svg>';
+        btn.setAttribute("aria-label", "Copied");
+      } catch (_) {
+        const range = document.createRange();
+        range.selectNodeContents(pre.querySelector("code"));
+        getSelection().removeAllRanges();
+        getSelection().addRange(range);
+        btn.setAttribute("aria-label", "Selected; press Ctrl+C or ⌘C to copy");
+      }
+      setTimeout(() => {
+        btn.dataset.copied = "false";
+        btn.innerHTML = '<svg><use href="#i-copy"/></svg>';
+        btn.setAttribute("aria-label", "Copy commands");
+      }, 1800);
+    });
+    const wrap = document.createElement("div");
+    wrap.className = "code";
+    if (pre.dataset.env) { wrap.dataset.env = pre.dataset.env; pre.removeAttribute("data-env"); }
+    pre.replaceWith(wrap);
+    wrap.append(pre, btn);
+  });
+
+  let initial = new URLSearchParams(location.search).get("env");
+  if (!initial) try { initial = localStorage.getItem("plane-demo-env"); } catch (_) { /* storage unavailable */ }
+  setEnv(initial || "azure", { persist: false });
+})();
+</script>
+</body>
+</html>
